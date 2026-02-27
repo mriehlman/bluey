@@ -1,0 +1,131 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Team {
+  id          Int               @id
+  name        String?
+  code        String?
+  city        String?
+  homeGames   Game[]            @relation("HomeTeam")
+  awayGames   Game[]            @relation("AwayTeam")
+  playerStats PlayerGameStat[]
+}
+
+model Game {
+  id           String            @id @default(cuid())
+  sourceGameId Int               @unique
+  date         DateTime          @db.Date
+  season       Int
+  stage        Int
+  league       String
+  homeTeamId   Int
+  awayTeamId   Int
+  homeScore    Int
+  awayScore    Int
+  homeTeam     Team              @relation("HomeTeam", fields: [homeTeamId], references: [id])
+  awayTeam     Team              @relation("AwayTeam", fields: [awayTeamId], references: [id])
+  playerStats  PlayerGameStat[]
+
+  @@index([date])
+  @@index([season, date])
+  @@index([homeTeamId, date])
+  @@index([awayTeamId, date])
+}
+
+model Player {
+  id        Int               @id
+  firstname String?
+  lastname  String?
+  stats     PlayerGameStat[]
+}
+
+model PlayerGameStat {
+  id        String @id @default(cuid())
+  gameId    String
+  playerId  Int
+  teamId    Int
+  minutes   Int
+  points    Int
+  assists   Int
+  rebounds  Int
+  steals    Int
+  blocks    Int
+  turnovers Int
+  game      Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  player    Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  team      Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([gameId, playerId])
+  @@index([gameId])
+  @@index([playerId])
+  @@index([teamId])
+}
+
+model NightEvent {
+  id       String   @id @default(cuid())
+  date     DateTime @db.Date
+  season   Int
+  eventKey String
+  value    Boolean  @default(true)
+  meta     Json?
+
+  @@unique([date, eventKey])
+  @@index([season, date])
+  @@index([eventKey, date])
+}
+
+model Pattern {
+  id               String       @id @default(cuid())
+  patternKey       String       @unique
+  eventKeys        String[]
+  legs             Int
+  occurrences      Int
+  seasons          Int
+  perSeason        Json
+  longestGapDays   Int?
+  lastHitDate      DateTime?    @db.Date
+  stabilityScore   Float?
+  rarityScore      Float?
+  balanceScore     Float?
+  recencyScore     Float?
+  overallScore     Float?
+  createdAt        DateTime     @default(now())
+  hits             PatternHit[]
+
+  @@index([legs, occurrences])
+  @@index([overallScore])
+}
+
+model PatternHit {
+  id        String   @id @default(cuid())
+  patternId String
+  date      DateTime @db.Date
+  season    Int
+  meta      Json?
+  pattern   Pattern  @relation(fields: [patternId], references: [id], onDelete: Cascade)
+
+  @@unique([patternId, date])
+  @@index([date])
+}
+
+model OrphanPlayerStat {
+  id           String   @id @default(cuid())
+  sourceGameId Int
+  season       Int?
+  stage        Int?
+  league       String?
+  teamId       Int
+  playerId     Int?
+  reason       String
+  createdAt    DateTime @default(now())
+
+  @@index([sourceGameId])
+  @@index([reason])
+  @@index([season])
+}

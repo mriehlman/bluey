@@ -1,0 +1,32 @@
+{
+  "name": "bluey",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "prisma:migrate": "bunx prisma migrate dev",
+    "ingest:games": "bun run src/cli/index.ts ingest:games",
+    "ingest:playerstats": "bun run src/cli/index.ts ingest:playerstats",
+    "stats:player": "bun run src/cli/index.ts stats:player",
+    "stats:team": "bun run src/cli/index.ts stats:team",
+    "build:nightly-events": "bun run src/cli/index.ts build:nightly-events",
+    "search:patterns": "bun run src/cli/index.ts search:patterns",
+    "patterns:explain": "bun run src/cli/index.ts patterns:explain",
+    "patterns:rank": "bun run src/cli/index.ts patterns:rank",
+    "report:coverage": "bun run src/cli/index.ts report:coverage",
+    "report:events": "bun run src/cli/index.ts report:events",
+    "test:events": "bun run src/tests/testEvents.ts",
+    "test:ingest-shapes": "bun run src/tests/testIngestShapes.ts",
+    "profile:player": "bun run src/cli/index.ts profile:player",
+    "profile:team": "bun run src/cli/index.ts profile:team"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.4.1"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "prisma": "^6.4.1",
+    "typescript": "^5.7.3"
+  }
+}
