@@ -1,6 +1,6 @@
 import { prisma } from "../db/prisma.js";
 import { CATALOG } from "./eventCatalog.js";
-import type { NightContext } from "./eventCatalog.js";
+import type { NightContext, TeamAgg } from "./eventCatalog.js";
 
 export async function buildNightEvents(): Promise<void> {
   const dates = await prisma.game.findMany({
@@ -10,6 +10,12 @@ export async function buildNightEvents(): Promise<void> {
   });
 
   console.log(`Found ${dates.length} distinct game dates`);
+
+  const aggCount = await prisma.nightTeamAggregate.count();
+  const useAggregates = aggCount > 0;
+  if (useAggregates) {
+    console.log(`Using precomputed NightTeamAggregate (${aggCount} rows)`);
+  }
 
   let totalEvents = 0;
   let nightsWithEvents = 0;
@@ -35,7 +41,22 @@ export async function buildNightEvents(): Promise<void> {
 
     const dateStr = date.toISOString().slice(0, 10);
 
-    const ctx: NightContext = { date: dateStr, season, games, stats };
+    let teamAggregates: TeamAgg[] | undefined;
+    if (useAggregates) {
+      const rows = await prisma.nightTeamAggregate.findMany({ where: { date } });
+      teamAggregates = rows.map((r) => ({
+        teamId: r.teamId,
+        points: r.points,
+        rebounds: r.rebounds,
+        assists: r.assists,
+        steals: r.steals,
+        blocks: r.blocks,
+        turnovers: r.turnovers,
+        minutes: r.minutes,
+      }));
+    }
+
+    const ctx: NightContext = { date: dateStr, season, games, stats, teamAggregates };
 
     const hits: { date: Date; season: number; eventKey: string; meta: unknown }[] = [];
 

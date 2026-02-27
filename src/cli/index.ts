@@ -3,11 +3,17 @@ import { ingestPlayerStats } from "../ingest/playerstats.js";
 import { getPlayerTotals } from "../stats/playerRollup.js";
 import { getTeamTotals } from "../stats/teamRollup.js";
 import { buildNightEvents } from "../features/buildNightEvents.js";
+import { buildNightAggregates } from "../features/buildNightAggregates.js";
+import { explainNight } from "../features/explainNight.js";
+import { buildNights } from "../features/buildNights.js";
 import { searchPatterns } from "../patterns/searchPatterns.js";
 import { explainPattern } from "../patterns/explain.js";
 import { rankPatterns } from "../patterns/rank.js";
+import { dedupePatterns } from "../patterns/dedupe.js";
+import { watchlistAdd, watchlistList, watchlistRemove, checkLatest } from "../patterns/watchlist.js";
 import { coverageReport } from "../reports/coverage.js";
 import { eventCoverageReport } from "../reports/eventCoverage.js";
+import { aggregateCoverageReport } from "../reports/aggregateCoverage.js";
 import { playerProfile } from "../profiles/playerProfile.js";
 import { teamProfile } from "../profiles/teamProfile.js";
 import type { RollupFilters } from "../stats/filters.js";
@@ -100,6 +106,18 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     await buildNightEvents();
   },
 
+  "build:night-aggregates": async (args) => {
+    await buildNightAggregates(args);
+  },
+
+  "events:explain": async (args) => {
+    await explainNight(args);
+  },
+
+  "build:nights": async (args) => {
+    await buildNights(args);
+  },
+
   "search:patterns": async (args) => {
     const flags = parseFlags(args);
     const overrides: Partial<PatternFilterConfig> = {};
@@ -119,12 +137,36 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     await rankPatterns(args);
   },
 
+  "patterns:dedupe": async (args) => {
+    await dedupePatterns(args);
+  },
+
+  "patterns:check-latest": async (args) => {
+    await checkLatest(args);
+  },
+
+  "watchlist:add": async (args) => {
+    await watchlistAdd(args);
+  },
+
+  "watchlist:list": async () => {
+    await watchlistList();
+  },
+
+  "watchlist:remove": async (args) => {
+    await watchlistRemove(args);
+  },
+
   "report:coverage": async () => {
     await coverageReport();
   },
 
   "report:events": async () => {
     await eventCoverageReport();
+  },
+
+  "report:aggregates": async () => {
+    await aggregateCoverageReport();
   },
 
   "profile:player": async (args) => {
