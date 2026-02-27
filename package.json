@@ -25,7 +25,6 @@
     "report:coverage": "bun run src/cli/index.ts report:coverage",
     "report:events": "bun run src/cli/index.ts report:events",
     "report:aggregates": "bun run src/cli/index.ts report:aggregates",
-    "report:aggregates": "bun run src/cli/index.ts report:aggregates",
     "test:events": "bun run src/tests/testEvents.ts",
     "test:ingest-shapes": "bun run src/tests/testIngestShapes.ts",
     "profile:player": "bun run src/cli/index.ts profile:player",
