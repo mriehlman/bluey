@@ -20,7 +20,9 @@ export async function buildNightEvents(): Promise<void> {
   let totalEvents = 0;
   let nightsWithEvents = 0;
 
-  for (const { date } of dates) {
+  for (let i = 0; i < dates.length; i++) {
+    const { date } = dates[i];
+
     const games = await prisma.game.findMany({
       where: { date },
       include: { homeTeam: true, awayTeam: true },
@@ -44,16 +46,18 @@ export async function buildNightEvents(): Promise<void> {
     let teamAggregates: TeamAgg[] | undefined;
     if (useAggregates) {
       const rows = await prisma.nightTeamAggregate.findMany({ where: { date } });
-      teamAggregates = rows.map((r) => ({
-        teamId: r.teamId,
-        points: r.points,
-        rebounds: r.rebounds,
-        assists: r.assists,
-        steals: r.steals,
-        blocks: r.blocks,
-        turnovers: r.turnovers,
-        minutes: r.minutes,
-      }));
+      if (rows.length > 0) {
+        teamAggregates = rows.map((r) => ({
+          teamId: r.teamId,
+          points: r.points,
+          rebounds: r.rebounds,
+          assists: r.assists,
+          steals: r.steals,
+          blocks: r.blocks,
+          turnovers: r.turnovers,
+          minutes: r.minutes,
+        }));
+      }
     }
 
     const ctx: NightContext = { date: dateStr, season, games, stats, teamAggregates };
@@ -72,11 +76,43 @@ export async function buildNightEvents(): Promise<void> {
       }
     }
 
+    const catalogHitCount = hits.length;
+
+    // Infra: aggregate completeness
+    if (useAggregates) {
+      if (teamAggregates) {
+        hits.push({
+          date,
+          season,
+          eventKey: "AGGREGATES_PRESENT",
+          meta: { teamCount: teamAggregates.length },
+        });
+      } else {
+        hits.push({
+          date,
+          season,
+          eventKey: "AGGREGATES_MISSING",
+          meta: { reason: "no_rows_for_date" },
+        });
+      }
+    }
+
+    // Infra: score completeness
+    const scoredGameCount = games.filter(
+      (g) => g.homeScore != null && g.awayScore != null,
+    ).length;
+    hits.push({
+      date,
+      season,
+      eventKey: "SCORES_PRESENT",
+      meta: { scoredGameCount, gameCount: games.length },
+    });
+
     hits.push({
       date,
       season,
       eventKey: "NIGHT_PROCESSED",
-      meta: { gameCount: games.length, statCount: stats.length, eventHits: hits.length },
+      meta: { gameCount: games.length, statCount: stats.length, eventHits: catalogHitCount },
     });
 
     if (stats.length > 0) {
@@ -103,7 +139,7 @@ export async function buildNightEvents(): Promise<void> {
       totalEvents += result.count;
     }
 
-    if (dates.indexOf({ date }) % 50 === 0) {
+    if (i % 50 === 0) {
       process.stdout.write(".");
     }
   }

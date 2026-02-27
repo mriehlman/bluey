@@ -81,6 +81,15 @@ export function countTeams(
   return { count: matching.length, matching };
 }
 
+// ── Score-safe context ──
+
+export function withScoredGames(ctx: NightContext): NightContext {
+  const scored = ctx.games.filter(
+    (g) => g.homeScore != null && g.awayScore != null,
+  );
+  return { ...ctx, games: scored };
+}
+
 // ── Score-based helpers (work on Game rows, not aggregates) ──
 
 export function teamsScoring(
@@ -90,6 +99,7 @@ export function teamsScoring(
   const teams: number[] = [];
   let maxScore = 0;
   for (const g of ctx.games) {
+    if (g.homeScore == null || g.awayScore == null) continue;
     if (g.homeScore >= minScore) teams.push(g.homeTeamId);
     if (g.awayScore >= minScore) teams.push(g.awayTeamId);
     maxScore = Math.max(maxScore, g.homeScore, g.awayScore);

@@ -30,9 +30,17 @@ export async function buildNights(args: string[] = []): Promise<void> {
 
   console.log(`  Found ${nightProcessedEvents.length} NIGHT_PROCESSED events`);
 
+  const INFRA_EVENTS = [
+    "NIGHT_PROCESSED",
+    "STATS_PRESENT",
+    "SCORES_PRESENT",
+    "AGGREGATES_PRESENT",
+    "AGGREGATES_MISSING",
+  ];
+
   const catalogEvents = await prisma.nightEvent.findMany({
     where: {
-      eventKey: { notIn: ["NIGHT_PROCESSED", "STATS_PRESENT"] },
+      eventKey: { notIn: INFRA_EVENTS },
       ...(season != null ? { season } : {}),
     },
     select: { date: true },
