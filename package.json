@@ -8,6 +8,11 @@
     "prisma:migrate": "bunx prisma migrate dev",
     "ingest:games": "bun run src/cli/index.ts ingest:games",
     "ingest:playerstats": "bun run src/cli/index.ts ingest:playerstats",
+    "sync:games": "bun run src/cli/index.ts sync:games",
+    "sync:stats": "bun run src/cli/index.ts sync:stats",
+    "sync:odds": "bun run src/cli/index.ts sync:odds",
+    "sync:daily": "bun run src/cli/index.ts sync:daily",
+    "sync:backfill": "bun run src/cli/index.ts sync:backfill",
     "stats:player": "bun run src/cli/index.ts stats:player",
     "stats:team": "bun run src/cli/index.ts stats:team",
     "build:nightly-events": "bun run src/cli/index.ts build:nightly-events",
@@ -28,7 +33,12 @@
     "test:events": "bun run src/tests/testEvents.ts",
     "test:ingest-shapes": "bun run src/tests/testIngestShapes.ts",
     "profile:player": "bun run src/cli/index.ts profile:player",
-    "profile:team": "bun run src/cli/index.ts profile:team"
+    "profile:team": "bun run src/cli/index.ts profile:team",
+    "build:game-context": "bun run src/cli/index.ts build:game-context",
+    "build:game-events": "bun run src/cli/index.ts build:game-events",
+    "search:game-patterns": "bun run src/cli/index.ts search:game-patterns",
+    "predict:games": "bun run src/cli/index.ts predict:games",
+    "predict:players": "bun run src/cli/index.ts predict:players"
   },
   "dependencies": {
     "@prisma/client": "^6.4.1"

@@ -18,6 +18,7 @@ export default function RootLayout({
           <span className="brand">Bluey</span>
           <a href="/patterns">Patterns</a>
           <a href={`/events/${todayStr()}`}>Events</a>
+          <a href="/pipeline">Pipeline</a>
         </nav>
         <main>{children}</main>
       </body>

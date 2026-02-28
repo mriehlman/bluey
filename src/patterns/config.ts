@@ -4,6 +4,7 @@ export interface PatternFilterConfig {
   maxClusterShare: number;
   minAvgHitsPerSeason: number;
   maxAvgHitsPerSeason: number;
+  maxResults: number;
 }
 
 export const DEFAULT_FILTER_CONFIG: PatternFilterConfig = {
@@ -12,4 +13,5 @@ export const DEFAULT_FILTER_CONFIG: PatternFilterConfig = {
   maxClusterShare: 0.6,
   minAvgHitsPerSeason: 0.5,
   maxAvgHitsPerSeason: 6,
+  maxResults: 5000,
 };

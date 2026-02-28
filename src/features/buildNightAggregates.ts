@@ -1,5 +1,5 @@
 import { prisma } from "../db/prisma.js";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 
 interface AggregateFlags {
   season?: number;
@@ -59,93 +59,82 @@ export async function buildNightAggregates(args: string[] = []): Promise<void> {
     return;
   }
 
-  await prisma.$transaction(async (tx) => {
-    if (isIncremental) {
-      const deleteWhere: Prisma.NightTeamAggregateWhereInput = {};
-      if (opts.season != null) deleteWhere.season = opts.season;
-      if (opts.dateFrom || opts.dateTo) {
-        deleteWhere.date = {};
-        if (opts.dateFrom) deleteWhere.date.gte = new Date(opts.dateFrom);
-        if (opts.dateTo) deleteWhere.date.lte = new Date(opts.dateTo);
-      }
-      if (opts.teamId) deleteWhere.teamId = opts.teamId;
-      const deleted = await tx.nightTeamAggregate.deleteMany({ where: deleteWhere });
-      console.log(`  Cleared ${deleted.count} existing rows in range`);
-    } else {
-      const deleted = await tx.nightTeamAggregate.deleteMany();
-      console.log(`  Cleared ${deleted.count} existing rows`);
+  if (isIncremental) {
+    const deleteWhere: Prisma.NightTeamAggregateWhereInput = {};
+    if (opts.season != null) deleteWhere.season = opts.season;
+    if (opts.dateFrom || opts.dateTo) {
+      deleteWhere.date = {};
+      if (opts.dateFrom) deleteWhere.date.gte = new Date(opts.dateFrom);
+      if (opts.dateTo) deleteWhere.date.lte = new Date(opts.dateTo);
     }
+    if (opts.teamId) deleteWhere.teamId = opts.teamId;
+    const deleted = await prisma.nightTeamAggregate.deleteMany({ where: deleteWhere });
+    console.log(`  Cleared ${deleted.count} existing rows in range`);
+  } else {
+    const deleted = await prisma.nightTeamAggregate.deleteMany();
+    console.log(`  Cleared ${deleted.count} existing rows`);
+  }
 
-    const dates = await tx.game.findMany({
-      where: gameWhere,
-      select: { date: true },
-      distinct: ["date"],
-      orderBy: { date: "asc" },
+  const dates = await prisma.game.findMany({
+    where: gameWhere,
+    select: { date: true },
+    distinct: ["date"],
+    orderBy: { date: "asc" },
+  });
+
+  console.log(`  Processing ${dates.length} game dates...`);
+
+  let totalRows = 0;
+
+  for (const { date } of dates) {
+    const games = await prisma.game.findMany({
+      where: { date },
+      select: { id: true, season: true },
     });
 
-    console.log(`  Processing ${dates.length} game dates...`);
+    const season = games[0].season;
+    const gameIds = games.map((g) => g.id);
 
-    let totalRows = 0;
+    const statGroupWhere: Prisma.PlayerGameStatWhereInput = { gameId: { in: gameIds } };
+    if (opts.teamId) statGroupWhere.teamId = opts.teamId;
 
-    for (const { date } of dates) {
-      const gamesWhere: Prisma.GameWhereInput = { date };
-      const games = await tx.game.findMany({
-        where: gamesWhere,
-        select: { id: true, season: true },
+    const teamAgg = await prisma.playerGameStat.groupBy({
+      by: ["teamId"],
+      where: statGroupWhere,
+      _sum: {
+        points: true,
+        rebounds: true,
+        assists: true,
+        steals: true,
+        blocks: true,
+        turnovers: true,
+        minutes: true,
+      },
+    });
+
+    const rowsForDate = teamAgg.map((row) => ({
+      date,
+      season,
+      teamId: row.teamId,
+      points: row._sum.points ?? 0,
+      rebounds: row._sum.rebounds ?? 0,
+      assists: row._sum.assists ?? 0,
+      steals: row._sum.steals ?? 0,
+      blocks: row._sum.blocks ?? 0,
+      turnovers: row._sum.turnovers ?? 0,
+      minutes: row._sum.minutes ?? 0,
+    }));
+
+    if (rowsForDate.length) {
+      await prisma.nightTeamAggregate.createMany({
+        data: rowsForDate,
+        skipDuplicates: true,
       });
-
-      const season = games[0].season;
-      const gameIds = games.map((g) => g.id);
-
-      const statGroupWhere: Prisma.PlayerGameStatWhereInput = { gameId: { in: gameIds } };
-      if (opts.teamId) statGroupWhere.teamId = opts.teamId;
-
-      const teamAgg = await tx.playerGameStat.groupBy({
-        by: ["teamId"],
-        where: statGroupWhere,
-        _sum: {
-          points: true,
-          rebounds: true,
-          assists: true,
-          steals: true,
-          blocks: true,
-          turnovers: true,
-          minutes: true,
-        },
-      });
-
-      for (const row of teamAgg) {
-        await tx.nightTeamAggregate.upsert({
-          where: { date_teamId: { date, teamId: row.teamId } },
-          update: {
-            season,
-            points: row._sum.points ?? 0,
-            rebounds: row._sum.rebounds ?? 0,
-            assists: row._sum.assists ?? 0,
-            steals: row._sum.steals ?? 0,
-            blocks: row._sum.blocks ?? 0,
-            turnovers: row._sum.turnovers ?? 0,
-            minutes: row._sum.minutes ?? 0,
-          },
-          create: {
-            date,
-            season,
-            teamId: row.teamId,
-            points: row._sum.points ?? 0,
-            rebounds: row._sum.rebounds ?? 0,
-            assists: row._sum.assists ?? 0,
-            steals: row._sum.steals ?? 0,
-            blocks: row._sum.blocks ?? 0,
-            turnovers: row._sum.turnovers ?? 0,
-            minutes: row._sum.minutes ?? 0,
-          },
-        });
-        totalRows++;
-      }
+      totalRows += rowsForDate.length;
     }
+  }
 
-    console.log(`\nDone. Upserted ${totalRows} NightTeamAggregate rows across ${dates.length} dates.`);
-  });
+  console.log(`\nDone. Wrote ${totalRows} NightTeamAggregate rows across ${dates.length} dates.`);
 }
 
 async function fillMissingAggregates(
@@ -213,57 +202,48 @@ async function fillMissingAggregates(
 
   let totalRows = 0;
 
-  await prisma.$transaction(async (tx) => {
-    for (const [, { date, season, teamIds }] of missingByDate) {
-      const games = await tx.game.findMany({
-        where: { date },
-        select: { id: true },
+  for (const [, { date, season, teamIds }] of missingByDate) {
+    const games = await prisma.game.findMany({
+      where: { date },
+      select: { id: true },
+    });
+    const gameIds = games.map((g) => g.id);
+
+    const teamAgg = await prisma.playerGameStat.groupBy({
+      by: ["teamId"],
+      where: { gameId: { in: gameIds }, teamId: { in: teamIds } },
+      _sum: {
+        points: true,
+        rebounds: true,
+        assists: true,
+        steals: true,
+        blocks: true,
+        turnovers: true,
+        minutes: true,
+      },
+    });
+
+    const rowsForDate = teamAgg.map((row) => ({
+      date,
+      season,
+      teamId: row.teamId,
+      points: row._sum.points ?? 0,
+      rebounds: row._sum.rebounds ?? 0,
+      assists: row._sum.assists ?? 0,
+      steals: row._sum.steals ?? 0,
+      blocks: row._sum.blocks ?? 0,
+      turnovers: row._sum.turnovers ?? 0,
+      minutes: row._sum.minutes ?? 0,
+    }));
+
+    if (rowsForDate.length) {
+      await prisma.nightTeamAggregate.createMany({
+        data: rowsForDate,
+        skipDuplicates: true,
       });
-      const gameIds = games.map((g) => g.id);
-
-      for (const teamId of teamIds) {
-        const agg = await tx.playerGameStat.aggregate({
-          where: { gameId: { in: gameIds }, teamId },
-          _sum: {
-            points: true,
-            rebounds: true,
-            assists: true,
-            steals: true,
-            blocks: true,
-            turnovers: true,
-            minutes: true,
-          },
-        });
-
-        await tx.nightTeamAggregate.upsert({
-          where: { date_teamId: { date, teamId } },
-          update: {
-            season,
-            points: agg._sum.points ?? 0,
-            rebounds: agg._sum.rebounds ?? 0,
-            assists: agg._sum.assists ?? 0,
-            steals: agg._sum.steals ?? 0,
-            blocks: agg._sum.blocks ?? 0,
-            turnovers: agg._sum.turnovers ?? 0,
-            minutes: agg._sum.minutes ?? 0,
-          },
-          create: {
-            date,
-            season,
-            teamId,
-            points: agg._sum.points ?? 0,
-            rebounds: agg._sum.rebounds ?? 0,
-            assists: agg._sum.assists ?? 0,
-            steals: agg._sum.steals ?? 0,
-            blocks: agg._sum.blocks ?? 0,
-            turnovers: agg._sum.turnovers ?? 0,
-            minutes: agg._sum.minutes ?? 0,
-          },
-        });
-        totalRows++;
-      }
+      totalRows += rowsForDate.length;
     }
-  });
+  }
 
   console.log(`\nDone. Filled ${totalRows} missing NightTeamAggregate rows across ${missingByDate.size} dates.`);
 }

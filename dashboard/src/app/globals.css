@@ -174,3 +174,8 @@ button.danger:hover {
 .muted {
   color: #64748b;
 }
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

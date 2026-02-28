@@ -1,4 +1,4 @@
-import type { Game, Team, Player, PlayerGameStat } from "@prisma/client";
+import type { Game, Team, Player, PlayerGameStat, GameOdds } from "@prisma/client";
 import {
   anyPlayer,
   countPlayers,
@@ -28,6 +28,7 @@ export interface NightContext {
   games: (Game & { homeTeam: Team; awayTeam: Team })[];
   stats: (PlayerGameStat & { player: Player })[];
   teamAggregates?: TeamAgg[];
+  gameOdds?: GameOdds[];
 }
 
 export interface EventResult {
@@ -407,6 +408,320 @@ export const CATALOG: EventDef[] = [
         hit: count >= 2,
         meta: { teams: matching.map((a) => ({ teamId: a.teamId, blocks: a.blocks })), count },
       };
+    },
+  },
+
+  // ── Slate pace ──
+
+  {
+    key: "SLATE_AVG_TOTAL_GE_225",
+    compute(ctx) {
+      const sCtx = withScoredGames(ctx);
+      if (sCtx.games.length === 0) return { hit: false };
+      const totals = sCtx.games.map((g) => g.homeScore + g.awayScore);
+      const avg = totals.reduce((a, b) => a + b, 0) / totals.length;
+      return { hit: avg >= 225, meta: { avgTotal: Math.round(avg * 10) / 10, gameCount: sCtx.games.length } };
+    },
+  },
+  {
+    key: "SLATE_AVG_TOTAL_LE_205",
+    compute(ctx) {
+      const sCtx = withScoredGames(ctx);
+      if (sCtx.games.length === 0) return { hit: false };
+      const totals = sCtx.games.map((g) => g.homeScore + g.awayScore);
+      const avg = totals.reduce((a, b) => a + b, 0) / totals.length;
+      return { hit: avg <= 205, meta: { avgTotal: Math.round(avg * 10) / 10, gameCount: sCtx.games.length } };
+    },
+  },
+
+  // ── Double-doubles ──
+
+  {
+    key: "DOUBLE_DOUBLE_GE_5",
+    compute(ctx) {
+      const { uniqueIds } = countPlayers(ctx, (s) => {
+        const cats = [s.points, s.rebounds, s.assists, s.steals, s.blocks];
+        return cats.filter((v) => v >= 10).length >= 2;
+      });
+      return { hit: uniqueIds.length >= 5, meta: { playerIds: uniqueIds, count: uniqueIds.length } };
+    },
+  },
+
+  // ── Player dominance ──
+
+  {
+    key: "ANY_PLAYER_25_10_GAME",
+    compute(ctx) {
+      const { uniqueIds, matching } = countPlayers(ctx, (s) =>
+        s.points >= 25 && (s.rebounds >= 10 || s.assists >= 10),
+      );
+      const lines = matching.map((s) => ({
+        playerId: s.playerId,
+        points: s.points,
+        rebounds: s.rebounds,
+        assists: s.assists,
+      }));
+      return { hit: uniqueIds.length > 0, meta: { playerIds: uniqueIds, lines } };
+    },
+  },
+
+  // ── Scoring extremes / absence ──
+
+  {
+    key: "PLAYER_50_PLUS_POINTS",
+    compute(ctx) {
+      const { uniqueIds, matching } = countPlayers(ctx, (s) => s.points >= 50);
+      const maxPoints = Math.max(...matching.map((s) => s.points), 0);
+      return { hit: uniqueIds.length > 0, meta: { playerIds: uniqueIds, maxPoints } };
+    },
+  },
+  {
+    key: "NO_30PT_SCORER",
+    compute(ctx) {
+      if (ctx.stats.length === 0) return { hit: false };
+      const { uniqueIds } = countPlayers(ctx, (s) => s.points >= 30);
+      const maxPoints = Math.max(...ctx.stats.map((s) => s.points), 0);
+      return { hit: uniqueIds.length === 0, meta: { maxPoints } };
+    },
+  },
+  {
+    key: "FIVE_25PT_SCORERS",
+    compute(ctx) {
+      const { uniqueIds } = countPlayers(ctx, (s) => s.points >= 25);
+      return { hit: uniqueIds.length >= 5, meta: { playerIds: uniqueIds, count: uniqueIds.length } };
+    },
+  },
+
+  // ── Competitive high-scoring / low-scoring ──
+
+  {
+    key: "BOTH_TEAMS_110_PLUS_IN_GAME",
+    compute(ctx) {
+      const sCtx = withScoredGames(ctx);
+      const { count, matching } = countGames(sCtx, (g) => g.homeScore >= 110 && g.awayScore >= 110);
+      return { hit: count > 0, meta: { gameIds: matching.map((g) => g.id), count } };
+    },
+  },
+  {
+    key: "ANY_GAME_TOTAL_UNDER_190",
+    compute(ctx) {
+      const sCtx = withScoredGames(ctx);
+      const { count, matching } = countGames(sCtx, (g) => g.homeScore + g.awayScore < 190);
+      const minTotal = sCtx.games.length > 0
+        ? Math.min(...sCtx.games.map((g) => g.homeScore + g.awayScore))
+        : 0;
+      return { hit: count > 0, meta: { gameIds: matching.map((g) => g.id), count, minTotal } };
+    },
+  },
+
+  // ── Game competitiveness distribution ──
+
+  {
+    key: "ALL_GAMES_DECIDED_BY_10_PLUS",
+    compute(ctx) {
+      const sCtx = withScoredGames(ctx);
+      if (sCtx.games.length === 0) return { hit: false };
+      const allBlowouts = sCtx.games.every((g) => Math.abs(g.homeScore - g.awayScore) >= 10);
+      const minMargin = Math.min(...sCtx.games.map((g) => Math.abs(g.homeScore - g.awayScore)));
+      return { hit: allBlowouts, meta: { gameCount: sCtx.games.length, minMargin } };
+    },
+  },
+  {
+    key: "NO_BLOWOUT_15",
+    compute(ctx) {
+      const sCtx = withScoredGames(ctx);
+      if (sCtx.games.length === 0) return { hit: false };
+      const allClose = sCtx.games.every((g) => Math.abs(g.homeScore - g.awayScore) <= 15);
+      const maxMargin = Math.max(...sCtx.games.map((g) => Math.abs(g.homeScore - g.awayScore)), 0);
+      return { hit: allClose, meta: { gameCount: sCtx.games.length, maxMargin } };
+    },
+  },
+
+  // ── Balanced / deep offense ──
+
+  {
+    key: "TEAM_6_PLAYERS_DOUBLE_FIGURES",
+    compute(ctx) {
+      const teamMap = perTeamPlayerCount(ctx, (s) => s.points >= 10);
+      const qualifying: { teamId: number; count: number }[] = [];
+      for (const [teamId, players] of teamMap) {
+        if (players.size >= 6) qualifying.push({ teamId, count: players.size });
+      }
+      return {
+        hit: qualifying.length > 0,
+        meta: { teams: qualifying, teamCount: qualifying.length },
+      };
+    },
+  },
+
+  // ── Multiple triple-doubles ──
+
+  {
+    key: "MULTIPLE_TRIPLE_DOUBLES",
+    compute(ctx) {
+      const { uniqueIds } = countPlayers(ctx, (s) => {
+        const cats = [s.points, s.rebounds, s.assists, s.steals, s.blocks];
+        return cats.filter((v) => v >= 10).length >= 3;
+      });
+      return { hit: uniqueIds.length >= 2, meta: { playerIds: uniqueIds, count: uniqueIds.length } };
+    },
+  },
+
+  // ── Individual defense ──
+
+  {
+    key: "ANY_PLAYER_5_PLUS_STEALS",
+    compute(ctx) {
+      const { uniqueIds, matching } = countPlayers(ctx, (s) => s.steals >= 5);
+      const maxSteals = Math.max(...matching.map((s) => s.steals), 0);
+      return { hit: uniqueIds.length > 0, meta: { playerIds: uniqueIds, maxSteals } };
+    },
+  },
+  {
+    key: "ANY_PLAYER_5_PLUS_BLOCKS",
+    compute(ctx) {
+      const { uniqueIds, matching } = countPlayers(ctx, (s) => s.blocks >= 5);
+      const maxBlocks = Math.max(...matching.map((s) => s.blocks), 0);
+      return { hit: uniqueIds.length > 0, meta: { playerIds: uniqueIds, maxBlocks } };
+    },
+  },
+
+  // ── Ball movement breadth ──
+
+  {
+    key: "TWO_TEAMS_ASSISTS_GE_30",
+    compute(ctx) {
+      const { count, matching } = countTeams(ctx, (a) => a.assists >= 30);
+      return {
+        hit: count >= 2,
+        meta: { teams: matching.map((a) => ({ teamId: a.teamId, assists: a.assists })), count },
+      };
+    },
+  },
+
+  // ── Minutes extremes ──
+
+  {
+    key: "ANY_PLAYER_45_PLUS_MINUTES",
+    compute(ctx) {
+      const { uniqueIds, matching } = countPlayers(ctx, (s) => s.minutes >= 45);
+      const maxMinutes = Math.max(...matching.map((s) => s.minutes), 0);
+      return { hit: uniqueIds.length > 0, meta: { playerIds: uniqueIds, maxMinutes } };
+    },
+  },
+
+  // ── Shooting splits (requires expanded stat fields) ──
+
+  {
+    key: "ANY_PLAYER_10_PLUS_THREES",
+    compute(ctx) {
+      const { uniqueIds, matching } = countPlayers(ctx, (s) => (s.fg3m ?? 0) >= 10);
+      const max = Math.max(...matching.map((s) => s.fg3m ?? 0), 0);
+      return { hit: uniqueIds.length > 0, meta: { playerIds: uniqueIds, maxFg3m: max } };
+    },
+  },
+  {
+    key: "ANY_PLAYER_PERFECT_FT_10_PLUS",
+    compute(ctx) {
+      const { uniqueIds, matching } = countPlayers(
+        ctx,
+        (s) => (s.ftm ?? 0) >= 10 && s.ftm != null && s.fta != null && s.ftm === s.fta,
+      );
+      const lines = matching.map((s) => ({ playerId: s.playerId, ftm: s.ftm, fta: s.fta }));
+      return { hit: uniqueIds.length > 0, meta: { playerIds: uniqueIds, lines } };
+    },
+  },
+  {
+    key: "TEAM_FT_PCT_UNDER_60",
+    compute(ctx) {
+      const teamFt = new Map<number, { ftm: number; fta: number }>();
+      for (const s of ctx.stats) {
+        if (s.ftm == null || s.fta == null) continue;
+        let t = teamFt.get(s.teamId);
+        if (!t) { t = { ftm: 0, fta: 0 }; teamFt.set(s.teamId, t); }
+        t.ftm += s.ftm;
+        t.fta += s.fta;
+      }
+      const qualifying: { teamId: number; ftPct: number }[] = [];
+      for (const [teamId, t] of teamFt) {
+        if (t.fta >= 10) {
+          const pct = t.ftm / t.fta;
+          if (pct < 0.6) qualifying.push({ teamId, ftPct: Math.round(pct * 1000) / 10 });
+        }
+      }
+      return { hit: qualifying.length > 0, meta: { teams: qualifying } };
+    },
+  },
+  {
+    key: "TEAM_3PT_PCT_GE_45",
+    compute(ctx) {
+      const team3pt = new Map<number, { fg3m: number; fg3a: number }>();
+      for (const s of ctx.stats) {
+        if (s.fg3m == null || s.fg3a == null) continue;
+        let t = team3pt.get(s.teamId);
+        if (!t) { t = { fg3m: 0, fg3a: 0 }; team3pt.set(s.teamId, t); }
+        t.fg3m += s.fg3m;
+        t.fg3a += s.fg3a;
+      }
+      const qualifying: { teamId: number; fg3Pct: number }[] = [];
+      for (const [teamId, t] of team3pt) {
+        if (t.fg3a >= 10) {
+          const pct = t.fg3m / t.fg3a;
+          if (pct >= 0.45) qualifying.push({ teamId, fg3Pct: Math.round(pct * 1000) / 10 });
+        }
+      }
+      return { hit: qualifying.length > 0, meta: { teams: qualifying } };
+    },
+  },
+
+  // ── Odds-based events (requires GameOdds data) ──
+
+  {
+    key: "GAME_SPREAD_COVERED",
+    compute(ctx) {
+      if (!ctx.gameOdds || ctx.gameOdds.length === 0) return { hit: false };
+      const oddsMap = new Map<string, typeof ctx.gameOdds[number]>();
+      for (const o of ctx.gameOdds) {
+        if (o.source === "consensus") oddsMap.set(o.gameId, o);
+      }
+      if (oddsMap.size === 0) {
+        for (const o of ctx.gameOdds) oddsMap.set(o.gameId, o);
+      }
+
+      const covered: { gameId: string; margin: number; spread: number }[] = [];
+      for (const g of ctx.games) {
+        const odds = oddsMap.get(g.id);
+        if (!odds || odds.spreadHome == null) continue;
+        const actualMargin = g.homeScore - g.awayScore;
+        if (actualMargin > odds.spreadHome) {
+          covered.push({ gameId: g.id, margin: actualMargin, spread: odds.spreadHome });
+        }
+      }
+      return { hit: covered.length > 0, meta: { covered, count: covered.length } };
+    },
+  },
+  {
+    key: "GAME_WENT_OVER",
+    compute(ctx) {
+      if (!ctx.gameOdds || ctx.gameOdds.length === 0) return { hit: false };
+      const oddsMap = new Map<string, typeof ctx.gameOdds[number]>();
+      for (const o of ctx.gameOdds) {
+        if (o.source === "consensus") oddsMap.set(o.gameId, o);
+      }
+      if (oddsMap.size === 0) {
+        for (const o of ctx.gameOdds) oddsMap.set(o.gameId, o);
+      }
+
+      const overs: { gameId: string; total: number; line: number }[] = [];
+      for (const g of ctx.games) {
+        const odds = oddsMap.get(g.id);
+        if (!odds || odds.totalOver == null) continue;
+        const actualTotal = g.homeScore + g.awayScore;
+        if (actualTotal > odds.totalOver) {
+          overs.push({ gameId: g.id, total: actualTotal, line: odds.totalOver });
+        }
+      }
+      return { hit: overs.length > 0, meta: { overs, count: overs.length } };
     },
   },
 ];

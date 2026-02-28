@@ -35,6 +35,11 @@ model Game {
   homeTeam             Team              @relation("HomeTeam", fields: [homeTeamId], references: [id])
   awayTeam             Team              @relation("AwayTeam", fields: [awayTeamId], references: [id])
   playerStats          PlayerGameStat[]
+  odds                 GameOdds[]
+  context              GameContext?
+  gameEvents           GameEvent[]
+  playerContexts       PlayerGameContext[]
+  gamePatternHits      GamePatternHit[]
 
   @@index([date])
   @@index([season, date])
@@ -43,10 +48,11 @@ model Game {
 }
 
 model Player {
-  id        Int               @id
-  firstname String?
-  lastname  String?
-  stats     PlayerGameStat[]
+  id           Int                @id
+  firstname    String?
+  lastname     String?
+  stats        PlayerGameStat[]
+  gameContexts PlayerGameContext[]
 }
 
 model PlayerGameStat {
@@ -61,6 +67,16 @@ model PlayerGameStat {
   steals    Int
   blocks    Int
   turnovers Int
+  fgm       Int?
+  fga       Int?
+  fg3m      Int?
+  fg3a      Int?
+  ftm       Int?
+  fta       Int?
+  oreb      Int?
+  dreb      Int?
+  pf        Int?
+  plusMinus  Int?
   game      Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
   player    Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
   team      Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
@@ -177,6 +193,23 @@ model NightTeamAggregate {
   @@index([teamId, date])
 }
 
+model GameOdds {
+  id         String   @id @default(cuid())
+  gameId     String
+  source     String
+  spreadHome Float?
+  spreadAway Float?
+  totalOver  Float?
+  totalUnder Float?
+  mlHome     Int?
+  mlAway     Int?
+  fetchedAt  DateTime @default(now())
+  game       Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@unique([gameId, source])
+  @@index([gameId])
+}
+
 model ExternalIdMap {
   id         String   @id @default(cuid())
   entityType String   // TEAM, PLAYER, GAME
@@ -189,4 +222,125 @@ model ExternalIdMap {
   @@unique([entityType, source, sourceId])
   @@index([entityType, internalId])
   @@index([source, entityType])
+}
+
+model GameContext {
+  id           String  @id @default(cuid())
+  gameId       String  @unique
+
+  homeWins     Int
+  homeLosses   Int
+  homePpg      Float
+  homeOppg     Float
+  homePace     Float?
+  homeRebPg    Float?
+  homeAstPg    Float?
+  homeFg3Pct   Float?
+  homeFtPct    Float?
+  homeRankOff  Int?
+  homeRankDef  Int?
+  homeRankPace Int?
+  homeStreak   Int?
+
+  awayWins     Int
+  awayLosses   Int
+  awayPpg      Float
+  awayOppg     Float
+  awayPace     Float?
+  awayRebPg    Float?
+  awayAstPg    Float?
+  awayFg3Pct   Float?
+  awayFtPct    Float?
+  awayRankOff  Int?
+  awayRankDef  Int?
+  awayRankPace Int?
+  awayStreak   Int?
+
+  homeRestDays Int?
+  awayRestDays Int?
+  homeIsB2b    Boolean @default(false)
+  awayIsB2b    Boolean @default(false)
+
+  h2hHomeWins  Int     @default(0)
+  h2hAwayWins  Int     @default(0)
+
+  game         Game    @relation(fields: [gameId], references: [id], onDelete: Cascade)
+}
+
+model PlayerGameContext {
+  id          String @id @default(cuid())
+  gameId      String
+  playerId    Int
+  teamId      Int
+
+  gamesPlayed Int
+  ppg         Float
+  rpg         Float
+  apg         Float
+  mpg         Float
+  fg3Pct      Float?
+  ftPct       Float?
+  last5Ppg    Float?
+  rankPpg     Int?
+  rankRpg     Int?
+  rankApg     Int?
+  oppRankDef  Int?
+
+  game        Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  player      Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([gameId, playerId])
+  @@index([playerId, gameId])
+}
+
+model GameEvent {
+  id       String @id @default(cuid())
+  gameId   String
+  season   Int
+  eventKey String
+  type     String            // "condition" or "outcome"
+  side     String @default("game") // "home", "away", or "game"
+  meta     Json?
+
+  game     Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@unique([gameId, eventKey, side])
+  @@index([eventKey])
+  @@index([season])
+  @@index([gameId])
+  @@index([type, eventKey])
+}
+
+model GamePattern {
+  id              String           @id @default(cuid())
+  patternKey      String           @unique
+  conditions      String[]
+  outcome         String
+  sampleSize      Int
+  hitCount        Int
+  hitRate         Float
+  seasons         Int
+  perSeason       Json
+  lastHitDate     DateTime?        @db.Date
+  confidenceScore Float?
+  valueScore      Float?
+  createdAt       DateTime         @default(now())
+  hits            GamePatternHit[]
+
+  @@index([outcome])
+  @@index([hitRate])
+  @@index([confidenceScore])
+}
+
+model GamePatternHit {
+  id        String      @id @default(cuid())
+  patternId String
+  gameId    String
+  season    Int
+  hit       Boolean
+  pattern   GamePattern @relation(fields: [patternId], references: [id], onDelete: Cascade)
+  game      Game        @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@unique([patternId, gameId])
+  @@index([gameId])
 }

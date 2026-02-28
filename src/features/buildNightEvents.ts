@@ -1,9 +1,59 @@
 import { prisma } from "../db/prisma.js";
 import { CATALOG } from "./eventCatalog.js";
 import type { NightContext, TeamAgg } from "./eventCatalog.js";
+import type { Prisma } from "@prisma/client";
 
-export async function buildNightEvents(): Promise<void> {
+interface EventBuildFlags {
+  season?: number;
+  dateFrom?: string;
+  dateTo?: string;
+}
+
+export async function buildNightEvents(args: string[] = []): Promise<void> {
+  const flags: Record<string, string> = {};
+  for (let i = 0; i < args.length; i++) {
+    if (args[i].startsWith("--") && i + 1 < args.length) {
+      flags[args[i].slice(2)] = args[i + 1];
+      i++;
+    }
+  }
+
+  const opts: EventBuildFlags = {
+    season: flags.season ? Number(flags.season) : undefined,
+    dateFrom: flags.dateFrom,
+    dateTo: flags.dateTo,
+  };
+
+  const isIncremental = opts.season != null || opts.dateFrom != null || opts.dateTo != null;
+
+  if (isIncremental) {
+    console.log("Building NightEvents (incremental)...\n");
+  } else {
+    console.log("Building NightEvents (full rebuild)...\n");
+  }
+
+  const gameWhere: Prisma.GameWhereInput = {};
+  if (opts.season != null) gameWhere.season = opts.season;
+  if (opts.dateFrom || opts.dateTo) {
+    gameWhere.date = {};
+    if (opts.dateFrom) gameWhere.date.gte = new Date(opts.dateFrom);
+    if (opts.dateTo) gameWhere.date.lte = new Date(opts.dateTo);
+  }
+
+  if (isIncremental) {
+    const deleteWhere: Prisma.NightEventWhereInput = {};
+    if (opts.season != null) deleteWhere.season = opts.season;
+    if (opts.dateFrom || opts.dateTo) {
+      deleteWhere.date = {};
+      if (opts.dateFrom) deleteWhere.date.gte = new Date(opts.dateFrom);
+      if (opts.dateTo) deleteWhere.date.lte = new Date(opts.dateTo);
+    }
+    const deleted = await prisma.nightEvent.deleteMany({ where: deleteWhere });
+    console.log(`  Cleared ${deleted.count} existing events in range`);
+  }
+
   const dates = await prisma.game.findMany({
+    where: gameWhere,
     select: { date: true },
     distinct: ["date"],
     orderBy: { date: "asc" },
@@ -60,7 +110,11 @@ export async function buildNightEvents(): Promise<void> {
       }
     }
 
-    const ctx: NightContext = { date: dateStr, season, games, stats, teamAggregates };
+    const gameOdds = await prisma.gameOdds.findMany({
+      where: { gameId: { in: gameIds } },
+    });
+
+    const ctx: NightContext = { date: dateStr, season, games, stats, teamAggregates, gameOdds: gameOdds.length > 0 ? gameOdds : undefined };
 
     const hits: { date: Date; season: number; eventKey: string; meta: unknown }[] = [];
 

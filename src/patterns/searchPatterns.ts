@@ -66,10 +66,23 @@ export async function searchPatterns(configOverrides?: Partial<PatternFilterConf
 
   console.log(`${presentKeys.length} event keys present in data`);
 
-  const combos = generateCombos(presentKeys, 3);
-  console.log(`Generated ${combos.length} candidate patterns (size 1-3)`);
+  const invertedIndex = new Map<string, Set<string>>();
+  for (const key of presentKeys) {
+    const dates = new Set<string>();
+    for (const [dateStr, entry] of dateMap) {
+      if (entry.keys.has(key)) dates.add(dateStr);
+    }
+    invertedIndex.set(key, dates);
+  }
 
-  const sortedDates = [...dateMap.keys()].sort();
+  const viableKeys = presentKeys.filter(
+    (k) => (invertedIndex.get(k)?.size ?? 0) >= cfg.minOccurrences,
+  );
+
+  console.log(`${viableKeys.length} keys viable (>= ${cfg.minOccurrences} hits), ${presentKeys.length - viableKeys.length} pruned`);
+
+  const combos = generateCombos(viableKeys, 4);
+  console.log(`Generated ${combos.length} candidate patterns (size 1-4)`);
 
   interface PatternCandidate {
     patternKey: string;
@@ -83,16 +96,25 @@ export async function searchPatterns(configOverrides?: Partial<PatternFilterConf
   const qualifying: PatternCandidate[] = [];
 
   for (const combo of combos) {
-    const hitDates: { date: string; season: number }[] = [];
+    const sets = combo.map((k) => invertedIndex.get(k)!);
+    sets.sort((a, b) => a.size - b.size);
 
-    for (const dateStr of sortedDates) {
-      const entry = dateMap.get(dateStr)!;
-      if (combo.every((k) => entry.keys.has(k))) {
-        hitDates.push({ date: dateStr, season: entry.season });
+    let current = sets[0];
+    for (let i = 1; i < sets.length; i++) {
+      if (current.size < cfg.minOccurrences) break;
+      const next = sets[i];
+      const intersection = new Set<string>();
+      for (const d of current) {
+        if (next.has(d)) intersection.add(d);
       }
+      current = intersection;
     }
 
-    if (hitDates.length < cfg.minOccurrences) continue;
+    if (current.size < cfg.minOccurrences) continue;
+
+    const hitDates = [...current]
+      .sort()
+      .map((d) => ({ date: d, season: dateMap.get(d)!.season }));
 
     const perSeason: Record<number, number> = {};
     for (const h of hitDates) {
@@ -142,6 +164,24 @@ export async function searchPatterns(configOverrides?: Partial<PatternFilterConf
 
   for (const p of qualifying) {
     const lastHitDate = new Date(p.hitDates[p.hitDates.length - 1].date);
+    const metricsForScoring: PatternMetrics = { ...p.metrics, lastHitDate };
+    const scores = computePatternScores(metricsForScoring, totalSeasons, referenceDate);
+    p.score = scores.overallScore;
+  }
+
+  qualifying.sort((a, b) => b.score - a.score);
+
+  const toStore = qualifying.slice(0, cfg.maxResults);
+  if (qualifying.length > cfg.maxResults) {
+    console.log(`Capped to top ${cfg.maxResults} by overallScore (from ${qualifying.length})`);
+  }
+
+  console.log(`Persisting ${toStore.length} patterns...`);
+  const startPersist = Date.now();
+
+  for (let idx = 0; idx < toStore.length; idx++) {
+    const p = toStore[idx];
+    const lastHitDate = new Date(p.hitDates[p.hitDates.length - 1].date);
 
     const metricsForScoring: PatternMetrics = {
       ...p.metrics,
@@ -149,7 +189,7 @@ export async function searchPatterns(configOverrides?: Partial<PatternFilterConf
     };
     const scores = computePatternScores(metricsForScoring, totalSeasons, referenceDate);
 
-    await prisma.pattern.upsert({
+    const patternRecord = await prisma.pattern.upsert({
       where: { patternKey: p.patternKey },
       update: {
         eventKeys: p.eventKeys,
@@ -174,57 +214,54 @@ export async function searchPatterns(configOverrides?: Partial<PatternFilterConf
       },
     });
 
-    const patternRecord = await prisma.pattern.findUnique({
-      where: { patternKey: p.patternKey },
-      select: { id: true },
-    });
+    await prisma.patternHit.createMany({
+      data: p.hitDates.map((h) => {
+        const eventMetas: Record<string, unknown> = {};
+        const allTeamIds = new Set<number>();
+        let gameCount: number | undefined;
 
-    if (patternRecord) {
-      await prisma.patternHit.createMany({
-        data: p.hitDates.map((h) => {
-          const eventMetas: Record<string, unknown> = {};
-          const allTeamIds = new Set<number>();
-          let gameCount: number | undefined;
-
-          for (const ek of p.eventKeys) {
-            const m = eventMetaIndex.get(`${h.date}::${ek}`);
-            if (m != null) {
-              eventMetas[ek] = m;
-              const meta = m as Record<string, unknown>;
-              if (Array.isArray(meta.teamIds)) {
-                for (const t of meta.teamIds) allTeamIds.add(t as number);
-              }
-              if (meta.gameCount != null && gameCount == null) {
-                gameCount = meta.gameCount as number;
-              }
+        for (const ek of p.eventKeys) {
+          const m = eventMetaIndex.get(`${h.date}::${ek}`);
+          if (m != null) {
+            eventMetas[ek] = m;
+            const meta = m as Record<string, unknown>;
+            if (Array.isArray(meta.teamIds)) {
+              for (const t of meta.teamIds) allTeamIds.add(t as number);
+            }
+            if (meta.gameCount != null && gameCount == null) {
+              gameCount = meta.gameCount as number;
             }
           }
+        }
 
-          const nightProcessed = eventMetaIndex.get(`${h.date}::NIGHT_PROCESSED`);
-          if (nightProcessed != null && gameCount == null) {
-            gameCount = (nightProcessed as Record<string, unknown>).gameCount as number | undefined;
-          }
+        const nightProcessed = eventMetaIndex.get(`${h.date}::NIGHT_PROCESSED`);
+        if (nightProcessed != null && gameCount == null) {
+          gameCount = (nightProcessed as Record<string, unknown>).gameCount as number | undefined;
+        }
 
-          return {
-            patternId: patternRecord.id,
-            date: new Date(h.date),
-            season: h.season,
-            meta: {
-              gameCount: gameCount ?? null,
-              teamIds: [...allTeamIds],
-              eventMetas: eventMetas as Record<string, Prisma.InputJsonValue>,
-            },
-          };
-        }),
-        skipDuplicates: true,
-      });
+        return {
+          patternId: patternRecord.id,
+          date: new Date(h.date),
+          season: h.season,
+          meta: {
+            gameCount: gameCount ?? null,
+            teamIds: [...allTeamIds],
+            eventMetas: eventMetas as Record<string, Prisma.InputJsonValue>,
+          },
+        };
+      }),
+      skipDuplicates: true,
+    });
+
+    if ((idx + 1) % 500 === 0 || idx + 1 === toStore.length) {
+      const elapsed = ((Date.now() - startPersist) / 1000).toFixed(1);
+      console.log(`  ${idx + 1} / ${toStore.length} persisted (${elapsed}s)`);
     }
   }
 
-  const ranked = qualifying.sort((a, b) => b.score - a.score);
-  const top = ranked.slice(0, 20);
+  const top = toStore.slice(0, 20);
 
-  console.log(`\n=== Top ${top.length} Patterns by Stability Score ===\n`);
+  console.log(`\n=== Top ${top.length} Patterns by Overall Score ===\n`);
   console.log(
     "Rank  Score   Legs  Occ  Seasons  LongestGap  LastHit     Pattern"
   );
@@ -235,7 +272,7 @@ export async function searchPatterns(configOverrides?: Partial<PatternFilterConf
     const lastHit = p.hitDates[p.hitDates.length - 1].date;
     console.log(
       `${String(i + 1).padStart(4)}  ` +
-        `${p.score.toFixed(2).padStart(6)}  ` +
+        `${p.score.toFixed(4).padStart(6)}  ` +
         `${String(p.legs).padStart(4)}  ` +
         `${String(p.metrics.occurrences).padStart(3)}  ` +
         `${String(p.metrics.seasons).padStart(7)}  ` +
@@ -245,5 +282,5 @@ export async function searchPatterns(configOverrides?: Partial<PatternFilterConf
     );
   }
 
-  console.log(`\nDone. ${qualifying.length} patterns stored.`);
+  console.log(`\nDone. ${toStore.length} patterns stored.`);
 }
