@@ -232,6 +232,207 @@ const conditionEvents: GameEventDef[] = [
       return { hit: false };
     },
   },
+
+  // ═══════════════════════════════════════════════════════════════
+  // ADDITIONAL CONDITIONS (v2)
+  // ═══════════════════════════════════════════════════════════════
+
+  // Win percentage thresholds (per-side)
+  {
+    key: "WIN_PCT_OVER_600", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => {
+      const wins = getWins(ctx, side);
+      const losses = getLosses(ctx, side);
+      const total = wins + losses;
+      if (total < 10) return { hit: false };
+      return { hit: wins / total >= 0.6 };
+    },
+  },
+  {
+    key: "WIN_PCT_UNDER_400", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => {
+      const wins = getWins(ctx, side);
+      const losses = getLosses(ctx, side);
+      const total = wins + losses;
+      if (total < 10) return { hit: false };
+      return { hit: wins / total < 0.4 };
+    },
+  },
+  {
+    key: "WIN_PCT_OVER_700", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => {
+      const wins = getWins(ctx, side);
+      const losses = getLosses(ctx, side);
+      const total = wins + losses;
+      if (total < 10) return { hit: false };
+      return { hit: wins / total >= 0.7 };
+    },
+  },
+
+  // Record differentials (game-wide)
+  {
+    key: "BIG_FAVORITE", type: "condition", sides: SIDES_GAME,
+    compute: (ctx) => {
+      const homeWinPct = ctx.context.homeWins / Math.max(1, ctx.context.homeWins + ctx.context.homeLosses);
+      const awayWinPct = ctx.context.awayWins / Math.max(1, ctx.context.awayWins + ctx.context.awayLosses);
+      return { hit: Math.abs(homeWinPct - awayWinPct) >= 0.3 };
+    },
+  },
+
+  // Scoring differential (per-side)
+  {
+    key: "NET_RATING_PLUS_5", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => {
+      const ppg = getPpg(ctx, side);
+      const oppg = getOppg(ctx, side);
+      return { hit: ppg - oppg >= 5 };
+    },
+  },
+  {
+    key: "NET_RATING_MINUS_5", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => {
+      const ppg = getPpg(ctx, side);
+      const oppg = getOppg(ctx, side);
+      return { hit: ppg - oppg <= -5 };
+    },
+  },
+  {
+    key: "NET_RATING_PLUS_10", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => {
+      const ppg = getPpg(ctx, side);
+      const oppg = getOppg(ctx, side);
+      return { hit: ppg - oppg >= 10 };
+    },
+  },
+
+  // Scoring thresholds (per-side)
+  {
+    key: "HIGH_SCORING", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => {
+      const ppg = getPpg(ctx, side);
+      return { hit: ppg >= 115 };
+    },
+  },
+  {
+    key: "LOW_SCORING", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => {
+      const ppg = getPpg(ctx, side);
+      return { hit: ppg < 105 };
+    },
+  },
+
+  // Defensive efficiency (per-side)
+  {
+    key: "STINGY_DEF", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => {
+      const oppg = getOppg(ctx, side);
+      return { hit: oppg < 108 };
+    },
+  },
+  {
+    key: "POROUS_DEF", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => {
+      const oppg = getOppg(ctx, side);
+      return { hit: oppg >= 118 };
+    },
+  },
+
+  // Game-wide matchup conditions
+  {
+    key: "BOTH_HIGH_SCORING", type: "condition", sides: SIDES_GAME,
+    compute: (ctx) => ({
+      hit: getPpg(ctx, "home") >= 115 && getPpg(ctx, "away") >= 115,
+    }),
+  },
+  {
+    key: "BOTH_LOW_SCORING", type: "condition", sides: SIDES_GAME,
+    compute: (ctx) => ({
+      hit: getPpg(ctx, "home") < 105 && getPpg(ctx, "away") < 105,
+    }),
+  },
+  {
+    key: "BOTH_POROUS_DEF", type: "condition", sides: SIDES_GAME,
+    compute: (ctx) => ({
+      hit: getOppg(ctx, "home") >= 115 && getOppg(ctx, "away") >= 115,
+    }),
+  },
+  {
+    key: "BOTH_STINGY_DEF", type: "condition", sides: SIDES_GAME,
+    compute: (ctx) => ({
+      hit: getOppg(ctx, "home") < 108 && getOppg(ctx, "away") < 108,
+    }),
+  },
+
+  // Schedule spots (per-side)
+  {
+    key: "RESTED_4_PLUS", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => {
+      const rest = getRestDays(ctx, side);
+      return { hit: rest != null && rest >= 4 };
+    },
+  },
+  {
+    key: "REST_ADVANTAGE", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => {
+      const myRest = getRestDays(ctx, side);
+      const oppSide = side === "home" ? "away" : "home";
+      const oppRest = getRestDays(ctx, oppSide);
+      if (myRest == null || oppRest == null) return { hit: false };
+      return { hit: myRest - oppRest >= 2 };
+    },
+  },
+
+  // Streak variations
+  {
+    key: "WIN_STREAK_3", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => ({ hit: (getStreak(ctx, side) ?? 0) >= 3 }),
+  },
+  {
+    key: "LOSING_STREAK_3", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => ({ hit: (getStreak(ctx, side) ?? 0) <= -3 }),
+  },
+  {
+    key: "WIN_STREAK_7", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => ({ hit: (getStreak(ctx, side) ?? 0) >= 7 }),
+  },
+  {
+    key: "LOSING_STREAK_7", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => ({ hit: (getStreak(ctx, side) ?? 0) <= -7 }),
+  },
+
+  // Player performance conditions
+  {
+    key: "STAR_MATCHUP", type: "condition", sides: SIDES_GAME,
+    compute: (ctx) => {
+      const homeHasStar = ctx.playerContexts.some(p => p.teamId === ctx.game.homeTeamId && p.rankPpg != null && p.rankPpg <= 10);
+      const awayHasStar = ctx.playerContexts.some(p => p.teamId === ctx.game.awayTeamId && p.rankPpg != null && p.rankPpg <= 10);
+      return { hit: homeHasStar && awayHasStar };
+    },
+  },
+  {
+    key: "HAS_TOP_5_SCORER", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => {
+      const teamId = side === "home" ? ctx.game.homeTeamId : ctx.game.awayTeamId;
+      const has = ctx.playerContexts.some((p) => p.teamId === teamId && p.rankPpg != null && p.rankPpg <= 5);
+      return { hit: has };
+    },
+  },
+  {
+    key: "HAS_TOP_5_REBOUNDER", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => {
+      const teamId = side === "home" ? ctx.game.homeTeamId : ctx.game.awayTeamId;
+      const has = ctx.playerContexts.some((p) => p.teamId === teamId && p.rankRpg != null && p.rankRpg <= 5);
+      return { hit: has };
+    },
+  },
+  {
+    key: "HAS_TOP_10_PLAYMAKER", type: "condition", sides: SIDES_PER_TEAM,
+    compute: (ctx, side) => {
+      const teamId = side === "home" ? ctx.game.homeTeamId : ctx.game.awayTeamId;
+      const has = ctx.playerContexts.some((p) => p.teamId === teamId && p.rankApg != null && p.rankApg <= 10);
+      return { hit: has };
+    },
+  },
 ];
 
 // ── HELPER: Find team's top player by stat ──

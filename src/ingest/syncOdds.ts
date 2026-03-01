@@ -32,6 +32,50 @@ function normalizeTeamName(name: string): string {
   return name.toLowerCase().replace(/[^a-z]/g, "");
 }
 
+const TEAM_CANONICAL: Record<string, string> = {
+  "atlantahawks": "hawks", "hawks": "hawks", "atl": "hawks",
+  "bostonceltics": "celtics", "celtics": "celtics", "bos": "celtics",
+  "brooklynnets": "nets", "nets": "nets", "bkn": "nets",
+  "charlottehornets": "hornets", "hornets": "hornets", "cha": "hornets",
+  "chicagobulls": "bulls", "bulls": "bulls", "chi": "bulls",
+  "clevelandcavaliers": "cavaliers", "cavaliers": "cavaliers", "cavs": "cavaliers", "cle": "cavaliers",
+  "dallasmavericks": "mavericks", "mavericks": "mavericks", "mavs": "mavericks", "dal": "mavericks",
+  "denvernuggets": "nuggets", "nuggets": "nuggets", "den": "nuggets",
+  "detroitpistons": "pistons", "pistons": "pistons", "det": "pistons",
+  "goldenstatewarriors": "warriors", "warriors": "warriors", "gsw": "warriors",
+  "houstonrockets": "rockets", "rockets": "rockets", "hou": "rockets",
+  "indianapacers": "pacers", "pacers": "pacers", "ind": "pacers",
+  "losangelesclippers": "clippers", "clippers": "clippers", "lac": "clippers", "laclippers": "clippers",
+  "losangeleslakers": "lakers", "lakers": "lakers", "lal": "lakers", "lalakers": "lakers",
+  "memphisgrizzlies": "grizzlies", "grizzlies": "grizzlies", "mem": "grizzlies",
+  "miamiheat": "heat", "heat": "heat", "mia": "heat",
+  "milwaukeebucks": "bucks", "bucks": "bucks", "mil": "bucks",
+  "minnesotatimberwolves": "timberwolves", "timberwolves": "timberwolves", "wolves": "timberwolves", "min": "timberwolves",
+  "neworleanspelicans": "pelicans", "pelicans": "pelicans", "nop": "pelicans",
+  "newyorkknicks": "knicks", "knicks": "knicks", "nyk": "knicks",
+  "oklahomacitythunder": "thunder", "thunder": "thunder", "okc": "thunder",
+  "orlandomagic": "magic", "magic": "magic", "orl": "magic",
+  "philadelphia76ers": "76ers", "76ers": "76ers", "sixers": "76ers", "phi": "76ers",
+  "phoenixsuns": "suns", "suns": "suns", "phx": "suns",
+  "portlandtrailblazers": "blazers", "trailblazers": "blazers", "blazers": "blazers", "por": "blazers",
+  "sacramentokings": "kings", "kings": "kings", "sac": "kings",
+  "sanantoniospurs": "spurs", "spurs": "spurs", "sas": "spurs",
+  "torontoraptors": "raptors", "raptors": "raptors", "tor": "raptors",
+  "utahjazz": "jazz", "jazz": "jazz", "uta": "jazz",
+  "washingtonwizards": "wizards", "wizards": "wizards", "was": "wizards",
+};
+
+function getCanonicalTeam(name: string): string {
+  const norm = normalizeTeamName(name);
+  // Direct lookup
+  if (TEAM_CANONICAL[norm]) return TEAM_CANONICAL[norm];
+  // Try finding a key that's a substring
+  for (const [key, canonical] of Object.entries(TEAM_CANONICAL)) {
+    if (norm.includes(key) || key.includes(norm)) return canonical;
+  }
+  return norm;
+}
+
 function hashString(str: string): number {
   let hash = 0;
   for (let i = 0; i < str.length; i++) {
@@ -95,31 +139,60 @@ async function findTeamId(teamName: string): Promise<number | null> {
 }
 
 async function findOrCreateGame(event: OddsEvent): Promise<string | null> {
-  const commenceDate = event.commence_time.slice(0, 10);
+  const commenceDate = new Date(event.commence_time);
   
-  // First check by sourceGameId (for games we created)
+  // First check by sourceGameId (for games we created from odds)
   const sourceGameId = -Math.abs(hashString(event.id));
   const existingBySource = await prisma.game.findUnique({
     where: { sourceGameId },
   });
   if (existingBySource) return existingBySource.id;
 
-  // Then try to match by team names
-  const homeNorm = normalizeTeamName(event.home_team);
-  const awayNorm = normalizeTeamName(event.away_team);
+  // Get canonical team names for matching
+  const homeCanon = getCanonicalTeam(event.home_team);
+  const awayCanon = getCanonicalTeam(event.away_team);
+  
+  // Search on the UTC date AND the day before (timezone handling)
+  const searchDate1 = new Date(commenceDate.toISOString().slice(0, 10) + "T00:00:00Z");
+  const searchDate2 = new Date(searchDate1.getTime() - 24 * 60 * 60 * 1000);
   
   const games = await prisma.game.findMany({
-    where: { date: new Date(commenceDate + "T00:00:00Z") },
+    where: { 
+      date: { in: [searchDate1, searchDate2] },
+      // Prefer games with context (real games from stats ingest)
+      context: { isNot: null },
+    },
     include: { homeTeam: true, awayTeam: true },
   });
 
   for (const game of games) {
-    const dbHome = normalizeTeamName(game.homeTeam?.name ?? game.homeTeamNameSnapshot ?? "");
-    const dbAway = normalizeTeamName(game.awayTeam?.name ?? game.awayTeamNameSnapshot ?? "");
+    const dbHome = getCanonicalTeam(game.homeTeam?.name ?? game.homeTeamNameSnapshot ?? "");
+    const dbAway = getCanonicalTeam(game.awayTeam?.name ?? game.awayTeamNameSnapshot ?? "");
+
+    // Check both orderings (odds API sometimes has home/away swapped)
+    if (
+      (dbHome === homeCanon && dbAway === awayCanon) ||
+      (dbHome === awayCanon && dbAway === homeCanon)
+    ) {
+      return game.id;
+    }
+  }
+  
+  // Also check games without context (fallback)
+  const gamesNoContext = await prisma.game.findMany({
+    where: { 
+      date: { in: [searchDate1, searchDate2] },
+    },
+    include: { homeTeam: true, awayTeam: true },
+  });
+
+  for (const game of gamesNoContext) {
+    const dbHome = getCanonicalTeam(game.homeTeam?.name ?? game.homeTeamNameSnapshot ?? "");
+    const dbAway = getCanonicalTeam(game.awayTeam?.name ?? game.awayTeamNameSnapshot ?? "");
 
     if (
-      (dbHome.includes(homeNorm) || homeNorm.includes(dbHome)) &&
-      (dbAway.includes(awayNorm) || awayNorm.includes(dbAway))
+      (dbHome === homeCanon && dbAway === awayCanon) ||
+      (dbHome === awayCanon && dbAway === homeCanon)
     ) {
       return game.id;
     }
@@ -134,18 +207,18 @@ async function findOrCreateGame(event: OddsEvent): Promise<string | null> {
   const game = await prisma.game.create({
     data: {
       sourceGameId,
-      date: new Date(commenceDate + "T00:00:00Z"),
+      date: searchDate1,
       homeTeamId,
       awayTeamId,
       homeTeamNameSnapshot: event.home_team,
       awayTeamNameSnapshot: event.away_team,
-      season: new Date(event.commence_time).getFullYear(),
+      season: commenceDate.getFullYear(),
       stage: 0,
       league: "NBA",
       homeScore: 0,
       awayScore: 0,
       status: "Scheduled",
-      tipoffTimeUtc: new Date(event.commence_time),
+      tipoffTimeUtc: commenceDate,
     },
   });
   
@@ -164,11 +237,15 @@ function extractOddsFromBookmaker(event: OddsEvent, bookmakerKey: string) {
   let mlHome: number | null = null;
   let mlAway: number | null = null;
 
+  const homeCanon = getCanonicalTeam(event.home_team);
+  const awayCanon = getCanonicalTeam(event.away_team);
+
   for (const market of bookmaker.markets) {
     if (market.key === "spreads") {
       for (const o of market.outcomes) {
-        if (o.name === event.home_team) spreadHome = o.point ?? null;
-        if (o.name === event.away_team) spreadAway = o.point ?? null;
+        const oCanon = getCanonicalTeam(o.name);
+        if (oCanon === homeCanon) spreadHome = o.point ?? null;
+        if (oCanon === awayCanon) spreadAway = o.point ?? null;
       }
     }
     if (market.key === "totals") {
@@ -179,8 +256,9 @@ function extractOddsFromBookmaker(event: OddsEvent, bookmakerKey: string) {
     }
     if (market.key === "h2h") {
       for (const o of market.outcomes) {
-        if (o.name === event.home_team) mlHome = o.price;
-        if (o.name === event.away_team) mlAway = o.price;
+        const oCanon = getCanonicalTeam(o.name);
+        if (oCanon === homeCanon) mlHome = o.price;
+        if (oCanon === awayCanon) mlAway = o.price;
       }
     }
   }

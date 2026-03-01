@@ -154,7 +154,10 @@ function computePlayerSnapshot(accum: PlayerAccum): PlayerSnapshot | null {
   if (accum.gamesPlayed === 0) return null;
 
   const gp = accum.gamesPlayed;
-  const mpg = accum.totalMinutesSec / 60 / gp;
+  // Handle inconsistent data: some seasons store minutes in seconds (~1800-2800),
+  // others store in minutes (~20-50). If total is > 200 per game avg, it's likely seconds.
+  const avgRaw = accum.totalMinutesSec / gp;
+  const mpg = avgRaw > 200 ? avgRaw / 60 : avgRaw;
 
   return {
     playerId: accum.playerId,

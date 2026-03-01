@@ -29,6 +29,7 @@ import { teamProfile } from "../profiles/teamProfile.js";
 import { buildGameContext } from "../features/buildGameContext.js";
 import { buildGameEvents } from "../features/buildGameEvents.js";
 import { predictGames, predictPlayers } from "../features/predictGames.js";
+import { dailyPicks } from "../features/dailyPicks.js";
 import { runBacktest, backtestExisting, analyzePattern, quickValidate } from "../backtest/backtest.js";
 import type { RollupFilters } from "../stats/filters.js";
 import type { PatternFilterConfig } from "../patterns/config.js";
@@ -651,6 +652,10 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
   "predict:players": async (args) => {
     await predictPlayers(args);
+  },
+
+  "picks:daily": async (args) => {
+    await dailyPicks(args);
   },
 
   "backtest:run": async (args) => {
