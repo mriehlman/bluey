@@ -20,6 +20,7 @@ model Team {
 model Game {
   id                   String            @id @default(cuid())
   sourceGameId         Int               @unique
+  nbaGameId            String?           @unique
   date                 DateTime          @db.Date
   season               Int
   stage                Int
@@ -28,14 +29,26 @@ model Game {
   awayTeamId           Int
   homeScore            Int
   awayScore            Int
+  periods              Int?
+  status               String?
+  gameCode             String?
   tipoffTimeUtc        DateTime?
   homeTeamNameSnapshot String?
   awayTeamNameSnapshot String?
-  seasonType           String?           // REG, POST, PRE, ASG
+  seasonType           String?
+  isNeutralSite        Boolean?
+  seriesText           String?
+  poRoundDesc          String?
+  homeWinsPreGame      Int?
+  homeLossesPreGame    Int?
+  awayWinsPreGame      Int?
+  awayLossesPreGame    Int?
+  broadcasts           Json?
   homeTeam             Team              @relation("HomeTeam", fields: [homeTeamId], references: [id])
   awayTeam             Team              @relation("AwayTeam", fields: [awayTeamId], references: [id])
   playerStats          PlayerGameStat[]
   odds                 GameOdds[]
+  playerPropOdds       PlayerPropOdds[]
   context              GameContext?
   gameEvents           GameEvent[]
   playerContexts       PlayerGameContext[]
@@ -51,35 +64,45 @@ model Player {
   id           Int                @id
   firstname    String?
   lastname     String?
+  jerseyNum    String?
+  slug         String?
   stats        PlayerGameStat[]
   gameContexts PlayerGameContext[]
+  propOdds     PlayerPropOdds[]
 }
 
 model PlayerGameStat {
-  id        String @id @default(cuid())
-  gameId    String
-  playerId  Int
-  teamId    Int
-  minutes   Int
-  points    Int
-  assists   Int
-  rebounds  Int
-  steals    Int
-  blocks    Int
-  turnovers Int
-  fgm       Int?
-  fga       Int?
-  fg3m      Int?
-  fg3a      Int?
-  ftm       Int?
-  fta       Int?
-  oreb      Int?
-  dreb      Int?
-  pf        Int?
-  plusMinus  Int?
-  game      Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
-  player    Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
-  team      Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  id          String  @id @default(cuid())
+  gameId      String
+  playerId    Int
+  teamId      Int
+  minutes     Int
+  minutesRaw  String?
+  points      Int
+  assists     Int
+  rebounds    Int
+  steals      Int
+  blocks      Int
+  turnovers   Int
+  fgm         Int?
+  fga         Int?
+  fgPct       Float?
+  fg3m        Int?
+  fg3a        Int?
+  fg3Pct      Float?
+  ftm         Int?
+  fta         Int?
+  ftPct       Float?
+  oreb        Int?
+  dreb        Int?
+  pf          Int?
+  plusMinus   Float?
+  position    String?
+  starter     Boolean?
+  comment     String?
+  game        Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  player      Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  team        Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
   @@unique([gameId, playerId])
   @@index([gameId])
@@ -210,12 +233,32 @@ model GameOdds {
   @@index([gameId])
 }
 
+model PlayerPropOdds {
+  id          String   @id @default(cuid())
+  gameId      String
+  playerId    Int
+  source      String
+  market      String
+  line        Float?
+  overPrice   Int?
+  underPrice  Int?
+  fetchedAt   DateTime @default(now())
+  
+  game        Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  player      Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([gameId, playerId, source, market])
+  @@index([gameId])
+  @@index([playerId])
+  @@index([market])
+}
+
 model ExternalIdMap {
   id         String   @id @default(cuid())
-  entityType String   // TEAM, PLAYER, GAME
-  source     String   // apiSports, oddsApi, sportradar, etc.
+  entityType String
+  source     String
   sourceId   String
-  internalId String   // Prefixed: "team:14", "player:2544", "game:ck..."
+  internalId String
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
@@ -298,8 +341,8 @@ model GameEvent {
   gameId   String
   season   Int
   eventKey String
-  type     String            // "condition" or "outcome"
-  side     String @default("game") // "home", "away", or "game"
+  type     String
+  side     String @default("game")
   meta     Json?
 
   game     Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)

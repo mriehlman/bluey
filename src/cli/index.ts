@@ -1,8 +1,14 @@
+import * as fs from "fs/promises";
 import { ingestGames } from "../ingest/games.js";
 import { ingestPlayerStats } from "../ingest/playerstats.js";
-import { syncGamesForDate, syncGamesForRange, syncGamesForSeason } from "../ingest/syncGames.js";
+import { syncGamesForDate, syncGamesForRange, syncGamesForSeason, syncUpcomingGames } from "../ingest/syncGames.js";
 import { syncPlayerStatsForDate } from "../ingest/syncPlayerStats.js";
+import { syncNbaStatsForDate, syncNbaStatsForDateRange } from "../ingest/syncNbaStats.js";
 import { syncOddsLive, syncOddsForDate } from "../ingest/syncOdds.js";
+import { syncPlayerPropsLive } from "../ingest/syncPlayerProps.js";
+import { fetchSeasonToJson, processSeasonFromJson } from "../ingest/rawDataPipeline.js";
+import { ingestSeason, ingestAllSeasons, getIngestionStatus } from "../ingest/ingestRawNbaData.js";
+import { enrichSeason, enrichAllSeasons, getEnrichmentStatus } from "../ingest/enrichFromRawNba.js";
 import { getPlayerTotals } from "../stats/playerRollup.js";
 import { getTeamTotals } from "../stats/teamRollup.js";
 import { buildNightEvents } from "../features/buildNightEvents.js";
@@ -81,6 +87,18 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     await syncPlayerStatsForDate(flags.date);
   },
 
+  "sync:nba-stats": async (args) => {
+    const flags = parseFlags(args);
+    if (flags.date) {
+      await syncNbaStatsForDate(flags.date);
+    } else if (flags.from && flags.to) {
+      await syncNbaStatsForDateRange(flags.from, flags.to);
+    } else {
+      console.error("Usage: sync:nba-stats --date YYYY-MM-DD  or  --from YYYY-MM-DD --to YYYY-MM-DD");
+      process.exit(1);
+    }
+  },
+
   "sync:odds": async (args) => {
     const flags = parseFlags(args);
     if (flags.date) {
@@ -88,6 +106,10 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     } else {
       await syncOddsLive();
     }
+  },
+
+  "sync:player-props": async () => {
+    await syncPlayerPropsLive();
   },
 
   "sync:daily": async () => {
@@ -111,6 +133,48 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     }
 
     console.log("\n=== Daily sync complete ===");
+  },
+
+  "sync:upcoming": async (args) => {
+    const flags = parseFlags(args);
+    const dateStr = flags.date || new Date().toISOString().slice(0, 10);
+    
+    console.log(`\n=== Sync Upcoming Games for ${dateStr} ===\n`);
+    
+    console.log("Step 1/2: Syncing upcoming games...");
+    await syncUpcomingGames(dateStr);
+    
+    console.log("\nStep 2/2: Syncing live odds...");
+    try {
+      await syncOddsLive();
+    } catch (err) {
+      console.warn("  Odds sync failed (non-fatal):", (err as Error).message);
+    }
+    
+    console.log("\n=== Upcoming sync complete ===");
+  },
+
+  "predict:today": async (args) => {
+    const flags = parseFlags(args);
+    const dateStr = flags.date || new Date().toISOString().slice(0, 10);
+    
+    console.log(`\n=== Today's Predictions for ${dateStr} ===\n`);
+    
+    // Step 1: Sync upcoming games
+    console.log("Step 1/3: Syncing upcoming games...");
+    await syncUpcomingGames(dateStr);
+    
+    // Step 2: Sync live odds  
+    console.log("\nStep 2/3: Syncing live odds...");
+    try {
+      await syncOddsLive();
+    } catch (err) {
+      console.warn("  Odds sync failed (non-fatal):", (err as Error).message);
+    }
+    
+    // Step 3: Run predictions
+    console.log("\nStep 3/3: Running predictions...\n");
+    await predictGames(["--date", dateStr]);
   },
 
   "sync:backfill": async (args) => {
@@ -145,6 +209,294 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
       }
 
       console.log(`\n=== Season ${season} backfill complete: ${totalStats} total stats ===`);
+    }
+  },
+
+  "fetch:season": async (args) => {
+    const flags = parseFlags(args);
+    const season = flags.season;
+    
+    if (!season) {
+      console.error("Usage: fetch:season --season 2024-25 [--from YYYY-MM-DD] [--to YYYY-MM-DD]");
+      process.exit(1);
+    }
+    
+    await fetchSeasonToJson(season, flags.from, flags.to);
+  },
+
+  "process:season": async (args) => {
+    const flags = parseFlags(args);
+    const season = flags.season;
+    
+    if (!season) {
+      console.error("Usage: process:season --season 2024-25");
+      process.exit(1);
+    }
+    
+    await processSeasonFromJson(season);
+  },
+
+  "backfill:odds": async (args) => {
+    const { fetchHistoricalOdds, fetchHistoricalEventOdds } = await import("../api/oddsApi.js");
+    
+    const flags = parseFlags(args);
+    const from = flags.from || "2020-07-30";
+    const to = flags.to || new Date().toISOString().slice(0, 10);
+    const concurrency = Number(flags.concurrency) || 10;
+    const batchDelay = Number(flags.delay) || 0; // ms to wait between batches
+    const skipProps = flags.skipProps === "true";
+    
+    const dataDir = process.env.DATA_DIR || "./data";
+    const historicalDir = `${dataDir}/raw/odds/historical`;
+    const propsDir = `${dataDir}/raw/odds/player-props`;
+    const progressFile = `${dataDir}/raw/odds/_progress.json`;
+    
+    await fs.mkdir(historicalDir, { recursive: true });
+    await fs.mkdir(propsDir, { recursive: true });
+    
+    const PLAYER_PROPS_START = "2023-05-03";
+    const PLAYER_PROP_MARKETS = "player_points,player_rebounds,player_assists,player_threes,player_points_rebounds_assists";
+    
+    const scanExistingFiles = async (dir: string): Promise<Set<string>> => {
+      const dates = new Set<string>();
+      try {
+        const files = await fs.readdir(dir);
+        for (const file of files) {
+          const match = file.match(/^(\d{4}-\d{2}-\d{2})\.json$/);
+          if (match) dates.add(match[1]);
+        }
+      } catch { /* dir doesn't exist yet */ }
+      return dates;
+    };
+    
+    const scanExistingPropDates = async (): Promise<Set<string>> => {
+      const dates = new Set<string>();
+      try {
+        const subdirs = await fs.readdir(propsDir);
+        for (const subdir of subdirs) {
+          if (/^\d{4}-\d{2}-\d{2}$/.test(subdir)) {
+            // Only count if directory has actual files (not empty)
+            try {
+              const files = await fs.readdir(`${propsDir}/${subdir}`);
+              const jsonFiles = files.filter(f => f.endsWith('.json'));
+              if (jsonFiles.length > 0) {
+                dates.add(subdir);
+              }
+            } catch { /* empty or unreadable */ }
+          }
+        }
+      } catch { /* dir doesn't exist yet */ }
+      return dates;
+    };
+
+    console.log("Scanning existing files...");
+    const existingOddsDates = await scanExistingFiles(historicalDir);
+    const existingPropDates = await scanExistingPropDates();
+    
+    const allDates: string[] = [];
+    const startDate = new Date(from);
+    const endDate = new Date(to);
+    let current = new Date(startDate);
+
+    while (current <= endDate) {
+      allDates.push(current.toISOString().slice(0, 10));
+      current.setDate(current.getDate() + 1);
+    }
+
+    const pendingOddsDates = allDates.filter(d => !existingOddsDates.has(d));
+    const playerPropDates = allDates.filter(d => d >= PLAYER_PROPS_START);
+    const pendingPropDates = skipProps ? [] : playerPropDates.filter(d => !existingPropDates.has(d));
+
+    console.log(`\n=== Backfilling Historical Odds (PARALLEL: ${concurrency} concurrent) ===`);
+    console.log(`Range: ${from} to ${to}`);
+    console.log(`Total dates: ${allDates.length}`);
+    console.log(`\nGame odds:`);
+    console.log(`  Already have: ${existingOddsDates.size} files`);
+    console.log(`  Remaining: ${pendingOddsDates.length}`);
+    if (!skipProps) {
+      console.log(`\nPlayer props (available from ${PLAYER_PROPS_START}):`);
+      console.log(`  Dates in range: ${playerPropDates.length}`);
+      console.log(`  Already have: ${existingPropDates.size} dates`);
+      console.log(`  Remaining: ${pendingPropDates.length}`);
+    } else {
+      console.log(`\nPlayer props: SKIPPED (--skipProps true)`);
+    }
+    console.log(`\nPress Ctrl+C to pause anytime.\n`);
+
+    if (pendingOddsDates.length === 0 && pendingPropDates.length === 0) {
+      console.log("All dates already downloaded!");
+      return;
+    }
+
+    let sessionOddsCount = 0;
+    let sessionPropsCount = 0;
+    let interrupted = false;
+    let rateLimited = false;
+    const errors: string[] = [];
+    
+    const saveProgress = async () => {
+      const updatedOddsDates = await scanExistingFiles(historicalDir);
+      const updatedPropDates = await scanExistingPropDates();
+      const progress = {
+        startDate: from,
+        endDate: to,
+        completedDates: Array.from(updatedOddsDates).sort(),
+        completedPlayerPropDates: Array.from(updatedPropDates).sort(),
+        lastRunAt: new Date().toISOString(),
+      };
+      await fs.writeFile(progressFile, JSON.stringify(progress, null, 2));
+    };
+    
+    process.on("SIGINT", async () => {
+      console.log("\n\nInterrupted! Saving progress...");
+      interrupted = true;
+      await saveProgress();
+      console.log(`Progress saved. Run again to continue.`);
+      process.exit(0);
+    });
+
+    const fetchDateOdds = async (dateStr: string): Promise<{ date: string; success: boolean; events: number }> => {
+      if (interrupted || rateLimited) return { date: dateStr, success: false, events: 0 };
+      
+      try {
+        const events = await fetchHistoricalOdds(dateStr);
+        const filepath = `${historicalDir}/${dateStr}.json`;
+        await fs.writeFile(filepath, JSON.stringify(events, null, 2));
+        return { date: dateStr, success: true, events: events.length };
+      } catch (err) {
+        const errorMsg = (err as Error).message;
+        if (errorMsg.includes("429") || errorMsg.includes("rate")) {
+          rateLimited = true;
+        }
+        errors.push(`${dateStr}: ${errorMsg}`);
+        return { date: dateStr, success: false, events: 0 };
+      }
+    };
+
+    const processBatch = async <T, R>(items: T[], fn: (item: T) => Promise<R>, batchSize: number): Promise<R[]> => {
+      const results: R[] = [];
+      for (let i = 0; i < items.length; i += batchSize) {
+        if (interrupted || rateLimited) break;
+        const batch = items.slice(i, i + batchSize);
+        const batchResults = await Promise.all(batch.map(fn));
+        results.push(...batchResults);
+
+        const completed = Math.min(i + batchSize, items.length);
+        const successful = results.filter(r => (r as { success?: boolean }).success).length;
+        console.log(`  Progress: ${completed}/${items.length} (${successful} successful)`);
+
+        if (completed % 50 === 0) {
+          await saveProgress();
+        }
+        
+        if (batchDelay > 0 && i + batchSize < items.length) {
+          await new Promise(r => setTimeout(r, batchDelay));
+        }
+      }
+      return results;
+    };
+
+    console.log(`\n--- Fetching Game Odds (${pendingOddsDates.length} dates) ---\n`);
+    const oddsResults = await processBatch(pendingOddsDates, fetchDateOdds, concurrency);
+    sessionOddsCount = oddsResults.filter(r => r.success).length;
+
+    if (rateLimited) {
+      console.log("\nRate limited! Saving progress and stopping...");
+      await saveProgress();
+      console.log(`Saved ${sessionOddsCount} game odds files before rate limit.`);
+      process.exit(1);
+    }
+
+    if (!skipProps && pendingPropDates.length > 0 && !interrupted) {
+      console.log(`\n--- Fetching Player Props (${pendingPropDates.length} dates) ---`);
+      console.log(`  Reading event IDs from local game odds files (no extra API calls)\n`);
+
+      for (const dateStr of pendingPropDates) {
+        if (interrupted || rateLimited) break;
+
+        try {
+          const oddsFilePath = `${historicalDir}/${dateStr}.json`;
+          let eventIds: string[] = [];
+
+          try {
+            const oddsData = JSON.parse(await fs.readFile(oddsFilePath, "utf-8")) as Array<{ id: string; commence_time: string }>;
+            // Only get events that actually occur on this date (filter out futures)
+            const sameDay = oddsData.filter(e => e.commence_time?.startsWith(dateStr));
+            eventIds = sameDay.map(e => e.id);
+            
+            if (sameDay.length < oddsData.length) {
+              console.log(`  ${dateStr}: ${sameDay.length} same-day events (${oddsData.length - sameDay.length} futures skipped)`);
+            }
+          } catch {
+            console.warn(`  ${dateStr}: No local odds file, skipping`);
+            continue;
+          }
+
+          if (eventIds.length === 0) {
+            continue; // No same-day events, skip
+          }
+
+          if (eventIds.length > 0) {
+            const datePropsDir = `${propsDir}/${dateStr}`;
+            const propsToSave: Array<{ eventId: string; data: unknown }> = [];
+
+            const fetchProp = async (eventId: string) => {
+              try {
+                const propsData = await fetchHistoricalEventOdds(eventId, dateStr, PLAYER_PROP_MARKETS);
+                if (propsData && propsData.bookmakers?.length) {
+                  propsToSave.push({ eventId, data: propsData });
+                  return true;
+                }
+              } catch (err) {
+                const msg = (err as Error).message;
+                if (msg.includes("429") || msg.includes("rate")) {
+                  rateLimited = true;
+                }
+              }
+              return false;
+            };
+
+            const propResults = await Promise.all(eventIds.map(fetchProp));
+            const propsCount = propResults.filter(Boolean).length;
+            
+            // Only create directory and save if we got actual data
+            if (propsToSave.length > 0) {
+              await fs.mkdir(datePropsDir, { recursive: true });
+              for (const { eventId, data } of propsToSave) {
+                await fs.writeFile(
+                  `${datePropsDir}/${eventId}.json`,
+                  JSON.stringify(data, null, 2)
+                );
+              }
+            }
+            
+            console.log(`  ${dateStr}: ${propsCount}/${eventIds.length} events`);
+            sessionPropsCount += propsCount;
+          }
+        } catch (propErr) {
+          const errorMsg = (propErr as Error).message;
+          console.warn(`  ${dateStr} error: ${errorMsg}`);
+          if (errorMsg.includes("429") || errorMsg.includes("rate")) {
+            rateLimited = true;
+            break;
+          }
+        }
+      }
+    }
+    
+    await saveProgress();
+    
+    const finalOddsDates = await scanExistingFiles(historicalDir);
+    const finalPropDates = await scanExistingPropDates();
+    
+    console.log(`\n=== Backfill Complete ===`);
+    console.log(`This session: ${sessionOddsCount} game odds dates, ${sessionPropsCount} player prop events`);
+    console.log(`Total game odds: ${finalOddsDates.size}/${allDates.length} dates`);
+    console.log(`Total player props: ${finalPropDates.size}/${playerPropDates.length} dates`);
+    if (errors.length > 0) {
+      console.log(`\nErrors (${errors.length}):`);
+      errors.slice(0, 10).forEach(e => console.log(`  ${e}`));
+      if (errors.length > 10) console.log(`  ... and ${errors.length - 10} more`);
     }
   },
 
@@ -298,6 +650,52 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
   "predict:players": async (args) => {
     await predictPlayers(args);
+  },
+
+  "ingest:raw": async (args) => {
+    const flags = parseFlags(args);
+    const force = args.includes("--force");
+    
+    if (flags.season) {
+      await ingestSeason(flags.season, { force });
+    } else if (args.includes("--all")) {
+      await ingestAllSeasons({ force });
+    } else {
+      console.error("Usage: ingest:raw --season 2024-25  or  ingest:raw --all");
+      console.error("  --force    Re-ingest all games (ignore progress)");
+      process.exit(1);
+    }
+  },
+
+  "ingest:status": async () => {
+    const status = await getIngestionStatus();
+    console.log("\n=== Raw Data Ingestion Status ===\n");
+    console.log("Season     | Raw Games | Ingested | In DB | Complete");
+    console.log("-----------|-----------|----------|-------|----------");
+    for (const [season, data] of Object.entries(status)) {
+      console.log(
+        `${season.padEnd(10)} | ${String(data.rawGames).padStart(9)} | ${String(data.ingestedGames).padStart(8)} | ${String(data.dbGames).padStart(5)} | ${data.percentComplete}%`
+      );
+    }
+    console.log("");
+  },
+
+  "enrich:raw": async (args) => {
+    const flags = parseFlags(args);
+    
+    if (flags.season) {
+      await enrichSeason(flags.season);
+    } else if (args.includes("--all")) {
+      await enrichAllSeasons();
+    } else {
+      console.error("Usage: enrich:raw --season 2024-25  or  enrich:raw --all");
+      console.error("  Enriches existing games with detailed stats from raw NBA JSON files");
+      process.exit(1);
+    }
+  },
+
+  "enrich:status": async () => {
+    await getEnrichmentStatus();
   },
 };
 

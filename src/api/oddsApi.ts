@@ -35,7 +35,7 @@ export interface OddsEvent {
 
 // ── Client internals ──
 
-const limiter = new RateLimiter(10); // conservative to stay within 500 req/month
+const limiter = new RateLimiter(300); // allow up to 300 requests/minute for fast backfill
 
 function getApiKey(): string {
   const key = process.env.ODDS_API_KEY;
@@ -78,4 +78,37 @@ export async function fetchHistoricalOdds(date: string): Promise<OddsEvent[]> {
     `${BASE_URL}/historical/sports/basketball_nba/odds?${params.toString()}`,
   );
   return res.data;
+}
+
+export async function fetchHistoricalEvents(date: string): Promise<Array<{ id: string; home_team: string; away_team: string; commence_time: string }>> {
+  const params = new URLSearchParams({
+    apiKey: getApiKey(),
+    date: `${date}T12:00:00Z`,
+  });
+  const res = await fetchJson<{ data: Array<{ id: string; home_team: string; away_team: string; commence_time: string }> }>(
+    `${BASE_URL}/historical/sports/basketball_nba/events?${params.toString()}`,
+  );
+  return res.data;
+}
+
+export async function fetchHistoricalEventOdds(
+  eventId: string,
+  date: string,
+  markets: string,
+): Promise<OddsEvent | null> {
+  const params = new URLSearchParams({
+    apiKey: getApiKey(),
+    regions: "us",
+    markets,
+    oddsFormat: "american",
+    date: `${date}T12:00:00Z`,
+  });
+  try {
+    const res = await fetchJson<{ data: OddsEvent }>(
+      `${BASE_URL}/historical/sports/basketball_nba/events/${eventId}/odds?${params.toString()}`,
+    );
+    return res.data;
+  } catch {
+    return null;
+  }
 }

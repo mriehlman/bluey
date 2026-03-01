@@ -4,6 +4,8 @@ import path from "path";
 export const maxDuration = 300;
 
 const STEPS = [
+  "sync:odds",
+  "sync:player-props",
   "build:night-aggregates",
   "build:nightly-events",
   "build:nights",

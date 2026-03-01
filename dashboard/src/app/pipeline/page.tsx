@@ -8,6 +8,8 @@ interface StatusData {
     playerStats: number;
     teams: number;
     players: number;
+    gameOdds: number;
+    playerPropOdds: number;
     nightAggregates: number;
     nightEvents: number;
     nights: number;
@@ -23,6 +25,7 @@ interface StatusData {
   latestGameDate: string | null;
   latestNightDate: string | null;
   latestNightProcessedAt: string | null;
+  latestOddsFetchedAt: string | null;
   seasons: number[];
 }
 
@@ -41,71 +44,32 @@ interface FlagDef {
   placeholder?: string;
 }
 
-const COMMON_FLAGS: FlagDef[] = [
-  { name: "season", label: "Season", type: "number", placeholder: "e.g. 2024" },
-  { name: "dateFrom", label: "From", type: "text", placeholder: "YYYY-MM-DD" },
-  { name: "dateTo", label: "To", type: "text", placeholder: "YYYY-MM-DD" },
-];
-
 const SEASON_RANGE_FLAGS: FlagDef[] = [
   { name: "season", label: "Season", type: "number", placeholder: "e.g. 2024" },
   { name: "from-season", label: "From Season", type: "number", placeholder: "2019" },
   { name: "to-season", label: "To Season", type: "number", placeholder: "2025" },
 ];
 
-const STEPS: StepDef[] = [
+const ODDS_STEPS: StepDef[] = [
   {
-    id: "build:night-aggregates",
-    label: "1. Build Night Aggregates",
-    description: "Precompute team stat totals per night from player box scores.",
+    id: "sync:odds",
+    label: "Sync Game Odds",
+    description: "Fetch live game odds (spreads, totals, moneylines) from The Odds API.",
     flags: [
-      ...COMMON_FLAGS,
-      { name: "missingOnly", label: "Missing Only", type: "text", placeholder: "true" },
+      { name: "date", label: "Date", type: "text", placeholder: "YYYY-MM-DD (optional)" },
     ],
-    statusKeys: ["nightAggregates"],
+    statusKeys: ["gameOdds"],
   },
   {
-    id: "build:nightly-events",
-    label: "2. Build Night Events",
-    description: "Run the event catalog over game dates to detect nightly events.",
-    flags: COMMON_FLAGS,
-    statusKeys: ["nightEvents"],
-  },
-  {
-    id: "build:nights",
-    label: "3. Build Nights",
-    description: "Create Night summary records with processing metadata.",
-    flags: [{ name: "season", label: "Season", type: "number", placeholder: "e.g. 2024" }],
-    statusKeys: ["nights"],
-  },
-  {
-    id: "search:patterns",
-    label: "4. Search Patterns",
-    description: "Discover recurring multi-event patterns across all seasons.",
-    flags: [
-      { name: "minOcc", label: "Min Occ", type: "number", placeholder: "3" },
-      { name: "minSeasons", label: "Min Seasons", type: "number", placeholder: "2" },
-      { name: "maxCluster", label: "Max Cluster", type: "text", placeholder: "0.6" },
-      { name: "minAvg", label: "Min Avg/Season", type: "text", placeholder: "0.5" },
-      { name: "maxAvg", label: "Max Avg/Season", type: "text", placeholder: "6" },
-      { name: "maxResults", label: "Max Results", type: "number", placeholder: "5000" },
-    ],
-    statusKeys: ["patterns", "patternHits"],
-  },
-  {
-    id: "patterns:dedupe",
-    label: "5. Dedupe Patterns",
-    description: "Analyze and flag redundant or near-duplicate patterns.",
-    flags: [
-      { name: "threshold", label: "Threshold", type: "text", placeholder: "0.9" },
-      { name: "minOcc", label: "Min Occ", type: "number", placeholder: "3" },
-      { name: "top", label: "Top N", type: "number", placeholder: "50" },
-    ],
-    statusKeys: ["patterns"],
+    id: "sync:player-props",
+    label: "Sync Player Props",
+    description: "Fetch player prop odds (points, rebounds, assists, etc.) from The Odds API.",
+    flags: [],
+    statusKeys: ["playerPropOdds"],
   },
 ];
 
-const PREDICTION_STEPS: StepDef[] = [
+const GAME_PIPELINE_STEPS: StepDef[] = [
   {
     id: "build:game-context",
     label: "1. Build Game Context",
@@ -154,6 +118,64 @@ const PREDICTION_STEPS: StepDef[] = [
   },
 ];
 
+const COMMON_FLAGS: FlagDef[] = [
+  { name: "season", label: "Season", type: "number", placeholder: "e.g. 2024" },
+  { name: "dateFrom", label: "From", type: "text", placeholder: "YYYY-MM-DD" },
+  { name: "dateTo", label: "To", type: "text", placeholder: "YYYY-MM-DD" },
+];
+
+const LEGACY_STEPS: StepDef[] = [
+  {
+    id: "build:night-aggregates",
+    label: "Build Night Aggregates",
+    description: "Precompute team stat totals per night from player box scores.",
+    flags: [
+      ...COMMON_FLAGS,
+      { name: "missingOnly", label: "Missing Only", type: "text", placeholder: "true" },
+    ],
+    statusKeys: ["nightAggregates"],
+  },
+  {
+    id: "build:nightly-events",
+    label: "Build Night Events",
+    description: "Run the event catalog over game dates to detect nightly events.",
+    flags: COMMON_FLAGS,
+    statusKeys: ["nightEvents"],
+  },
+  {
+    id: "build:nights",
+    label: "Build Nights",
+    description: "Create Night summary records with processing metadata.",
+    flags: [{ name: "season", label: "Season", type: "number", placeholder: "e.g. 2024" }],
+    statusKeys: ["nights"],
+  },
+  {
+    id: "search:patterns",
+    label: "Search Slate Patterns",
+    description: "Discover recurring multi-event patterns across all seasons.",
+    flags: [
+      { name: "minOcc", label: "Min Occ", type: "number", placeholder: "3" },
+      { name: "minSeasons", label: "Min Seasons", type: "number", placeholder: "2" },
+      { name: "maxCluster", label: "Max Cluster", type: "text", placeholder: "0.6" },
+      { name: "minAvg", label: "Min Avg/Season", type: "text", placeholder: "0.5" },
+      { name: "maxAvg", label: "Max Avg/Season", type: "text", placeholder: "6" },
+      { name: "maxResults", label: "Max Results", type: "number", placeholder: "5000" },
+    ],
+    statusKeys: ["patterns", "patternHits"],
+  },
+  {
+    id: "patterns:dedupe",
+    label: "Dedupe Patterns",
+    description: "Analyze and flag redundant or near-duplicate patterns.",
+    flags: [
+      { name: "threshold", label: "Threshold", type: "text", placeholder: "0.9" },
+      { name: "minOcc", label: "Min Occ", type: "number", placeholder: "3" },
+      { name: "top", label: "Top N", type: "number", placeholder: "50" },
+    ],
+    statusKeys: ["patterns"],
+  },
+];
+
 type StepState = "idle" | "running" | "done" | "error";
 
 export default function PipelinePage() {
@@ -162,6 +184,7 @@ export default function PipelinePage() {
   const [stepOutputs, setStepOutputs] = useState<Record<string, string>>({});
   const [stepFlags, setStepFlags] = useState<Record<string, Record<string, string>>>({});
   const [expandedStep, setExpandedStep] = useState<string | null>(null);
+  const [showLegacy, setShowLegacy] = useState(false);
   const outputRefs = useRef<Record<string, HTMLPreElement | null>>({});
 
   const fetchStatus = useCallback(async () => {
@@ -241,8 +264,15 @@ export default function PipelinePage() {
     }
   }
 
-  async function runAll() {
-    for (const step of STEPS) {
+  async function runGamePipeline() {
+    for (const step of GAME_PIPELINE_STEPS.slice(0, 3)) {
+      const result = await runStep(step.id);
+      if (result === "error") break;
+    }
+  }
+
+  async function syncAllOdds() {
+    for (const step of ODDS_STEPS) {
       const result = await runStep(step.id);
       if (result === "error") break;
     }
@@ -250,6 +280,8 @@ export default function PipelinePage() {
 
   const fmtDate = (d: string | null) =>
     d ? new Date(d).toISOString().slice(0, 10) : "—";
+  const fmtDateTime = (d: string | null) =>
+    d ? new Date(d).toLocaleString() : "—";
   const fmtCount = (n: number) => n.toLocaleString();
 
   const anyRunning = Object.values(stepStates).some((s) => s === "running");
@@ -258,18 +290,9 @@ export default function PipelinePage() {
     <>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <h1>Pipeline</h1>
-        <div style={{ display: "flex", gap: "0.5rem" }}>
-          <button onClick={fetchStatus} disabled={anyRunning}>
-            Refresh Status
-          </button>
-          <button
-            onClick={runAll}
-            disabled={anyRunning}
-            style={{ background: "#059669" }}
-          >
-            Run All Steps
-          </button>
-        </div>
+        <button onClick={fetchStatus} disabled={anyRunning}>
+          Refresh Status
+        </button>
       </div>
 
       {status && (
@@ -278,37 +301,44 @@ export default function PipelinePage() {
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
+              gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))",
               gap: "0.75rem",
             }}
           >
-            <Stat label="Teams" value={fmtCount(status.counts.teams)} />
-            <Stat label="Players" value={fmtCount(status.counts.players)} />
             <Stat label="Games" value={fmtCount(status.counts.games)} />
             <Stat label="Player Stats" value={fmtCount(status.counts.playerStats)} />
-            <Stat label="Night Aggregates" value={fmtCount(status.counts.nightAggregates)} />
-            <Stat label="Night Events" value={fmtCount(status.counts.nightEvents)} />
-            <Stat label="Nights" value={fmtCount(status.counts.nights)} />
-            <Stat label="Slate Patterns" value={fmtCount(status.counts.patterns)} />
-            <Stat label="Pattern Hits" value={fmtCount(status.counts.patternHits)} />
-            <Stat label="Watchlist" value={fmtCount(status.counts.watchlistItems)} />
+            <Stat label="Teams" value={fmtCount(status.counts.teams)} />
+            <Stat label="Players" value={fmtCount(status.counts.players)} />
+            <Stat label="Game Odds" value={fmtCount(status.counts.gameOdds)} highlight />
+            <Stat label="Player Props" value={fmtCount(status.counts.playerPropOdds)} highlight />
             <Stat label="Game Contexts" value={fmtCount(status.counts.gameContexts)} />
-            <Stat label="Player Contexts" value={fmtCount(status.counts.playerGameContexts)} />
             <Stat label="Game Events" value={fmtCount(status.counts.gameEvents)} />
-            <Stat label="Game Patterns" value={fmtCount(status.counts.gamePatterns)} />
-            <Stat label="Game Pattern Hits" value={fmtCount(status.counts.gamePatternHits)} />
+            <Stat label="Game Patterns" value={fmtCount(status.counts.gamePatterns)} highlight />
+            <Stat label="Pattern Hits" value={fmtCount(status.counts.gamePatternHits)} />
           </div>
           <div style={{ marginTop: "0.75rem", fontSize: "0.85rem" }} className="muted">
-            Latest game: {fmtDate(status.latestGameDate)} | Latest night:{" "}
-            {fmtDate(status.latestNightDate)} | Seasons:{" "}
-            {status.seasons.length > 0 ? status.seasons.join(", ") : "—"}
+            Latest game: {fmtDate(status.latestGameDate)} | 
+            Odds updated: {fmtDateTime(status.latestOddsFetchedAt)} | 
+            Seasons: {status.seasons.length > 0 ? status.seasons.join(", ") : "—"}
           </div>
         </div>
       )}
 
-      <h2 style={{ marginTop: "1rem", marginBottom: "0.5rem" }}>Slate-Level Pipeline</h2>
+      <h2 style={{ marginTop: "1rem", marginBottom: "0.5rem" }}>Odds Sync</h2>
+      <p className="muted" style={{ fontSize: "0.85rem", marginBottom: "0.75rem" }}>
+        Sync live betting odds from The Odds API. Run daily to keep data current.
+      </p>
+      <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
+        <button
+          onClick={syncAllOdds}
+          disabled={anyRunning}
+          style={{ background: "#7c3aed" }}
+        >
+          Sync All Odds
+        </button>
+      </div>
       <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-        {STEPS.map((step) => (
+        {ODDS_STEPS.map((step) => (
           <StepCard
             key={step.id}
             step={step}
@@ -327,12 +357,21 @@ export default function PipelinePage() {
         ))}
       </div>
 
-      <h2 style={{ marginTop: "1.5rem", marginBottom: "0.5rem" }}>Game-Level Predictions</h2>
+      <h2 style={{ marginTop: "1.5rem", marginBottom: "0.5rem" }}>Game Prediction Pipeline</h2>
       <p className="muted" style={{ fontSize: "0.85rem", marginBottom: "0.75rem" }}>
-        Build pre-game context, generate condition/outcome events, search for predictive patterns, and make predictions.
+        Build pre-game context, generate events, search for predictive patterns, and make predictions.
       </p>
+      <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
+        <button
+          onClick={runGamePipeline}
+          disabled={anyRunning}
+          style={{ background: "#059669" }}
+        >
+          Run Pipeline (Steps 1-3)
+        </button>
+      </div>
       <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-        {PREDICTION_STEPS.map((step) => (
+        {GAME_PIPELINE_STEPS.map((step) => (
           <StepCard
             key={step.id}
             step={step}
@@ -349,18 +388,76 @@ export default function PipelinePage() {
             fmtCount={fmtCount}
           />
         ))}
+      </div>
+
+      <div style={{ marginTop: "2rem", borderTop: "1px solid var(--border)", paddingTop: "1rem" }}>
+        <button
+          onClick={() => setShowLegacy(!showLegacy)}
+          style={{ 
+            background: "transparent", 
+            border: "1px solid var(--border)",
+            color: "var(--text-muted)",
+            fontSize: "0.85rem",
+          }}
+        >
+          {showLegacy ? "▼" : "▶"} Legacy: Slate-Level Pipeline
+        </button>
+        
+        {showLegacy && (
+          <>
+            <p className="muted" style={{ fontSize: "0.8rem", marginTop: "0.5rem", marginBottom: "0.75rem" }}>
+              Night/slate-based analysis (deprecated in favor of game-level predictions).
+            </p>
+            {status && (
+              <div style={{ 
+                display: "flex", 
+                gap: "1rem", 
+                marginBottom: "0.75rem",
+                fontSize: "0.8rem",
+              }} className="muted">
+                <span>Night Aggregates: {fmtCount(status.counts.nightAggregates)}</span>
+                <span>Night Events: {fmtCount(status.counts.nightEvents)}</span>
+                <span>Nights: {fmtCount(status.counts.nights)}</span>
+                <span>Slate Patterns: {fmtCount(status.counts.patterns)}</span>
+              </div>
+            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+              {LEGACY_STEPS.map((step) => (
+                <StepCard
+                  key={step.id}
+                  step={step}
+                  state={stepStates[step.id] ?? "idle"}
+                  output={stepOutputs[step.id] ?? ""}
+                  isExpanded={expandedStep === step.id}
+                  status={status}
+                  anyRunning={anyRunning}
+                  stepFlags={stepFlags}
+                  setFlag={setFlag}
+                  setExpandedStep={setExpandedStep}
+                  runStep={runStep}
+                  outputRefs={outputRefs}
+                  fmtCount={fmtCount}
+                />
+              ))}
+            </div>
+          </>
+        )}
       </div>
     </>
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
   return (
     <div>
-      <div className="muted" style={{ fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.03em" }}>
+      <div className="muted" style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.08em" }}>
         {label}
       </div>
-      <div style={{ fontSize: "1.1rem", fontWeight: 600 }}>{value}</div>
+      <div style={{ 
+        fontSize: "1.1rem", 
+        fontWeight: 600,
+        color: highlight ? "var(--accent-cyan)" : "var(--text-primary)",
+      }}>{value}</div>
     </div>
   );
 }
@@ -368,7 +465,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 function StepBadge({ state }: { state: StepState }) {
   switch (state) {
     case "running":
-      return <span className="badge" style={{ background: "#fef3c7", color: "#92400e" }}>running</span>;
+      return <span className="badge" style={{ background: "var(--warning-bg)", color: "var(--warning)", borderColor: "var(--warning)" }}>running</span>;
     case "done":
       return <span className="badge badge-green">done</span>;
     case "error":

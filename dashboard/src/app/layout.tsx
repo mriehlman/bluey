@@ -16,9 +16,10 @@ export default function RootLayout({
       <body>
         <nav>
           <span className="brand">Bluey</span>
+          <a href="/predictions">Predictions</a>
+          <a href="/pipeline">Pipeline</a>
           <a href="/patterns">Patterns</a>
           <a href={`/events/${todayStr()}`}>Events</a>
-          <a href="/pipeline">Pipeline</a>
         </nav>
         <main>{children}</main>
       </body>

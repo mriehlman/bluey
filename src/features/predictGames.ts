@@ -6,7 +6,13 @@ import type { GameContext, PlayerGameContext } from "@prisma/client";
 
 function getCurrentSeason(): number {
   const now = new Date();
-  return now.getMonth() >= 9 ? now.getFullYear() + 1 : now.getFullYear();
+  // NBA season starts in October, so Oct-Dec uses current year, Jan-Sep uses previous year
+  return now.getMonth() >= 9 ? now.getFullYear() : now.getFullYear() - 1;
+}
+
+function getSeasonForDate(date: Date): number {
+  // NBA season starts in October, so Oct-Dec uses that year, Jan-Sep uses previous year
+  return date.getMonth() >= 9 ? date.getFullYear() : date.getFullYear() - 1;
 }
 
 export async function predictGames(args: string[] = []): Promise<void> {
@@ -25,7 +31,7 @@ export async function predictGames(args: string[] = []): Promise<void> {
   }
 
   const targetDate = new Date(dateStr + "T00:00:00Z");
-  const season = Number(flags.season) || getCurrentSeason();
+  const season = Number(flags.season) || getSeasonForDate(targetDate);
 
   console.log(`\n=== Predictions for ${dateStr} (season ${season}) ===\n`);
 
@@ -256,7 +262,7 @@ export async function predictPlayers(args: string[] = []): Promise<void> {
   }
 
   const targetDate = new Date(dateStr + "T00:00:00Z");
-  const season = Number(flags.season) || getCurrentSeason();
+  const season = Number(flags.season) || getSeasonForDate(targetDate);
 
   console.log(`\n=== Player Predictions for ${dateStr} (season ${season}) ===\n`);
 

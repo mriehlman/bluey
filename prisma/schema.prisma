@@ -19,7 +19,8 @@ model Team {
 
 model Game {
   id                   String            @id @default(cuid())
-  sourceGameId         Int               @unique
+  sourceGameId         Int               @unique    // balldontlie game ID
+  nbaGameId            String?           @unique    // NBA.com game ID (e.g., "0022400829")
   date                 DateTime          @db.Date
   season               Int
   stage                Int
@@ -28,14 +29,26 @@ model Game {
   awayTeamId           Int
   homeScore            Int
   awayScore            Int
+  periods              Int?              // 4 = regulation, 5+ = OT
+  status               String?           // Final, Final/OT, Scheduled, etc.
+  gameCode             String?           // e.g., "20250115/NYKPHI"
   tipoffTimeUtc        DateTime?
   homeTeamNameSnapshot String?
   awayTeamNameSnapshot String?
   seasonType           String?           // REG, POST, PRE, ASG
+  isNeutralSite        Boolean?          // Neutral site game
+  seriesText           String?           // Playoff series info
+  poRoundDesc          String?           // Playoff round description
+  homeWinsPreGame      Int?              // Home team wins entering game
+  homeLossesPreGame    Int?              // Home team losses entering game
+  awayWinsPreGame      Int?              // Away team wins entering game
+  awayLossesPreGame    Int?              // Away team losses entering game
+  broadcasts           Json?             // TV broadcast info as JSON
   homeTeam             Team              @relation("HomeTeam", fields: [homeTeamId], references: [id])
   awayTeam             Team              @relation("AwayTeam", fields: [awayTeamId], references: [id])
   playerStats          PlayerGameStat[]
   odds                 GameOdds[]
+  playerPropOdds       PlayerPropOdds[]
   context              GameContext?
   gameEvents           GameEvent[]
   playerContexts       PlayerGameContext[]
@@ -51,35 +64,45 @@ model Player {
   id           Int                @id
   firstname    String?
   lastname     String?
+  jerseyNum    String?            // Jersey number
+  slug         String?            // URL slug (e.g., "lebron-james")
   stats        PlayerGameStat[]
   gameContexts PlayerGameContext[]
+  propOdds     PlayerPropOdds[]
 }
 
 model PlayerGameStat {
-  id        String @id @default(cuid())
-  gameId    String
-  playerId  Int
-  teamId    Int
-  minutes   Int
-  points    Int
-  assists   Int
-  rebounds  Int
-  steals    Int
-  blocks    Int
-  turnovers Int
-  fgm       Int?
-  fga       Int?
-  fg3m      Int?
-  fg3a      Int?
-  ftm       Int?
-  fta       Int?
-  oreb      Int?
-  dreb      Int?
-  pf        Int?
-  plusMinus  Int?
-  game      Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
-  player    Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
-  team      Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  id          String  @id @default(cuid())
+  gameId      String
+  playerId    Int
+  teamId      Int
+  minutes     Int              // Minutes played (integer)
+  minutesRaw  String?          // Raw minutes string (e.g., "34:27")
+  points      Int
+  assists     Int
+  rebounds    Int
+  steals      Int
+  blocks      Int
+  turnovers   Int
+  fgm         Int?
+  fga         Int?
+  fgPct       Float?           // Field goal percentage
+  fg3m        Int?
+  fg3a        Int?
+  fg3Pct      Float?           // 3-point percentage
+  ftm         Int?
+  fta         Int?
+  ftPct       Float?           // Free throw percentage
+  oreb        Int?
+  dreb        Int?
+  pf          Int?
+  plusMinus   Float?
+  position    String?          // G, F, C, G-F, etc.
+  starter     Boolean?         // true if started the game
+  comment     String?          // DNP reason, injury notes
+  game        Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  player      Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  team        Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
   @@unique([gameId, playerId])
   @@index([gameId])
@@ -208,6 +231,26 @@ model GameOdds {
 
   @@unique([gameId, source])
   @@index([gameId])
+}
+
+model PlayerPropOdds {
+  id          String   @id @default(cuid())
+  gameId      String
+  playerId    Int
+  source      String              // bookmaker key (fanduel, draftkings, etc.)
+  market      String              // player_points, player_rebounds, player_assists, etc.
+  line        Float?              // The O/U line (e.g., 24.5)
+  overPrice   Int?                // American odds for over (e.g., -110)
+  underPrice  Int?                // American odds for under (e.g., -110)
+  fetchedAt   DateTime @default(now())
+  
+  game        Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  player      Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([gameId, playerId, source, market])
+  @@index([gameId])
+  @@index([playerId])
+  @@index([market])
 }
 
 model ExternalIdMap {

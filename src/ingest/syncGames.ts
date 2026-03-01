@@ -32,8 +32,11 @@ async function upsertTeam(team: BdlTeam): Promise<void> {
   });
 }
 
-async function upsertGame(game: BdlGame): Promise<string> {
-  if (game.status !== "Final") return "";
+async function upsertGame(game: BdlGame, includeScheduled = false): Promise<string> {
+  // Skip non-final games unless includeScheduled is true
+  if (game.status !== "Final" && !includeScheduled) return "";
+  // Always skip in-progress games
+  if (game.status !== "Final" && game.status !== "Scheduled" && !game.status.includes("scheduled")) return "";
 
   await upsertTeam(game.home_team);
   await upsertTeam(game.visitor_team);
@@ -138,4 +141,17 @@ export async function syncGamesForSeason(season: number): Promise<BdlGame[]> {
   }
   console.log(`\n  Upserted ${upserted} games for season ${season}`);
   return games;
+}
+
+export async function syncUpcomingGames(date: string): Promise<number> {
+  console.log(`Fetching upcoming games for ${date}...`);
+  const games = await fetchGames(date);
+  console.log(`  Found ${games.length} games from balldontlie`);
+
+  let upserted = 0;
+  for (const game of games) {
+    if (await upsertGame(game, true)) upserted++;
+  }
+  console.log(`  Upserted ${upserted} games (including scheduled)`);
+  return upserted;
 }

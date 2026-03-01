@@ -11,6 +11,7 @@
     "sync:games": "bun run src/cli/index.ts sync:games",
     "sync:stats": "bun run src/cli/index.ts sync:stats",
     "sync:odds": "bun run src/cli/index.ts sync:odds",
+    "sync:player-props": "bun run src/cli/index.ts sync:player-props",
     "sync:daily": "bun run src/cli/index.ts sync:daily",
     "sync:backfill": "bun run src/cli/index.ts sync:backfill",
     "stats:player": "bun run src/cli/index.ts stats:player",
@@ -38,10 +39,17 @@
     "build:game-events": "bun run src/cli/index.ts build:game-events",
     "search:game-patterns": "bun run src/cli/index.ts search:game-patterns",
     "predict:games": "bun run src/cli/index.ts predict:games",
-    "predict:players": "bun run src/cli/index.ts predict:players"
+    "predict:players": "bun run src/cli/index.ts predict:players",
+    "predict:today": "bun run src/cli/index.ts predict:today",
+    "sync:upcoming": "bun run src/cli/index.ts sync:upcoming",
+    "sync:nba-stats": "bun run src/cli/index.ts sync:nba-stats",
+    "fetch:season": "bun run src/cli/index.ts fetch:season",
+    "process:season": "bun run src/cli/index.ts process:season",
+    "backfill:odds": "bun run src/cli/index.ts backfill:odds"
   },
   "dependencies": {
-    "@prisma/client": "^6.4.1"
+    "@prisma/client": "^6.4.1",
+    "nba-api-client": "^1.1.2"
   },
   "devDependencies": {
     "@types/bun": "latest",

@@ -337,7 +337,8 @@ export async function computeContextForDate(
 
 function getCurrentSeason(): number {
   const now = new Date();
-  return now.getMonth() >= 9 ? now.getFullYear() + 1 : now.getFullYear();
+  // NBA season starts in October, so Oct-Dec uses current year, Jan-Sep uses previous year
+  return now.getMonth() >= 9 ? now.getFullYear() : now.getFullYear() - 1;
 }
 
 export async function buildGameContext(args: string[] = []): Promise<void> {
