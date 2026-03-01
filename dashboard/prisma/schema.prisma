@@ -387,3 +387,50 @@ model GamePatternHit {
   @@unique([patternId, gameId])
   @@index([gameId])
 }
+
+model BacktestRun {
+  id              String           @id @default(cuid())
+  name            String?
+  trainSeasons    Int[]
+  testSeasons     Int[]
+  config          Json
+  totalPatterns   Int
+  passingPatterns Int
+  aggregatePnL    Float
+  aggregateROI    Float
+  avgHitRate      Float
+  runtimeMs       Int
+  completedAt     DateTime         @default(now())
+  results         BacktestResult[]
+
+  @@index([completedAt])
+}
+
+model BacktestResult {
+  id              String      @id @default(cuid())
+  runId           String
+  patternKey      String
+  conditions      String[]
+  outcome         String
+  trainHitRate    Float
+  trainSampleSize Int
+  testHitRate     Float
+  testSampleSize  Int
+  zScoreVsChance  Float
+  pValueVsChance  Float
+  zScoreVsTrain   Float
+  pValueVsTrain   Float
+  isSignificant   Boolean
+  isConsistent    Boolean
+  pnlROI          Float
+  pnlNetPnL       Float
+  maxDrawdown     Float
+  sharpeRatio     Float?
+  grade           String
+  gradeScore      Int
+  run             BacktestRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, patternKey])
+  @@index([grade])
+  @@index([pnlROI])
+}

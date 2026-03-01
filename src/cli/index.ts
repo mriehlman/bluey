@@ -29,6 +29,7 @@ import { teamProfile } from "../profiles/teamProfile.js";
 import { buildGameContext } from "../features/buildGameContext.js";
 import { buildGameEvents } from "../features/buildGameEvents.js";
 import { predictGames, predictPlayers } from "../features/predictGames.js";
+import { runBacktest, backtestExisting, analyzePattern, quickValidate } from "../backtest/backtest.js";
 import type { RollupFilters } from "../stats/filters.js";
 import type { PatternFilterConfig } from "../patterns/config.js";
 
@@ -650,6 +651,22 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
   "predict:players": async (args) => {
     await predictPlayers(args);
+  },
+
+  "backtest:run": async (args) => {
+    await runBacktest(args);
+  },
+
+  "backtest:existing": async (args) => {
+    await backtestExisting(args);
+  },
+
+  "backtest:analyze": async (args) => {
+    await analyzePattern(args);
+  },
+
+  "backtest:quick": async (args) => {
+    await quickValidate(args);
   },
 
   "ingest:raw": async (args) => {
