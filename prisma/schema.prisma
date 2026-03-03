@@ -17,10 +17,23 @@ model Team {
   playerStats PlayerGameStat[]
 }
 
+model GameExternalId {
+  id       String @id @default(cuid())
+  gameId   String
+  source   String // balldontlie, odds_api, nba_stats
+  sourceId String
+  game     Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@unique([gameId, source])
+  @@unique([source, sourceId])
+  @@index([gameId])
+}
+
 model Game {
-  id                   String            @id @default(cuid())
-  sourceGameId         Int               @unique    // balldontlie game ID
-  nbaGameId            String?           @unique    // NBA.com game ID (e.g., "0022400829")
+  id                   String             @id @default(cuid())
+  sourceGameId         Int               @unique // legacy fallback; prefer GameExternalId per source
+  nbaGameId            String?            @unique // NBA.com game ID (e.g., "0022400829")
+  externalIds          GameExternalId[]
   date                 DateTime          @db.Date
   season               Int
   stage                Int

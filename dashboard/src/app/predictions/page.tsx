@@ -17,6 +17,27 @@ interface TeamContext {
   streak: number;
 }
 
+interface PredictionResult {
+  hit: boolean;
+  explanation: string | null;
+}
+
+interface PlayerTarget {
+  name: string;
+  stat: string;
+  statValue: number;
+}
+
+interface PropLine {
+  line: number;
+  market: string;
+}
+
+interface RecentPerformance {
+  hits: number;
+  total: number;
+}
+
 interface Prediction {
   conditions: string[];
   outcome: string;
@@ -25,6 +46,11 @@ interface Prediction {
   sampleSize: number;
   seasons: number;
   edge: number;
+  playerTarget: PlayerTarget | null;
+  propLine: PropLine | null;
+  recent: RecentPerformance | null;
+  isHighValue: boolean;
+  result: PredictionResult | null;
 }
 
 interface GamePrediction {
@@ -55,8 +81,12 @@ interface PredictionData {
   message?: string;
 }
 
+function getLocalDateString(d: Date = new Date()) {
+  return d.toLocaleDateString("en-CA"); // YYYY-MM-DD in local timezone
+}
+
 export default function PredictionsPage() {
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(() => getLocalDateString());
   const [data, setData] = useState<PredictionData | null>(null);
   const [loading, setLoading] = useState(false);
   const [expandedGame, setExpandedGame] = useState<string | null>(null);
@@ -79,9 +109,9 @@ export default function PredictionsPage() {
   }, [date, fetchPredictions]);
 
   const changeDate = (delta: number) => {
-    const d = new Date(date);
-    d.setDate(d.getDate() + delta);
-    setDate(d.toISOString().slice(0, 10));
+    const [y, m, day] = date.split("-").map(Number);
+    const d = new Date(y, m - 1, day + delta);
+    setDate(getLocalDateString(d));
   };
 
   const fmtOdds = (n: number | null | undefined) => {
@@ -214,41 +244,115 @@ export default function PredictionsPage() {
                       <>
                         <h4 style={{ marginTop: 0, marginBottom: "0.75rem" }}>Matching Patterns</h4>
                         <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-                          {game.predictions.map((pred, i) => (
-                            <div
-                              key={i}
-                              style={{
-                                background: "var(--bg-elevated)",
-                                border: "1px solid var(--border)",
-                                padding: "0.75rem",
-                                fontSize: "0.85rem",
-                              }}
-                            >
-                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                                <div>
-                                  <div style={{ marginBottom: "0.25rem" }}>
-                                    <span className="muted">Conditions:</span>{" "}
-                                    {pred.conditions.map((c) => c.replace(/:.*/, "")).join(" + ")}
+                          {game.predictions.map((pred, i) => {
+                            const hasResult = pred.result !== null;
+                            const isHit = pred.result?.hit === true;
+                            const borderColor = hasResult
+                              ? isHit
+                                ? "var(--success)"
+                                : "var(--error)"
+                              : pred.isHighValue
+                                ? "var(--accent-orange)"
+                                : "var(--border)";
+
+                            const statLabel = pred.playerTarget?.stat === "ppg" ? "ppg" 
+                              : pred.playerTarget?.stat === "rpg" ? "rpg" 
+                              : pred.playerTarget?.stat === "apg" ? "apg" : "";
+
+                            return (
+                              <div
+                                key={i}
+                                style={{
+                                  background: pred.isHighValue && !hasResult ? "rgba(251, 146, 60, 0.1)" : "var(--bg-elevated)",
+                                  border: `1px solid ${borderColor}`,
+                                  borderLeftWidth: hasResult || pred.isHighValue ? "4px" : "1px",
+                                  padding: "0.75rem",
+                                  fontSize: "0.85rem",
+                                }}
+                              >
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                  <div style={{ flex: 1 }}>
+                                    {/* High value badge */}
+                                    {pred.isHighValue && !hasResult && (
+                                      <div style={{ marginBottom: "0.5rem" }}>
+                                        <span className="badge" style={{ background: "var(--accent-orange)", color: "white", border: "none" }}>
+                                          HIGH VALUE
+                                        </span>
+                                      </div>
+                                    )}
+
+                                    <div style={{ marginBottom: "0.25rem" }}>
+                                      <span className="muted">Conditions:</span>{" "}
+                                      {pred.conditions.map((c) => c.replace(/:.*/, "")).join(" + ")}
+                                    </div>
+                                    <div>
+                                      <span className="muted">Outcome:</span>{" "}
+                                      <strong style={{ color: "var(--accent-orange)" }}>{pred.outcome.replace(/:.*/, "")}</strong>
+                                    </div>
+
+                                    {/* Player target with prop line */}
+                                    {pred.playerTarget && (
+                                      <div style={{ marginTop: "0.5rem", padding: "0.5rem", background: "var(--bg-base)", borderRadius: "4px" }}>
+                                        <strong style={{ color: "var(--accent-cyan)" }}>{pred.playerTarget.name}</strong>
+                                        <span className="muted"> ({pred.playerTarget.statValue.toFixed(1)} {statLabel})</span>
+                                        {pred.propLine && (
+                                          <span style={{ marginLeft: "0.75rem" }}>
+                                            Line: <strong>{pred.propLine.line}</strong> {pred.propLine.market}
+                                          </span>
+                                        )}
+                                      </div>
+                                    )}
+
+                                    {/* Result for completed games */}
+                                    {hasResult && (
+                                      <div style={{ marginTop: "0.5rem" }}>
+                                        <span
+                                          className="badge"
+                                          style={{
+                                            background: isHit ? "var(--success)" : "var(--error)",
+                                            color: "white",
+                                            border: "none",
+                                          }}
+                                        >
+                                          {isHit ? "HIT" : "MISS"}
+                                        </span>
+                                        {pred.result?.explanation && (
+                                          <span style={{ marginLeft: "0.5rem", color: "var(--text-secondary)" }}>
+                                            {pred.result.explanation}
+                                          </span>
+                                        )}
+                                      </div>
+                                    )}
                                   </div>
-                                  <div>
-                                    <span className="muted">Outcome:</span>{" "}
-                                    <strong style={{ color: "var(--accent-orange)" }}>{pred.outcome.replace(/:.*/, "")}</strong>
-                                  </div>
-                                </div>
-                                <div style={{ textAlign: "right" }}>
-                                  <div style={{ color: pred.edge >= 5 ? "var(--success)" : pred.edge >= 0 ? "var(--accent-cyan)" : "var(--error)" }}>
-                                    {(pred.hitRate * 100).toFixed(1)}%
-                                    <span style={{ fontSize: "0.75rem", marginLeft: "0.25rem" }}>
-                                      ({pred.edge >= 0 ? "+" : ""}{pred.edge.toFixed(1)}% edge)
-                                    </span>
-                                  </div>
-                                  <div className="muted" style={{ fontSize: "0.75rem" }}>
-                                    {pred.hitCount}/{pred.sampleSize} over {pred.seasons} seasons
+                                  <div style={{ textAlign: "right", flexShrink: 0 }}>
+                                    <div style={{ color: pred.edge >= 5 ? "var(--success)" : pred.edge >= 0 ? "var(--accent-cyan)" : "var(--error)" }}>
+                                      {(pred.hitRate * 100).toFixed(1)}%
+                                      <span style={{ fontSize: "0.75rem", marginLeft: "0.25rem" }}>
+                                        ({pred.edge >= 0 ? "+" : ""}{pred.edge.toFixed(1)}% edge)
+                                      </span>
+                                    </div>
+                                    <div className="muted" style={{ fontSize: "0.75rem" }}>
+                                      {pred.hitCount}/{pred.sampleSize} over {pred.seasons} seasons
+                                    </div>
+                                    {/* Recent performance */}
+                                    {pred.recent && pred.recent.total > 0 && (
+                                      <div style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
+                                        <span style={{ 
+                                          color: pred.recent.hits / pred.recent.total >= pred.hitRate 
+                                            ? "var(--success)" 
+                                            : pred.recent.hits / pred.recent.total >= pred.hitRate * 0.8 
+                                              ? "var(--accent-cyan)" 
+                                              : "var(--error)"
+                                        }}>
+                                          Last 30d: {pred.recent.hits}/{pred.recent.total}
+                                        </span>
+                                      </div>
+                                    )}
                                   </div>
                                 </div>
                               </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       </>
                     )}

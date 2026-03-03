@@ -95,6 +95,14 @@ async function upsertGame(game: BdlGame, includeScheduled = false): Promise<stri
     },
   });
 
+  await prisma.gameExternalId.upsert({
+    where: {
+      gameId_source: { gameId: result.id, source: "balldontlie" },
+    },
+    update: { sourceId: String(game.id) },
+    create: { gameId: result.id, source: "balldontlie", sourceId: String(game.id) },
+  });
+
   return result.id;
 }
 
@@ -154,4 +162,29 @@ export async function syncUpcomingGames(date: string): Promise<number> {
   }
   console.log(`  Upserted ${upserted} games (including scheduled)`);
   return upserted;
+}
+
+/** Backfill GameExternalId for games that have sourceGameId > 0 (BallDontLie) but no external ID row. */
+export async function backfillGameExternalIds(): Promise<number> {
+  const gamesWithBdlSourceId = await prisma.game.findMany({
+    where: { sourceGameId: { gt: 0 } },
+    select: { id: true, sourceGameId: true },
+  });
+
+  const withExtId = await prisma.gameExternalId.findMany({
+    where: { source: "balldontlie", gameId: { in: gamesWithBdlSourceId.map((g) => g.id) } },
+    select: { gameId: true },
+  });
+  const hasExtId = new Set(withExtId.map((e) => e.gameId));
+
+  let created = 0;
+  for (const g of gamesWithBdlSourceId) {
+    if (hasExtId.has(g.id)) continue;
+    await prisma.gameExternalId.create({
+      data: { gameId: g.id, source: "balldontlie", sourceId: String(g.sourceGameId) },
+    });
+    created++;
+  }
+  console.log(`Backfilled ${created} GameExternalId rows for balldontlie`);
+  return created;
 }

@@ -8,15 +8,21 @@ interface SearchConfig {
   maxResults: number;
   minFrequency: number;
   minSeasons: number;
+  /** Minimum edge over baseline (e.g. 0.02 = 2%) */
+  minEdge?: number;
+  /** Max share of hits in any single season (e.g. 0.8 = filter out patterns with 80%+ in one season) */
+  maxSeasonShare?: number;
 }
 
 const DEFAULT_CONFIG: SearchConfig = {
   minSample: 15,
   minHitRate: 0.58,
-  maxLegs: 3,
+  maxLegs: 4,
   maxResults: 2000,
-  minFrequency: 15,
+  minFrequency: 12,
   minSeasons: 1,
+  minEdge: 0.02,
+  maxSeasonShare: 0.85,
 };
 
 interface EventRow {
@@ -76,23 +82,19 @@ export async function searchGamePatterns(overrides?: Partial<SearchConfig>): Pro
   for (const s of gameSeason.values()) allSeasons.add(s);
   const totalSeasons = allSeasons.size;
 
-  // Generate combinations (1, 2, 3 legs)
-  type Candidate = {
-    patternKey: string;
-    conditions: string[];
-    outcome: string;
+  // Lightweight candidate - gameHits recomputed only for top N when storing
+  type CandidateLight = {
+    combo: string[];
+    outcomeKey: string;
     sampleSize: number;
     hitCount: number;
     hitRate: number;
     seasons: number;
     perSeason: Record<string, number>;
     lastHitDate: Date | null;
-    confidenceScore: number;
-    valueScore: number;
-    gameHits: { gameId: string; season: number; hit: boolean }[];
   };
 
-  const candidates: Candidate[] = [];
+  const candidates: CandidateLight[] = [];
   let combosChecked = 0;
 
   function generateCombos(maxLegs: number): string[][] {
@@ -105,6 +107,11 @@ export async function searchGamePatterns(overrides?: Partial<SearchConfig>): Pro
           if (maxLegs >= 3) {
             for (let k = j + 1; k < viableConditions.length; k++) {
               combos.push([viableConditions[i], viableConditions[j], viableConditions[k]]);
+              if (maxLegs >= 4) {
+                for (let m = k + 1; m < viableConditions.length; m++) {
+                  combos.push([viableConditions[i], viableConditions[j], viableConditions[k], viableConditions[m]]);
+                }
+              }
             }
           }
         }
@@ -151,27 +158,20 @@ export async function searchGamePatterns(overrides?: Partial<SearchConfig>): Pro
     const sampleSize = intersection.size;
     if (sampleSize > maxSample) maxSample = sampleSize;
 
-    // Check each outcome
+    // Check each outcome (lightweight - no gameHits allocation)
     for (const [outcomeKey, outcomeGames] of outcomeIndex) {
       let hitCount = 0;
-      const gameHits: { gameId: string; season: number; hit: boolean }[] = [];
       const perSeason: Record<string, number> = {};
       let lastHitDate: Date | null = null;
 
       for (const gameId of intersection) {
-        const hit = outcomeGames.has(gameId);
-        const season = gameSeason.get(gameId) ?? 0;
-        gameHits.push({ gameId, season, hit });
-
-        if (hit) {
+        if (outcomeGames.has(gameId)) {
           hitCount++;
+          const season = gameSeason.get(gameId) ?? 0;
           const sKey = String(season);
           perSeason[sKey] = (perSeason[sKey] ?? 0) + 1;
-
           const gDate = gameDates.get(gameId);
-          if (gDate && (!lastHitDate || gDate > lastHitDate)) {
-            lastHitDate = gDate;
-          }
+          if (gDate && (!lastHitDate || gDate > lastHitDate)) lastHitDate = gDate;
         }
       }
 
@@ -181,21 +181,22 @@ export async function searchGamePatterns(overrides?: Partial<SearchConfig>): Pro
       const seasons = Object.keys(perSeason).length;
       if (seasons < config.minSeasons) continue;
 
-      const patternKey = [...combo, "->", outcomeKey].join("|");
+      const edge = hitRate - 0.524;
+      if (config.minEdge != null && edge < config.minEdge) continue;
+
+      const seasonCounts = Object.values(perSeason);
+      const maxSeasonShareVal = seasonCounts.length > 0 ? Math.max(...seasonCounts) / sampleSize : 1;
+      if (config.maxSeasonShare != null && maxSeasonShareVal > config.maxSeasonShare) continue;
 
       candidates.push({
-        patternKey,
-        conditions: combo,
-        outcome: outcomeKey,
+        combo: [...combo],
+        outcomeKey,
         sampleSize,
         hitCount,
         hitRate,
         seasons,
         perSeason,
         lastHitDate,
-        confidenceScore: 0,
-        valueScore: 0,
-        gameHits,
       });
     }
 
@@ -206,75 +207,96 @@ export async function searchGamePatterns(overrides?: Partial<SearchConfig>): Pro
 
   console.log(`\n  Checked ${combosChecked} combos, found ${candidates.length} candidate patterns`);
 
-  // Score all candidates
-  for (const c of candidates) {
-    const scores = scorePattern({
+  // Score all candidates (add scores to lightweight objs)
+  type ScoredCandidate = CandidateLight & { confidenceScore: number; valueScore: number };
+  const scored: ScoredCandidate[] = candidates.map((c) => {
+    const { confidenceScore, valueScore } = scorePattern({
       hitRate: c.hitRate,
       sampleSize: c.sampleSize,
       seasons: c.seasons,
       totalSeasons,
       maxSample,
       perSeason: c.perSeason,
+      lastHitDate: c.lastHitDate,
     });
-    c.confidenceScore = scores.confidenceScore;
-    c.valueScore = scores.valueScore;
-  }
+    return { ...c, confidenceScore, valueScore };
+  });
 
   // Sort by confidence, take top N
-  candidates.sort((a, b) => b.confidenceScore - a.confidenceScore || b.valueScore - a.valueScore);
-  const topPatterns = candidates.slice(0, config.maxResults);
+  scored.sort((a, b) => b.confidenceScore - a.confidenceScore || b.valueScore - a.valueScore);
+  const topPatterns = scored.slice(0, config.maxResults);
 
   console.log(`\nStoring top ${topPatterns.length} patterns...`);
+
+  // Helper: recompute intersection and gameHits for a pattern (only for top N)
+  function getGameHits(c: CandidateLight): { gameId: string; season: number; hit: boolean }[] {
+    const sets = c.combo.map((key) => conditionIndex.get(key)!);
+    sets.sort((a, b) => a.size - b.size);
+    let intersection = new Set(sets[0]);
+    for (let s = 1; s < sets.length; s++) {
+      const next = new Set<string>();
+      for (const id of intersection) {
+        if (sets[s].has(id)) next.add(id);
+      }
+      intersection = next;
+    }
+    const outcomeGames = outcomeIndex.get(c.outcomeKey)!;
+    const out: { gameId: string; season: number; hit: boolean }[] = [];
+    for (const gameId of intersection) {
+      out.push({ gameId, season: gameSeason.get(gameId) ?? 0, hit: outcomeGames.has(gameId) });
+    }
+    return out;
+  }
 
   // Clear existing game patterns
   await prisma.gamePatternHit.deleteMany({});
   await prisma.gamePattern.deleteMany({});
 
+  let hitAccum: { patternId: string; gameId: string; season: number; hit: boolean }[] = [];
+  const flushHits = async () => {
+    if (hitAccum.length > 0) {
+      await prisma.gamePatternHit.createMany({ data: hitAccum, skipDuplicates: true });
+      hitAccum = [];
+    }
+  };
+
   let stored = 0;
   for (const pattern of topPatterns) {
+    const patternKey = [...pattern.combo, "->", pattern.outcomeKey].join("|");
     const gp = await prisma.gamePattern.create({
       data: {
-        patternKey: pattern.patternKey,
-        conditions: pattern.conditions,
-        outcome: pattern.outcome,
+        patternKey,
+        conditions: pattern.combo,
+        outcome: pattern.outcomeKey,
         sampleSize: pattern.sampleSize,
         hitCount: pattern.hitCount,
         hitRate: pattern.hitRate,
         seasons: pattern.seasons,
-        perSeason: pattern.perSeason as any,
+        perSeason: pattern.perSeason as object,
         lastHitDate: pattern.lastHitDate,
         confidenceScore: pattern.confidenceScore,
         valueScore: pattern.valueScore,
       },
     });
 
-    // Store audit trail
-    const hitBatch = pattern.gameHits.map((h) => ({
-      patternId: gp.id,
-      gameId: h.gameId,
-      season: h.season,
-      hit: h.hit,
-    }));
-
-    if (hitBatch.length > 0) {
-      await prisma.gamePatternHit.createMany({
-        data: hitBatch,
-        skipDuplicates: true,
-      });
+    for (const h of getGameHits(pattern)) {
+      hitAccum.push({ patternId: gp.id, gameId: h.gameId, season: h.season, hit: h.hit });
     }
+    if (hitAccum.length >= 5000) await flushHits();
 
     stored++;
     if (stored % 100 === 0) {
-      console.log(`  Stored ${stored}/${topPatterns.length} patterns`);
+      process.stdout.write(`  Stored ${stored}/${topPatterns.length}\r`);
     }
   }
+  await flushHits();
 
   console.log(`\n=== Search complete: ${stored} GamePatterns stored ===`);
 
   // Print top 10 summary
   console.log("\nTop 10 patterns by confidence:\n");
   for (const p of topPatterns.slice(0, 10)) {
-    console.log(`  ${p.conditions.join(" + ")}  ->  ${p.outcome}`);
+    console.log(`  ${p.combo.join(" + ")}  ->  ${p.outcomeKey}`);
     console.log(`    Hit rate: ${(p.hitRate * 100).toFixed(1)}% (${p.hitCount}/${p.sampleSize})  |  ${p.seasons} seasons  |  confidence: ${p.confidenceScore.toFixed(3)}  |  value: ${p.valueScore.toFixed(3)}`);
   }
 }

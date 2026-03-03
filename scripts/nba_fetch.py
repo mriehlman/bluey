@@ -388,15 +388,20 @@ def fetch_box_score(game_id: str) -> dict:
 def fetch_box_scores_for_date(date_str: str, save_raw: bool = False) -> list:
     """Fetch box scores for all games on a date."""
     games = fetch_games_for_date(date_str)
+    # Skip scheduled/unplayed games - BoxScore API returns different structure and raises AttributeError
+    completed = [g for g in games if g.get("status", "").upper().startswith("FINAL")]
+    skipped = len(games) - len(completed)
+    if skipped:
+        print(f"  Skipping {skipped} unplayed game(s)", file=sys.stderr)
     results = []
     
     if save_raw:
         data_dir = ensure_data_dir("boxscores")
     
-    for i, game in enumerate(games):
+    for i, game in enumerate(completed):
         time.sleep(RATE_LIMIT_SECONDS)
         game_id = game["gameId"]
-        print(f"Fetching box score {i+1}/{len(games)}: {game_id}", file=sys.stderr)
+        print(f"Fetching box score {i+1}/{len(completed)}: {game_id}", file=sys.stderr)
         
         try:
             box = fetch_box_score(game_id)

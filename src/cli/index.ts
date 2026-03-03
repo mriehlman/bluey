@@ -1,9 +1,10 @@
 import * as fs from "fs/promises";
+import { prisma } from "../db/prisma.js";
 import { ingestGames } from "../ingest/games.js";
 import { ingestPlayerStats } from "../ingest/playerstats.js";
-import { syncGamesForDate, syncGamesForRange, syncGamesForSeason, syncUpcomingGames } from "../ingest/syncGames.js";
-import { syncPlayerStatsForDate } from "../ingest/syncPlayerStats.js";
-import { syncNbaStatsForDate, syncNbaStatsForDateRange } from "../ingest/syncNbaStats.js";
+import { syncGamesForDate, syncGamesForRange, syncUpcomingGames, backfillGameExternalIds } from "../ingest/syncGames.js";
+import { getEasternDateFromUtc } from "../ingest/utils.js";
+import { syncNbaStatsForDate, syncNbaStatsForDateRange, syncUpcomingFromNba } from "../ingest/syncNbaStats.js";
 import { syncOddsLive, syncOddsForDate } from "../ingest/syncOdds.js";
 import { syncPlayerPropsLive } from "../ingest/syncPlayerProps.js";
 import { fetchSeasonToJson, processSeasonFromJson } from "../ingest/rawDataPipeline.js";
@@ -82,11 +83,36 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
   "sync:stats": async (args) => {
     const flags = parseFlags(args);
-    if (!flags.date) {
-      console.error("Usage: sync:stats --date YYYY-MM-DD");
-      process.exit(1);
+    if (flags.date) {
+      await syncNbaStatsForDate(flags.date);
+      return;
     }
-    await syncPlayerStatsForDate(flags.date);
+    if (flags.from && flags.to) {
+      await syncNbaStatsForDateRange(flags.from, flags.to);
+      return;
+    }
+    // No args: auto-detect gap and backfill using nba_api (no BallDontLie)
+    const lastGameWithStats = await prisma.game.findFirst({
+      where: { playerStats: { some: {} } },
+      orderBy: { date: "desc" },
+      select: { date: true },
+    });
+    const fromDate = lastGameWithStats?.date
+      ? new Date(lastGameWithStats.date.getTime() + 86400000)
+      : new Date(Date.now() - 7 * 86400000); // default: 7 days ago if empty
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const fromStr = fromDate.toISOString().slice(0, 10);
+    const toStr = yesterday.toISOString().slice(0, 10);
+
+    if (fromDate > yesterday) {
+      console.log("Stats already up to date (no gap to backfill).");
+      return;
+    }
+
+    console.log(`\n=== Syncing stats from ${fromStr} to ${toStr} (nba_api) ===\n`);
+    await syncNbaStatsForDateRange(fromStr, toStr);
+    console.log("\n=== Stats sync complete ===");
   },
 
   "sync:nba-stats": async (args) => {
@@ -96,8 +122,8 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     } else if (flags.from && flags.to) {
       await syncNbaStatsForDateRange(flags.from, flags.to);
     } else {
-      console.error("Usage: sync:nba-stats --date YYYY-MM-DD  or  --from YYYY-MM-DD --to YYYY-MM-DD");
-      process.exit(1);
+      // No args: same as sync:stats (auto backfill)
+      await (COMMANDS["sync:stats"] as (args: string[]) => Promise<void>)([]);
     }
   },
 
@@ -105,13 +131,61 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     const flags = parseFlags(args);
     if (flags.date) {
       await syncOddsForDate(flags.date);
-    } else {
-      await syncOddsLive();
+      return;
     }
+    // No date: fetch live odds for today, then backfill historical from last game-with-odds date through yesterday
+    console.log("Fetching live odds...");
+    await syncOddsLive();
+
+    const lastGameWithOdds = await prisma.game.findFirst({
+      where: { odds: { some: {} } },
+      orderBy: { date: "desc" },
+      select: { date: true },
+    });
+    if (!lastGameWithOdds?.date) return;
+
+    const lastDate = new Date(lastGameWithOdds.date);
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    const fromDate = new Date(lastDate.getTime() + 86400000);
+    if (fromDate > yesterday) return;
+
+    const fromStr = fromDate.toISOString().slice(0, 10);
+    const toStr = yesterday.toISOString().slice(0, 10);
+    console.log(`\nBackfilling odds from ${fromStr} to ${toStr}...`);
+
+    let current = new Date(fromStr + "T00:00:00Z");
+    const toDate = new Date(toStr + "T00:00:00Z");
+
+    while (current <= toDate) {
+      const d = current.toISOString().slice(0, 10);
+      try {
+        await syncOddsForDate(d);
+      } catch (err) {
+        console.warn(`  Odds for ${d} failed:`, (err as Error).message);
+      }
+      current.setDate(current.getDate() + 1);
+    }
+    console.log("Odds sync complete.");
   },
 
   "sync:player-props": async () => {
     await syncPlayerPropsLive();
+  },
+
+  "sync:catchup": async () => {
+    console.log("\n=== Sync Catchup: backfill stats and odds to current ===\n");
+    console.log("Step 1/2: Syncing stats...");
+    const statsArgs = [] as string[];
+    await (COMMANDS["sync:stats"] as (args: string[]) => Promise<void>)(statsArgs);
+    console.log("\nStep 2/2: Syncing odds...");
+    try {
+      await (COMMANDS["sync:odds"] as (args: string[]) => Promise<void>)([]);
+    } catch (err) {
+      console.warn("Odds sync failed (non-fatal):", (err as Error).message);
+    }
+    console.log("\n=== Catchup complete ===");
   },
 
   "sync:daily": async () => {
@@ -119,15 +193,12 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     yesterday.setDate(yesterday.getDate() - 1);
     const dateStr = yesterday.toISOString().slice(0, 10);
 
-    console.log(`\n=== Daily Sync for ${dateStr} ===\n`);
+    console.log(`\n=== Daily Sync for ${dateStr} (nba_api + Odds API) ===\n`);
 
-    console.log("Step 1/3: Syncing games...");
-    await syncGamesForDate(dateStr);
+    console.log("Step 1/2: Syncing player stats (nba_api)...");
+    await syncNbaStatsForDate(dateStr);
 
-    console.log("\nStep 2/3: Syncing player stats...");
-    await syncPlayerStatsForDate(dateStr);
-
-    console.log("\nStep 3/3: Syncing odds...");
+    console.log("\nStep 2/2: Syncing odds (Odds API)...");
     try {
       await syncOddsForDate(dateStr);
     } catch (err) {
@@ -137,14 +208,18 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     console.log("\n=== Daily sync complete ===");
   },
 
+  "sync:backfill-external-ids": async () => {
+    await backfillGameExternalIds();
+  },
+
   "sync:upcoming": async (args) => {
     const flags = parseFlags(args);
     const dateStr = flags.date || new Date().toISOString().slice(0, 10);
     
-    console.log(`\n=== Sync Upcoming Games for ${dateStr} ===\n`);
+    console.log(`\n=== Sync Upcoming Games for ${dateStr} (nba_api) ===\n`);
     
     console.log("Step 1/2: Syncing upcoming games...");
-    await syncUpcomingGames(dateStr);
+    await syncUpcomingFromNba(dateStr);
     
     console.log("\nStep 2/2: Syncing live odds...");
     try {
@@ -162,9 +237,9 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     
     console.log(`\n=== Today's Predictions for ${dateStr} ===\n`);
     
-    // Step 1: Sync upcoming games
+    // Step 1: Sync upcoming games (nba_api)
     console.log("Step 1/3: Syncing upcoming games...");
-    await syncUpcomingGames(dateStr);
+    await syncUpcomingFromNba(dateStr);
     
     // Step 2: Sync live odds  
     console.log("\nStep 2/3: Syncing live odds...");
@@ -192,24 +267,10 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     }
 
     for (let season = fromSeason; season <= toSeason; season++) {
-      console.log(`\n=== Backfilling season ${season} ===\n`);
-
-      console.log("Step 1/2: Syncing games...");
-      const games = await syncGamesForSeason(season);
-
-      console.log("\nStep 2/2: Syncing player stats...");
-      const uniqueDates = [...new Set(games.filter((g) => g.status === "Final").map((g) => g.date.slice(0, 10)))].sort();
-      console.log(`  Processing ${uniqueDates.length} game dates...`);
-
-      let totalStats = 0;
-      for (let i = 0; i < uniqueDates.length; i++) {
-        const count = await syncPlayerStatsForDate(uniqueDates[i]);
-        totalStats += count;
-        if ((i + 1) % 10 === 0) {
-          console.log(`  Progress: ${i + 1}/${uniqueDates.length} dates (${totalStats} stats)`);
-        }
-      }
-
+      console.log(`\n=== Backfilling season ${season} (nba_api) ===\n`);
+      const fromStr = `${season}-10-01`;
+      const toStr = `${season + 1}-06-30`;
+      const totalStats = await syncNbaStatsForDateRange(fromStr, toStr);
       console.log(`\n=== Season ${season} backfill complete: ${totalStats} total stats ===`);
     }
   },
@@ -422,8 +483,8 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
           try {
             const oddsData = JSON.parse(await fs.readFile(oddsFilePath, "utf-8")) as Array<{ id: string; commence_time: string }>;
-            // Only get events that actually occur on this date (filter out futures)
-            const sameDay = oddsData.filter(e => e.commence_time?.startsWith(dateStr));
+            // Only get events that tip on this date (Eastern - NBA game day)
+            const sameDay = oddsData.filter(e => e.commence_time && getEasternDateFromUtc(new Date(e.commence_time)) === dateStr);
             eventIds = sameDay.map(e => e.id);
             
             if (sameDay.length < oddsData.length) {
@@ -643,6 +704,7 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     if (flags.maxLegs) overrides.maxLegs = Number(flags.maxLegs);
     if (flags.maxResults) overrides.maxResults = Number(flags.maxResults);
     if (flags.minSeasons) overrides.minSeasons = Number(flags.minSeasons);
+    if (flags.minFrequency) overrides.minFrequency = Number(flags.minFrequency);
     await searchGamePatterns(Object.keys(overrides).length > 0 ? overrides : undefined);
   },
 

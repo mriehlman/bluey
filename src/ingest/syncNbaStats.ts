@@ -1,5 +1,6 @@
 import { prisma } from "../db/prisma.js";
 import { fetchBoxScoresForDate, fetchGamesForDate } from "../api/nbaStats.js";
+import { dateStringToUtcMidday } from "./utils.js";
 
 function parseMinutes(min: string): number {
   if (!min || min === "" || min === "0" || min === "0:00") return 0;
@@ -7,6 +8,21 @@ function parseMinutes(min: string): number {
   if (parts.length === 2) return Number(parts[0]) * 60 + Number(parts[1]);
   const n = Number(min);
   return isNaN(n) ? 0 : Math.round(n * 60);
+}
+
+function hashString(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) - hash) + str.charCodeAt(i);
+    hash = hash & hash;
+  }
+  return Math.abs(hash);
+}
+
+function getSeasonFromDate(dateStr: string): number {
+  const [y] = dateStr.split("-").map(Number);
+  const m = new Date(dateStr).getMonth();
+  return m >= 9 ? y : y - 1; // Oct+ = current season start year
 }
 
 // NBA API team ID to balldontlie team ID mapping
@@ -62,10 +78,10 @@ export async function syncNbaStatsForDate(date: string): Promise<number> {
       continue;
     }
 
-    // Find the game in our DB by matching teams and date
-    const gameDate = new Date(box.date + "T00:00:00Z");
+    // Find the game in our DB by matching teams and date (use same format as syncOdds)
+    const gameDate = dateStringToUtcMidday(box.date ?? date);
     
-    const game = await prisma.game.findFirst({
+    let game = await prisma.game.findFirst({
       where: {
         date: gameDate,
         OR: [
@@ -76,8 +92,50 @@ export async function syncNbaStatsForDate(date: string): Promise<number> {
     });
 
     if (!game) {
-      console.log(`  Game not found in DB for teams ${homeTeamBdl} vs ${awayTeamBdl} on ${date}`);
-      continue;
+      // Create game from nba_api data (no BallDontLie required)
+      const nbaGameIdNum = parseInt(box.gameId, 10) || Math.abs(hashString(box.gameId));
+      const existingBySourceId = await prisma.game.findUnique({ where: { sourceGameId: nbaGameIdNum } });
+      if (existingBySourceId) {
+        game = existingBySourceId;
+        await prisma.gameExternalId.upsert({
+          where: { gameId_source: { gameId: game.id, source: "nba_stats" } },
+          update: { sourceId: box.gameId },
+          create: { gameId: game.id, source: "nba_stats", sourceId: box.gameId },
+        });
+      } else {
+        game = await prisma.game.create({
+          data: {
+            sourceGameId: nbaGameIdNum,
+            date: gameDate,
+            season: getSeasonFromDate(box.date ?? date),
+            stage: 2,
+            league: "standard",
+            homeTeamId: homeTeamBdl,
+            awayTeamId: awayTeamBdl,
+            homeScore: box.homeScore ?? 0,
+            awayScore: box.awayScore ?? 0,
+            status: box.status ?? "Final",
+            tipoffTimeUtc: gameDate,
+          },
+        });
+        await prisma.gameExternalId.create({
+          data: { gameId: game.id, source: "nba_stats", sourceId: box.gameId },
+        });
+        console.log(`  Created game ${box.gameId} (${game.id})`);
+      }
+    } else {
+      // Update existing game with final scores/status from box score
+      const hasScores = (box.homeScore ?? 0) > 0 || (box.awayScore ?? 0) > 0;
+      if (hasScores && (!game.homeScore || !game.awayScore || !game.status?.includes("Final"))) {
+        await prisma.game.update({
+          where: { id: game.id },
+          data: {
+            homeScore: box.homeScore ?? 0,
+            awayScore: box.awayScore ?? 0,
+            status: box.status ?? "Final",
+          },
+        });
+      }
     }
 
     // Upsert player stats
@@ -85,14 +143,18 @@ export async function syncNbaStatsForDate(date: string): Promise<number> {
       // Convert NBA team ID to balldontlie team ID
       const teamIdBdl = NBA_TO_BDL_TEAM[stat.teamId] ?? stat.teamId;
       
+      const playerName = stat.playerName ?? ([stat.firstName, stat.familyName].filter(Boolean).join(" ").trim() || "Unknown");
+      const minutes = (stat as { minutesPlayed?: number }).minutesPlayed != null
+        ? Math.round(Number((stat as { minutesPlayed?: number }).minutesPlayed) * 60)
+        : parseMinutes(stat.minutes ?? "");
+      
       // Ensure player exists
+      const [first, ...rest] = playerName.split(" ");
       await prisma.player.upsert({
         where: { id: stat.playerId },
-        update: { firstname: stat.playerName.split(" ")[0], lastname: stat.playerName.split(" ").slice(1).join(" ") },
-        create: { id: stat.playerId, firstname: stat.playerName.split(" ")[0], lastname: stat.playerName.split(" ").slice(1).join(" ") },
+        update: { firstname: first ?? "", lastname: rest.join(" ") },
+        create: { id: stat.playerId, firstname: first ?? "", lastname: rest.join(" ") },
       });
-
-      const minutes = parseMinutes(stat.minutes);
 
       await prisma.playerGameStat.upsert({
         where: { gameId_playerId: { gameId: game.id, playerId: stat.playerId } },
@@ -173,4 +235,53 @@ export async function syncNbaStatsForDateRange(startDate: string, endDate: strin
 
   console.log(`\n=== Total: ${totalStats} player stat rows synced ===`);
   return totalStats;
+}
+
+/** Sync upcoming/scheduled games for a date using nba_api (no BallDontLie). */
+export async function syncUpcomingFromNba(date: string): Promise<number> {
+  console.log(`Fetching games for ${date} from nba_api...`);
+  const games = await fetchGamesForDate(date);
+  console.log(`  Found ${games.length} games`);
+
+  let upserted = 0;
+  for (const g of games) {
+    const homeTeamBdl = NBA_TO_BDL_TEAM[g.homeTeamId] ?? g.homeTeamId;
+    const awayTeamBdl = NBA_TO_BDL_TEAM[g.awayTeamId] ?? g.awayTeamId;
+    if (!homeTeamBdl || !awayTeamBdl) continue;
+
+    const gameDate = dateStringToUtcMidday(g.date);
+    const existing = await prisma.game.findFirst({
+      where: {
+        date: gameDate,
+        OR: [
+          { homeTeamId: homeTeamBdl, awayTeamId: awayTeamBdl },
+          { homeTeamId: awayTeamBdl, awayTeamId: homeTeamBdl },
+        ],
+      },
+    });
+    if (existing) continue;
+
+    const nbaGameIdNum = parseInt(g.gameId, 10) || Math.abs(hashString(g.gameId));
+    const game = await prisma.game.create({
+      data: {
+        sourceGameId: nbaGameIdNum,
+        date: gameDate,
+        season: getSeasonFromDate(g.date),
+        stage: 2,
+        league: "standard",
+        homeTeamId: homeTeamBdl,
+        awayTeamId: awayTeamBdl,
+        homeScore: g.homeScore ?? 0,
+        awayScore: g.awayScore ?? 0,
+        status: g.status ?? "Scheduled",
+        tipoffTimeUtc: gameDate,
+      },
+    });
+    await prisma.gameExternalId.create({
+      data: { gameId: game.id, source: "nba_stats", sourceId: g.gameId },
+    });
+    upserted++;
+  }
+  console.log(`  Upserted ${upserted} games`);
+  return upserted;
 }

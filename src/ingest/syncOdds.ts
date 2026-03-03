@@ -1,5 +1,6 @@
 import { prisma } from "../db/prisma.js";
 import { fetchNbaOdds, fetchHistoricalOdds, fetchHistoricalEvents, fetchHistoricalEventOdds, type OddsEvent } from "../api/oddsApi.js";
+import { getEasternDateFromUtc, dateStringToUtcMidday } from "./utils.js";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -140,25 +141,38 @@ async function findTeamId(teamName: string): Promise<number | null> {
 
 async function findOrCreateGame(event: OddsEvent): Promise<string | null> {
   const commenceDate = new Date(event.commence_time);
-  
-  // First check by sourceGameId (for games we created from odds)
+  const easternDateStr = getEasternDateFromUtc(commenceDate);
+  const gameDate = dateStringToUtcMidday(easternDateStr);
+
+  // First check by odds_api external ID (games we've seen from Odds API before)
+  const existingByOddsId = await prisma.gameExternalId.findUnique({
+    where: { source_sourceId: { source: "odds_api", sourceId: event.id } },
+    select: { gameId: true },
+  });
+  if (existingByOddsId) return existingByOddsId.gameId;
+
+  // Fallback: check by sourceGameId (legacy for games we created from odds)
   const sourceGameId = -Math.abs(hashString(event.id));
   const existingBySource = await prisma.game.findUnique({
     where: { sourceGameId },
   });
-  if (existingBySource) return existingBySource.id;
+  if (existingBySource) {
+    await prisma.gameExternalId.upsert({
+      where: { gameId_source: { gameId: existingBySource.id, source: "odds_api" } },
+      update: { sourceId: event.id },
+      create: { gameId: existingBySource.id, source: "odds_api", sourceId: event.id },
+    });
+    return existingBySource.id;
+  }
 
   // Get canonical team names for matching
   const homeCanon = getCanonicalTeam(event.home_team);
   const awayCanon = getCanonicalTeam(event.away_team);
   
-  // Search on the UTC date AND the day before (timezone handling)
-  const searchDate1 = new Date(commenceDate.toISOString().slice(0, 10) + "T00:00:00Z");
-  const searchDate2 = new Date(searchDate1.getTime() - 24 * 60 * 60 * 1000);
-  
+  // Use Eastern date (game day in North America)
   const games = await prisma.game.findMany({
     where: { 
-      date: { in: [searchDate1, searchDate2] },
+      date: gameDate,
       // Prefer games with context (real games from stats ingest)
       context: { isNot: null },
     },
@@ -169,19 +183,23 @@ async function findOrCreateGame(event: OddsEvent): Promise<string | null> {
     const dbHome = getCanonicalTeam(game.homeTeam?.name ?? game.homeTeamNameSnapshot ?? "");
     const dbAway = getCanonicalTeam(game.awayTeam?.name ?? game.awayTeamNameSnapshot ?? "");
 
-    // Check both orderings (odds API sometimes has home/away swapped)
     if (
       (dbHome === homeCanon && dbAway === awayCanon) ||
       (dbHome === awayCanon && dbAway === homeCanon)
     ) {
+      await prisma.gameExternalId.upsert({
+        where: { gameId_source: { gameId: game.id, source: "odds_api" } },
+        update: { sourceId: event.id },
+        create: { gameId: game.id, source: "odds_api", sourceId: event.id },
+      });
       return game.id;
     }
   }
-  
+
   // Also check games without context (fallback)
   const gamesNoContext = await prisma.game.findMany({
     where: { 
-      date: { in: [searchDate1, searchDate2] },
+      date: gameDate,
     },
     include: { homeTeam: true, awayTeam: true },
   });
@@ -194,6 +212,11 @@ async function findOrCreateGame(event: OddsEvent): Promise<string | null> {
       (dbHome === homeCanon && dbAway === awayCanon) ||
       (dbHome === awayCanon && dbAway === homeCanon)
     ) {
+      await prisma.gameExternalId.upsert({
+        where: { gameId_source: { gameId: game.id, source: "odds_api" } },
+        update: { sourceId: event.id },
+        create: { gameId: game.id, source: "odds_api", sourceId: event.id },
+      });
       return game.id;
     }
   }
@@ -204,15 +227,18 @@ async function findOrCreateGame(event: OddsEvent): Promise<string | null> {
   
   if (!homeTeamId || !awayTeamId) return null;
 
+  const [y, m] = easternDateStr.split("-").map(Number);
+  const season = m >= 10 ? y : y - 1;
+
   const game = await prisma.game.create({
     data: {
       sourceGameId,
-      date: searchDate1,
+      date: gameDate,
       homeTeamId,
       awayTeamId,
       homeTeamNameSnapshot: event.home_team,
       awayTeamNameSnapshot: event.away_team,
-      season: commenceDate.getFullYear(),
+      season,
       stage: 0,
       league: "NBA",
       homeScore: 0,
@@ -221,7 +247,11 @@ async function findOrCreateGame(event: OddsEvent): Promise<string | null> {
       tipoffTimeUtc: commenceDate,
     },
   });
-  
+
+  await prisma.gameExternalId.create({
+    data: { gameId: game.id, source: "odds_api", sourceId: event.id },
+  });
+
   console.log(`    Created game: ${event.away_team} @ ${event.home_team} (${game.id})`);
   return game.id;
 }

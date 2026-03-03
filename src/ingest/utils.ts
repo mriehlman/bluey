@@ -1,5 +1,30 @@
 import { resolve } from "path";
 
+/**
+ * Get the calendar date (YYYY-MM-DD) in Eastern time for a UTC timestamp.
+ * NBA game dates use Eastern as the reference — a game at 10:30 PM PT March 1
+ * is still "March 1" for TV/schedule purposes.
+ */
+export function getEasternDateFromUtc(utcDate: Date): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(utcDate);
+  const year = parts.find((p) => p.type === "year")!.value;
+  const month = parts.find((p) => p.type === "month")!.value;
+  const day = parts.find((p) => p.type === "day")!.value;
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Parse YYYY-MM-DD to a Date at noon UTC (avoids timezone boundary issues for DB storage).
+ */
+export function dateStringToUtcMidday(dateStr: string): Date {
+  return new Date(dateStr + "T12:00:00.000Z");
+}
+
 export async function readJson<T>(filePath: string): Promise<T> {
   return Bun.file(resolve(filePath)).json() as Promise<T>;
 }

@@ -76,12 +76,30 @@ async function upsertStat(stat: BdlStat, internalGameId: string): Promise<void> 
   });
 }
 
+/** Resolve BallDontLie game ID from GameExternalId or legacy sourceGameId. */
+async function getBallDontLieGameId(gameId: string): Promise<number | null> {
+  const ext = await prisma.gameExternalId.findUnique({
+    where: { gameId_source: { gameId, source: "balldontlie" } },
+    select: { sourceId: true },
+  });
+  if (ext) {
+    const n = Number(ext.sourceId);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  }
+  const game = await prisma.game.findUnique({
+    where: { id: gameId },
+    select: { sourceGameId: true },
+  });
+  if (game && game.sourceGameId > 0) return game.sourceGameId;
+  return null;
+}
+
 export async function syncPlayerStatsForDate(date: string): Promise<number> {
   console.log(`Syncing player stats for ${date}...`);
 
   const dbGames = await prisma.game.findMany({
     where: { date: new Date(date + "T00:00:00Z") },
-    select: { id: true, sourceGameId: true },
+    select: { id: true },
   });
 
   if (dbGames.length === 0) {
@@ -89,14 +107,29 @@ export async function syncPlayerStatsForDate(date: string): Promise<number> {
     return 0;
   }
 
-  const gameMap = new Map<number, string>();
-  for (const g of dbGames) gameMap.set(g.sourceGameId, g.id);
-  console.log(`  Found ${dbGames.length} games in DB`);
+  const gameIdToBdlId = new Map<string, number>();
+  for (const g of dbGames) {
+    const bdlId = await getBallDontLieGameId(g.id);
+    if (bdlId != null) gameIdToBdlId.set(g.id, bdlId);
+  }
+
+  const validGames = dbGames.filter((g) => gameIdToBdlId.has(g.id));
+  const skipped = dbGames.length - validGames.length;
+  if (skipped > 0) {
+    console.log(`  Skipping ${skipped} games without BallDontLie IDs`);
+  }
+  if (validGames.length === 0) {
+    console.log("  No games with BallDontLie IDs to sync. Run sync:games first.");
+    return 0;
+  }
+
+  console.log(`  Found ${validGames.length} games to sync`);
 
   let totalStats = 0;
 
-  for (const dbGame of dbGames) {
-    const stats = await fetchBoxScores(dbGame.sourceGameId);
+  for (const dbGame of validGames) {
+    const bdlId = gameIdToBdlId.get(dbGame.id)!;
+    const stats = await fetchBoxScores(bdlId);
 
     for (const stat of stats) {
       if (isDnp(stat)) continue;
@@ -108,7 +141,7 @@ export async function syncPlayerStatsForDate(date: string): Promise<number> {
     process.stdout.write(`\r  Stats upserted: ${totalStats}`);
   }
 
-  console.log(`\n  Synced ${totalStats} player stat rows across ${dbGames.length} games`);
+  console.log(`\n  Synced ${totalStats} player stat rows across ${validGames.length} games`);
   return totalStats;
 }
 
@@ -116,17 +149,14 @@ export async function syncPlayerStatsForGames(internalGameIds: string[]): Promis
   let totalStats = 0;
 
   for (const gameId of internalGameIds) {
-    const game = await prisma.game.findUnique({
-      where: { id: gameId },
-      select: { id: true, sourceGameId: true },
-    });
-    if (!game) continue;
+    const bdlId = await getBallDontLieGameId(gameId);
+    if (!bdlId) continue;
 
-    const stats = await fetchBoxScores(game.sourceGameId);
+    const stats = await fetchBoxScores(bdlId);
     for (const stat of stats) {
       if (isDnp(stat)) continue;
       await upsertPlayer(stat);
-      await upsertStat(stat, game.id);
+      await upsertStat(stat, gameId);
       totalStats++;
     }
   }

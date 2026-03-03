@@ -6,6 +6,7 @@
  */
 
 import { prisma } from "../db/prisma.js";
+import { getEasternDateFromUtc, dateStringToUtcMidday } from "./utils.js";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -221,7 +222,9 @@ async function findOrCreateGame(
   commenceTime: string,
   eventId: string
 ): Promise<string | null> {
-  const gameDate = commenceTime.slice(0, 10);
+  const commenceDate = new Date(commenceTime);
+  const easternDateStr = getEasternDateFromUtc(commenceDate);
+  const gameDateForDb = dateStringToUtcMidday(easternDateStr);
   
   // First, check if we already created this game by sourceGameId
   const sourceGameId = -Math.abs(hashString(eventId));
@@ -237,7 +240,7 @@ async function findOrCreateGame(
   const awayNorm = normalizeTeam(awayTeam);
 
   const games = await prisma.game.findMany({
-    where: { date: new Date(gameDate + "T00:00:00Z") },
+    where: { date: gameDateForDb },
     include: { homeTeam: true, awayTeam: true },
   });
 
@@ -255,7 +258,7 @@ async function findOrCreateGame(
   }
 
   // Game not found - create it
-  console.log(`    Creating game: ${awayTeam} @ ${homeTeam} (${gameDate})`);
+  console.log(`    Creating game: ${awayTeam} @ ${homeTeam} (${easternDateStr})`);
   
   const homeTeamId = await findTeamId(homeTeam);
   const awayTeamId = await findTeamId(awayTeam);
@@ -265,21 +268,24 @@ async function findOrCreateGame(
     return null;
   }
   
+  const [y, m] = easternDateStr.split("-").map(Number);
+  const season = m >= 10 ? y : y - 1;
+  
   const game = await prisma.game.create({
     data: {
       sourceGameId,
-      date: new Date(gameDate + "T00:00:00Z"),
+      date: gameDateForDb,
       homeTeamId,
       awayTeamId,
       homeTeamNameSnapshot: homeTeam,
       awayTeamNameSnapshot: awayTeam,
-      season: new Date(commenceTime).getFullYear(),
+      season,
       stage: 0, // Regular season placeholder
       league: "NBA",
       homeScore: 0,
       awayScore: 0,
       status: "Scheduled",
-      tipoffTimeUtc: new Date(commenceTime),
+      tipoffTimeUtc: commenceDate,
     },
   });
   
