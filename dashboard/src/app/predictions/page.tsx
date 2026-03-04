@@ -131,6 +131,94 @@ export default function PredictionsPage() {
     return "—";
   };
 
+  const humanizeLabel = (key: string, includeSide = false) => {
+    const sideMatch = key.match(/:([^:]+)$/);
+    const side = sideMatch?.[1];
+    const base = key.replace(/:.*$/, "");
+    const labelMap: Record<string, string> = {
+      TOP_5_OFF: "Top 5 Offense",
+      TOP_10_OFF: "Top 10 Offense",
+      BOTTOM_10_OFF: "Bottom 10 Offense",
+      BOTTOM_5_OFF: "Bottom 5 Offense",
+      TOP_5_DEF: "Top 5 Defense",
+      TOP_10_DEF: "Top 10 Defense",
+      BOTTOM_10_DEF: "Bottom 10 Defense",
+      BOTTOM_5_DEF: "Bottom 5 Defense",
+      BOTH_TOP_10_PACE: "Both Top 10 Pace",
+      BOTH_BOTTOM_10_PACE: "Both Bottom 10 Pace",
+      PACE_MISMATCH: "Pace Mismatch",
+      ON_B2B: "On B2B",
+      BOTH_ON_B2B: "Both on B2B",
+      RESTED_3_PLUS: "Rested 3+",
+      RESTED_4_PLUS: "Rested 4+",
+      REST_ADVANTAGE: "Rest Advantage",
+      WINNING_RECORD: "Winning Record",
+      WIN_STREAK_3: "3+ Win Streak",
+      WIN_STREAK_5: "5+ Win Streak",
+      WIN_STREAK_7: "7+ Win Streak",
+      LOSING_STREAK_3: "3+ Losing Streak",
+      LOSING_STREAK_5: "5+ Losing Streak",
+      LOSING_STREAK_7: "7+ Losing Streak",
+      TOP_OFF_VS_BOTTOM_DEF: "Top Off vs Bottom Def",
+      BOTH_TOP_10_OFF: "Both Top 10 Offense",
+      SPREAD_UNDER_3: "Spread < 3",
+      SPREAD_3_TO_7: "Spread 3–7",
+      SPREAD_OVER_10: "Spread > 10",
+      TOTAL_LINE_OVER_230: "Total > 230",
+      TOTAL_LINE_OVER_235: "Total > 235",
+      TOTAL_LINE_UNDER_210: "Total < 210",
+      BIG_FAVORITE: "Big Favorite",
+      NET_RATING_PLUS_5: "Net +5",
+      NET_RATING_PLUS_10: "Net +10",
+      NET_RATING_MINUS_5: "Net -5",
+      HIGH_SCORING: "High Scoring",
+      LOW_SCORING: "Low Scoring",
+      BOTH_HIGH_SCORING: "Both High Scoring",
+      BOTH_LOW_SCORING: "Both Low Scoring",
+      STINGY_DEF: "Stingy Defense",
+      POROUS_DEF: "Porous Defense",
+      BOTH_STINGY_DEF: "Both Stingy Def",
+      BOTH_POROUS_DEF: "Both Porous Def",
+      WIN_PCT_OVER_700: "Win% > 70%",
+      WIN_PCT_OVER_600: "Win% > 60%",
+      WIN_PCT_UNDER_400: "Win% < 40%",
+      HAS_TOP_10_SCORER: "Has Top 10 Scorer",
+      HAS_TOP_10_REBOUNDER: "Has Top 10 Rebounder",
+      HAS_TOP_5_SCORER: "Has Top 5 Scorer",
+      HAS_TOP_5_REBOUNDER: "Has Top 5 Rebounder",
+      HAS_TOP_10_PLAYMAKER: "Has Top 10 Playmaker",
+      STAR_MATCHUP: "Star Matchup",
+      TOP_5_SCORER_VS_BOTTOM_10_DEF: "Top 5 Scorer vs Bottom 10 Def",
+      UNDERDOG_COVERED: "Underdog Covered",
+      FAVORITE_COVERED: "Favorite Covered",
+      HOME_COVERED: "Home Covered",
+      AWAY_COVERED: "Away Covered",
+      OVER_HIT: "Over Hit",
+      UNDER_HIT: "Under Hit",
+      HOME_WIN: "Home Win",
+      AWAY_WIN: "Away Win",
+      HOME_TOP_SCORER_25_PLUS: "Home Top Scorer 25+",
+      HOME_TOP_SCORER_30_PLUS: "Home Top Scorer 30+",
+      AWAY_TOP_SCORER_25_PLUS: "Away Top Scorer 25+",
+      AWAY_TOP_SCORER_30_PLUS: "Away Top Scorer 30+",
+      HOME_TOP_REBOUNDER_10_PLUS: "Home Top Rebounder 10+",
+      HOME_TOP_REBOUNDER_12_PLUS: "Home Top Rebounder 12+",
+      AWAY_TOP_REBOUNDER_10_PLUS: "Away Top Rebounder 10+",
+      AWAY_TOP_REBOUNDER_12_PLUS: "Away Top Rebounder 12+",
+      HOME_TOP_ASSIST_8_PLUS: "Home Top Playmaker 8+",
+      HOME_TOP_ASSIST_10_PLUS: "Home Top Playmaker 10+",
+      AWAY_TOP_ASSIST_8_PLUS: "Away Top Playmaker 8+",
+      AWAY_TOP_ASSIST_10_PLUS: "Away Top Playmaker 10+",
+      MARGIN_UNDER_5: "Margin < 5",
+      MARGIN_UNDER_10: "Margin < 10",
+      BLOWOUT_20_PLUS: "Blowout 20+",
+    };
+    const label = labelMap[base] ?? base.replace(/_/g, " ");
+    if (includeSide && side === "home") return `${label} (Home)`;
+    if (includeSide && side === "away") return `${label} (Away)`;
+    return label;
+  };
+
   return (
     <>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -148,6 +236,12 @@ export default function PredictionsPage() {
           <button onClick={() => changeDate(1)} style={{ padding: "0.5rem 1rem" }}>
             Next &rarr;
           </button>
+          <button
+            onClick={() => setDate(getLocalDateString())}
+            className="btn-today"
+          >
+            Today
+          </button>
         </div>
       </div>
 
@@ -155,7 +249,14 @@ export default function PredictionsPage() {
         Pattern-based predictions for {date}. Shows games with matching condition patterns from historical data.
       </p>
 
-      {loading && <p>Loading...</p>}
+      {loading && (
+        <div className="card" style={{ opacity: 0.8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+            <div className="spinner" />
+            <span className="muted">Loading predictions...</span>
+          </div>
+        </div>
+      )}
 
       {!loading && data?.games.length === 0 && (
         <div className="card">
@@ -230,7 +331,8 @@ export default function PredictionsPage() {
 
                   <button
                     onClick={() => setExpandedGame(isExpanded ? null : game.id)}
-                    style={{ background: "#6b7280", flexShrink: 0 }}
+                    className="btn-today"
+                    style={{ flexShrink: 0 }}
                   >
                     {isExpanded ? "Hide" : "Show"} Details
                   </button>
@@ -263,7 +365,7 @@ export default function PredictionsPage() {
                               <div
                                 key={i}
                                 style={{
-                                  background: pred.isHighValue && !hasResult ? "rgba(251, 146, 60, 0.1)" : "var(--bg-elevated)",
+                                  background: pred.isHighValue && !hasResult ? "var(--accent-muted)" : "var(--bg-elevated)",
                                   border: `1px solid ${borderColor}`,
                                   borderLeftWidth: hasResult || pred.isHighValue ? "4px" : "1px",
                                   padding: "0.75rem",
@@ -283,16 +385,16 @@ export default function PredictionsPage() {
 
                                     <div style={{ marginBottom: "0.25rem" }}>
                                       <span className="muted">Conditions:</span>{" "}
-                                      {pred.conditions.map((c) => c.replace(/:.*/, "")).join(" + ")}
+                                      {pred.conditions.map((c) => humanizeLabel(c, true)).join(" + ")}
                                     </div>
                                     <div>
                                       <span className="muted">Outcome:</span>{" "}
-                                      <strong style={{ color: "var(--accent-orange)" }}>{pred.outcome.replace(/:.*/, "")}</strong>
+                                      <strong style={{ color: "var(--accent-orange)" }}>{humanizeLabel(pred.outcome)}</strong>
                                     </div>
 
                                     {/* Player target with prop line */}
                                     {pred.playerTarget && (
-                                      <div style={{ marginTop: "0.5rem", padding: "0.5rem", background: "var(--bg-base)", borderRadius: "4px" }}>
+                                      <div style={{ marginTop: "0.5rem", padding: "0.5rem", background: "var(--bg-elevated)", borderRadius: "4px" }}>
                                         <strong style={{ color: "var(--accent-cyan)" }}>{pred.playerTarget.name}</strong>
                                         <span className="muted"> ({pred.playerTarget.statValue.toFixed(1)} {statLabel})</span>
                                         {pred.propLine && (

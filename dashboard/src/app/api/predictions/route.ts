@@ -243,17 +243,6 @@ export async function GET(req: Request) {
     }
   }
 
-  // Fetch player prop odds for upcoming games
-  const propOdds = await prisma.playerPropOdds.findMany({
-    where: { gameId: { in: gameIds } },
-    include: { player: true },
-  });
-  const propOddsByGame = new Map<string, typeof propOdds>();
-  for (const prop of propOdds) {
-    if (!propOddsByGame.has(prop.gameId)) propOddsByGame.set(prop.gameId, []);
-    propOddsByGame.get(prop.gameId)!.push(prop);
-  }
-
   // Fetch recent pattern performance (last 30 days)
   const thirtyDaysAgo = new Date(targetDate);
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -285,6 +274,7 @@ export async function GET(req: Request) {
     const awaySnap = teamSnapshots.get(game.awayTeamId);
     const consensus = game.odds.find((o) => o.source === "consensus") ?? game.odds[0];
 
+    // Commercial odds excluded from public API; used internally for pattern matching only
     const context = {
       home: homeSnap
         ? {
@@ -322,7 +312,6 @@ export async function GET(req: Request) {
     const isFinal = game.status?.includes("Final") && game.homeScore > 0;
     const gameOutcomeMap = outcomesByGame.get(game.id);
     const gamePlayerCtx = playerContextByGame.get(game.id);
-    const gameProps = propOddsByGame.get(game.id) ?? [];
 
     // Deduplicate: keep only the best pattern for each unique outcome
     // "Best" = highest hit rate, then largest sample size
@@ -343,73 +332,37 @@ export async function GET(req: Request) {
         const outcome = pred.outcome.replace(/:.*/, "");
         if (outcome === "HOME_TOP_SCORER_25_PLUS" || outcome === "HOME_TOP_SCORER_30_PLUS") {
           const p = gamePlayerCtx.homeTopScorer;
-          if (p) {
-            playerTarget = { name: p.name, stat: "ppg", statValue: p.stat };
-            const prop = gameProps.find((pr) => pr.playerId === p.id && pr.market === "player_points");
-            if (prop?.line) propLine = { line: prop.line, market: "points" };
-          }
+          if (p) playerTarget = { name: p.name, stat: "ppg", statValue: p.stat };
         } else if (outcome === "AWAY_TOP_SCORER_25_PLUS" || outcome === "AWAY_TOP_SCORER_30_PLUS") {
           const p = gamePlayerCtx.awayTopScorer;
-          if (p) {
-            playerTarget = { name: p.name, stat: "ppg", statValue: p.stat };
-            const prop = gameProps.find((pr) => pr.playerId === p.id && pr.market === "player_points");
-            if (prop?.line) propLine = { line: prop.line, market: "points" };
-          }
+          if (p) playerTarget = { name: p.name, stat: "ppg", statValue: p.stat };
         } else if (outcome === "HOME_TOP_REBOUNDER_10_PLUS" || outcome === "HOME_TOP_REBOUNDER_12_PLUS") {
           const p = gamePlayerCtx.homeTopRebounder;
-          if (p) {
-            playerTarget = { name: p.name, stat: "rpg", statValue: p.stat };
-            const prop = gameProps.find((pr) => pr.playerId === p.id && pr.market === "player_rebounds");
-            if (prop?.line) propLine = { line: prop.line, market: "rebounds" };
-          }
+          if (p) playerTarget = { name: p.name, stat: "rpg", statValue: p.stat };
         } else if (outcome === "AWAY_TOP_REBOUNDER_10_PLUS" || outcome === "AWAY_TOP_REBOUNDER_12_PLUS") {
           const p = gamePlayerCtx.awayTopRebounder;
-          if (p) {
-            playerTarget = { name: p.name, stat: "rpg", statValue: p.stat };
-            const prop = gameProps.find((pr) => pr.playerId === p.id && pr.market === "player_rebounds");
-            if (prop?.line) propLine = { line: prop.line, market: "rebounds" };
-          }
+          if (p) playerTarget = { name: p.name, stat: "rpg", statValue: p.stat };
         } else if (
           outcome === "HOME_TOP_PLAYMAKER_8_PLUS" || outcome === "HOME_TOP_PLAYMAKER_10_PLUS" ||
           outcome === "HOME_TOP_ASSIST_8_PLUS" || outcome === "HOME_TOP_ASSIST_10_PLUS"
         ) {
           const p = gamePlayerCtx.homeTopPlaymaker;
-          if (p) {
-            playerTarget = { name: p.name, stat: "apg", statValue: p.stat };
-            const prop = gameProps.find((pr) => pr.playerId === p.id && pr.market === "player_assists");
-            if (prop?.line) propLine = { line: prop.line, market: "assists" };
-          }
+          if (p) playerTarget = { name: p.name, stat: "apg", statValue: p.stat };
         } else if (
           outcome === "AWAY_TOP_PLAYMAKER_8_PLUS" || outcome === "AWAY_TOP_PLAYMAKER_10_PLUS" ||
           outcome === "AWAY_TOP_ASSIST_8_PLUS" || outcome === "AWAY_TOP_ASSIST_10_PLUS"
         ) {
           const p = gamePlayerCtx.awayTopPlaymaker;
-          if (p) {
-            playerTarget = { name: p.name, stat: "apg", statValue: p.stat };
-            const prop = gameProps.find((pr) => pr.playerId === p.id && pr.market === "player_assists");
-            if (prop?.line) propLine = { line: prop.line, market: "assists" };
-          }
+          if (p) playerTarget = { name: p.name, stat: "apg", statValue: p.stat };
         } else if (outcome === "HOME_TOP_ASSIST_EXCEEDS_AVG" || outcome === "AWAY_TOP_ASSIST_EXCEEDS_AVG") {
           const p = outcome.startsWith("HOME_") ? gamePlayerCtx.homeTopPlaymaker : gamePlayerCtx.awayTopPlaymaker;
-          if (p) {
-            playerTarget = { name: p.name, stat: "apg", statValue: p.stat };
-            const prop = gameProps.find((pr) => pr.playerId === p.id && pr.market === "player_assists");
-            if (prop?.line) propLine = { line: prop.line, market: "assists" };
-          }
+          if (p) playerTarget = { name: p.name, stat: "apg", statValue: p.stat };
         } else if (outcome === "HOME_TOP_SCORER_EXCEEDS_AVG" || outcome === "AWAY_TOP_SCORER_EXCEEDS_AVG") {
           const p = outcome.startsWith("HOME_") ? gamePlayerCtx.homeTopScorer : gamePlayerCtx.awayTopScorer;
-          if (p) {
-            playerTarget = { name: p.name, stat: "ppg", statValue: p.stat };
-            const prop = gameProps.find((pr) => pr.playerId === p.id && pr.market === "player_points");
-            if (prop?.line) propLine = { line: prop.line, market: "points" };
-          }
+          if (p) playerTarget = { name: p.name, stat: "ppg", statValue: p.stat };
         } else if (outcome === "HOME_TOP_REBOUNDER_EXCEEDS_AVG" || outcome === "AWAY_TOP_REBOUNDER_EXCEEDS_AVG") {
           const p = outcome.startsWith("HOME_") ? gamePlayerCtx.homeTopRebounder : gamePlayerCtx.awayTopRebounder;
-          if (p) {
-            playerTarget = { name: p.name, stat: "rpg", statValue: p.stat };
-            const prop = gameProps.find((pr) => pr.playerId === p.id && pr.market === "player_rebounds");
-            if (prop?.line) propLine = { line: prop.line, market: "rebounds" };
-          }
+          if (p) playerTarget = { name: p.name, stat: "rpg", statValue: p.stat };
         } else if (outcome === "HOME_TOP_SCORER_DOUBLE_DOUBLE" || outcome === "AWAY_TOP_SCORER_DOUBLE_DOUBLE") {
           const p = outcome.startsWith("HOME_") ? gamePlayerCtx.homeTopScorer : gamePlayerCtx.awayTopScorer;
           if (p) {
@@ -482,14 +435,7 @@ export async function GET(req: Request) {
       status: game.status,
       homeScore: game.homeScore,
       awayScore: game.awayScore,
-      odds: consensus
-        ? {
-            spreadHome: consensus.spreadHome,
-            totalOver: consensus.totalOver,
-            mlHome: consensus.mlHome,
-            mlAway: consensus.mlAway,
-          }
-        : null,
+      odds: null,
       context,
       predictions: enrichedPredictions,
       predictionCount: deduplicatedPatterns.length,

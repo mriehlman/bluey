@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import Nav from "./Nav";
 
 export const metadata: Metadata = {
   title: "Bluey Dashboard",
@@ -14,19 +15,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <nav>
-          <span className="brand">Bluey</span>
-          <a href="/predictions">Predictions</a>
-          <a href="/pipeline">Pipeline</a>
-          <a href="/patterns">Patterns</a>
-          <a href={`/events/${todayStr()}`}>Events</a>
-        </nav>
+        <Nav />
         <main>{children}</main>
       </body>
     </html>
   );
-}
-
-function todayStr() {
-  return new Date().toISOString().slice(0, 10);
 }

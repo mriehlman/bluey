@@ -1,3 +1,12 @@
+import { NextResponse } from "next/server";
+
+/** Disabled: pipeline runs are internal. Only predictions API is public. */
+export async function POST() {
+  return NextResponse.json({ error: "Not found" }, { status: 404 });
+}
+
+/*
+// Original implementation kept for reference - re-enable for admin use
 import { spawn } from "child_process";
 import path from "path";
 

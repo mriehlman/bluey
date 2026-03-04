@@ -31,7 +31,7 @@ export default function LiveExplainButton({ date }: { date: string }) {
       <button onClick={explain} disabled={loading}>
         {loading ? "Loading…" : "Fetch Stored Events"}
       </button>
-      {error && <p style={{ color: "#dc2626" }}>{error}</p>}
+      {error && <p style={{ color: "var(--error)" }}>{error}</p>}
       {result && (
         <pre style={{ marginTop: "0.5rem" }}>
           {JSON.stringify(result, null, 2)}
