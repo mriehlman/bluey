@@ -3,6 +3,7 @@ import { computeContextForDate } from "./buildGameContext.js";
 import { GAME_EVENT_CATALOG } from "./gameEventCatalog.js";
 import type { GameEventContext } from "./gameEventCatalog.js";
 import type { GameContext, PlayerGameContext } from "@prisma/client";
+import { getDiscoveryV2MatchesForGameIds } from "../patterns/discoveryV2.js";
 
 function getCurrentSeason(): number {
   const now = new Date();
@@ -63,6 +64,7 @@ export async function predictGames(args: string[] = []): Promise<void> {
   const patterns = await prisma.gamePattern.findMany({
     orderBy: { confidenceScore: "desc" },
   });
+  const discoveryV2ByGame = await getDiscoveryV2MatchesForGameIds(games.map((g) => g.id));
   console.log(`Loaded ${patterns.length} stored patterns\n`);
 
   // Load player data for player contexts
@@ -240,6 +242,17 @@ export async function predictGames(args: string[] = []): Promise<void> {
         const edge = ((p.hitRate - 0.524) * 100).toFixed(1);
         console.log(`  [${i + 1}] ${p.conditions.join(" + ")}`);
         console.log(`      -> ${p.outcome}  |  ${(p.hitRate * 100).toFixed(1)}% (${p.hitCount}/${p.sampleSize})  |  ${p.seasons} seasons  |  edge ${Number(edge) >= 0 ? "+" : ""}${edge}%`);
+      }
+      console.log("");
+    }
+
+    const v2Matches = discoveryV2ByGame.get(game.id) ?? [];
+    if (v2Matches.length > 0) {
+      console.log(`  Discovery v2 deployed matches (${v2Matches.length}):`);
+      for (const m of v2Matches.slice(0, 5)) {
+        console.log(
+          `    ${m.conditions.join(" + ")} -> ${m.outcomeType} | posterior ${(m.posteriorHitRate * 100).toFixed(1)}% | edge ${(m.edge * 100).toFixed(1)}% | n=${m.n}`,
+        );
       }
       console.log("");
     }

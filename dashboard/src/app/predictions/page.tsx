@@ -73,6 +73,22 @@ interface GamePrediction {
   };
   predictions: Prediction[];
   predictionCount: number;
+  discoveryV2Matches?: {
+    id: string;
+    outcomeType: string;
+    conditions: string[];
+    posteriorHitRate: number;
+    edge: number;
+    score: number;
+    n: number;
+  }[];
+  suggestedPlays?: {
+    outcomeType: string;
+    confidence: number;
+    posteriorHitRate: number;
+    edge: number;
+    votes: number;
+  }[];
 }
 
 interface PredictionData {
@@ -340,6 +356,19 @@ export default function PredictionsPage() {
 
                 {isExpanded && (
                   <div style={{ marginTop: "1rem", borderTop: "1px solid var(--border)", paddingTop: "1rem" }}>
+                    {(game.suggestedPlays?.length ?? 0) > 0 && (
+                      <div style={{ marginBottom: "1rem" }}>
+                        <h4 style={{ marginTop: 0, marginBottom: "0.5rem" }}>Discovery v2 Suggested Plays</h4>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+                          {game.suggestedPlays?.map((play) => (
+                            <span key={play.outcomeType} className="badge badge-gray">
+                              {humanizeLabel(play.outcomeType)} | {(play.posteriorHitRate * 100).toFixed(1)}% | edge {(play.edge * 100).toFixed(2)}% | {play.votes} votes
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
                     {game.predictions.length === 0 ? (
                       <p className="muted">No matching patterns found for this game.</p>
                     ) : (
@@ -457,6 +486,22 @@ export default function PredictionsPage() {
                           })}
                         </div>
                       </>
+                    )}
+
+                    {(game.discoveryV2Matches?.length ?? 0) > 0 && (
+                      <div style={{ marginTop: "1rem" }}>
+                        <h4 style={{ marginTop: 0, marginBottom: "0.5rem" }}>Discovery v2 Deployed Matches</h4>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                          {game.discoveryV2Matches?.slice(0, 6).map((p) => (
+                            <div key={p.id} style={{ background: "var(--bg-elevated)", border: "1px solid var(--border)", padding: "0.6rem", fontSize: "0.82rem" }}>
+                              <div>
+                                <strong>{humanizeLabel(p.outcomeType)}</strong> | posterior {(p.posteriorHitRate * 100).toFixed(1)}% | edge {(p.edge * 100).toFixed(2)}% | n={p.n}
+                              </div>
+                              <div className="muted">{p.conditions.join(" + ")}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
                     )}
                   </div>
                 )}

@@ -21,6 +21,16 @@ interface TeamSnapshot {
   lastGameDate: Date | null;
 }
 
+type DiscoveryV2Pattern = {
+  id: string;
+  outcomeType: string;
+  conditions: string[];
+  posteriorHitRate: number;
+  edge: number;
+  score: number;
+  n: number;
+};
+
 function getCurrentSeason(): number {
   const now = new Date();
   // Season uses the year it starts (e.g., 2025-26 season = 2025)
@@ -110,6 +120,10 @@ export async function GET(req: Request) {
   const patterns = await prisma.gamePattern.findMany({
     orderBy: { confidenceScore: "desc" },
   });
+
+  const discoveryV2ByGame = await getDiscoveryV2MatchesByGame(
+    games.map((g) => g.id),
+  );
 
   const teamIds = [...new Set(games.flatMap((g) => [g.homeTeamId, g.awayTeamId]))];
   const teamSnapshots = await computeTeamSnapshots(season, targetDate, teamIds);
@@ -414,7 +428,7 @@ export async function GET(req: Request) {
               if (meta.actual !== undefined && meta.line !== undefined) {
                 parts.push(`${meta.actual} total (line: ${meta.line})`);
               }
-              if (meta.margin !== undefined && meta.spread !== undefined) {
+              if (typeof meta.margin === "number" && typeof meta.spread === "number") {
                 parts.push(`margin ${meta.margin > 0 ? "+" : ""}${meta.margin} (spread: ${meta.spread > 0 ? "+" : ""}${meta.spread})`);
               }
               if (parts.length > 0) explanation = parts.join(", ");
@@ -426,6 +440,39 @@ export async function GET(req: Request) {
 
       return { ...pred, playerTarget, propLine, recent, isHighValue, result };
     });
+
+    const discoveryV2Matches = discoveryV2ByGame.get(game.id) ?? [];
+    const suggestedPlayMap = new Map<
+      string,
+      { outcomeType: string; scoreSum: number; count: number; bestPosterior: number; bestEdge: number }
+    >();
+    for (const p of discoveryV2Matches) {
+      const existing = suggestedPlayMap.get(p.outcomeType);
+      if (!existing) {
+        suggestedPlayMap.set(p.outcomeType, {
+          outcomeType: p.outcomeType,
+          scoreSum: p.score,
+          count: 1,
+          bestPosterior: p.posteriorHitRate,
+          bestEdge: p.edge,
+        });
+      } else {
+        existing.scoreSum += p.score;
+        existing.count += 1;
+        if (p.posteriorHitRate > existing.bestPosterior) existing.bestPosterior = p.posteriorHitRate;
+        if (p.edge > existing.bestEdge) existing.bestEdge = p.edge;
+      }
+    }
+    const suggestedPlays = [...suggestedPlayMap.values()]
+      .map((r) => ({
+        outcomeType: r.outcomeType,
+        confidence: r.scoreSum / r.count,
+        posteriorHitRate: r.bestPosterior,
+        edge: r.bestEdge,
+        votes: r.count,
+      }))
+      .sort((a, b) => b.confidence - a.confidence)
+      .slice(0, 5);
 
     return {
       id: game.id,
@@ -439,10 +486,62 @@ export async function GET(req: Request) {
       context,
       predictions: enrichedPredictions,
       predictionCount: deduplicatedPatterns.length,
+      discoveryV2Matches,
+      suggestedPlays,
     };
   });
 
   return NextResponse.json({ date: dateStr, games: result });
+}
+
+function sqlEsc(input: string): string {
+  return input.replaceAll("'", "''");
+}
+
+function matchesConditions(tokens: Set<string>, conditions: string[]): boolean {
+  for (const c of conditions) {
+    if (c.startsWith("!")) {
+      if (tokens.has(c.slice(1))) return false;
+    } else if (!tokens.has(c)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function getDiscoveryV2MatchesByGame(
+  gameIds: string[],
+): Promise<Map<string, DiscoveryV2Pattern[]>> {
+  const out = new Map<string, DiscoveryV2Pattern[]>();
+  for (const id of gameIds) out.set(id, []);
+  if (gameIds.length === 0) return out;
+
+  const inClause = gameIds.map((id) => `'${sqlEsc(id)}'`).join(",");
+  const tokenRows = await prisma.$queryRawUnsafe<Array<{ gameId: string; tokens: string[] }>>(
+    `SELECT "gameId", "tokens" FROM "GameFeatureToken" WHERE "gameId" IN (${inClause})`,
+  );
+  const patterns = await prisma.$queryRawUnsafe<DiscoveryV2Pattern[]>(
+    `SELECT "id","outcomeType","conditions","posteriorHitRate","edge","score","n"
+     FROM "PatternV2"
+     WHERE "status" = 'deployed'
+     ORDER BY "score" DESC`,
+  );
+  const tokensByGame = new Map(tokenRows.map((r) => [r.gameId, new Set(r.tokens ?? [])]));
+
+  for (const p of patterns) {
+    for (const gameId of gameIds) {
+      const tokens = tokensByGame.get(gameId);
+      if (!tokens) continue;
+      if (!matchesConditions(tokens, p.conditions ?? [])) continue;
+      out.get(gameId)?.push(p);
+    }
+  }
+  for (const gameId of gameIds) {
+    const list = out.get(gameId) ?? [];
+    list.sort((a, b) => b.score - a.score || b.edge - a.edge);
+    out.set(gameId, list.slice(0, 8));
+  }
+  return out;
 }
 
 async function computePlayerContextFallback(
@@ -650,12 +749,12 @@ function findMatchingPatterns(
   game: { id: string; homeTeamId: number; awayTeamId: number },
   homeSnap: TeamSnapshot | undefined,
   awaySnap: TeamSnapshot | undefined,
-  patterns: { id: string; conditions: string[]; outcome: string; hitRate: number; hitCount: number; sampleSize: number; seasons: number; confidenceScore: number | null }[],
+  patterns: { id: string; patternKey: string; conditions: string[]; outcome: string; hitRate: number; hitCount: number; sampleSize: number; seasons: number; confidenceScore: number | null }[],
   targetDate: Date,
   odds?: OddsLike,
   playerContexts: PlayerContextLike = [],
   gameContext?: GameContextLike,
-): { conditions: string[]; outcome: string; hitRate: number; hitCount: number; sampleSize: number; seasons: number; edge: number }[] {
+): { patternKey: string; patternId: string; conditions: string[]; outcome: string; hitRate: number; hitCount: number; sampleSize: number; seasons: number; edge: number }[] {
   // Prefer GameContext when available (matches buildGameEvents / catalog exactly)
   const useCtx = gameContext != null;
   const home = useCtx

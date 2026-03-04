@@ -66,6 +66,8 @@ model Game {
   gameEvents           GameEvent[]
   playerContexts       PlayerGameContext[]
   gamePatternHits      GamePatternHit[]
+  featureTokens        GameFeatureToken[]
+  patternV2Hits        PatternV2Hit[]
 
   @@index([date])
   @@index([season, date])
@@ -399,6 +401,72 @@ model GamePatternHit {
 
   @@unique([patternId, gameId])
   @@index([gameId])
+}
+
+model FeatureBin {
+  id          String   @id @default(cuid())
+  featureName String
+  binEdges    Json
+  method      String
+  seasonRange String
+  createdAt   DateTime @default(now())
+
+  @@index([featureName])
+  @@index([createdAt])
+  @@index([seasonRange])
+}
+
+model GameFeatureToken {
+  id        String   @id @default(cuid())
+  gameId    String   @unique
+  season    Int
+  date      DateTime @db.Date
+  tokens    String[]
+  createdAt DateTime @default(now())
+  game      Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@index([season, date])
+  @@index([date])
+}
+
+model PatternV2 {
+  id               String   @id @default(cuid())
+  outcomeType      String
+  conditions       String[]
+  discoverySource  String
+  trainStats       Json
+  valStats         Json
+  forwardStats     Json
+  rawHitRate       Float
+  posteriorHitRate Float
+  lift             Float
+  edge             Float
+  score            Float
+  n                Int
+  status           String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  retiredAt        DateTime?
+  hits             PatternV2Hit[]
+
+  @@index([status])
+  @@index([outcomeType])
+  @@index([score])
+  @@index([edge])
+}
+
+model PatternV2Hit {
+  id        String    @id @default(cuid())
+  patternId String
+  gameId    String
+  hitBool   Boolean
+  date      DateTime  @db.Date
+  pattern   PatternV2 @relation(fields: [patternId], references: [id], onDelete: Cascade)
+  game      Game      @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@unique([patternId, gameId])
+  @@index([patternId, date])
+  @@index([date])
 }
 
 model BacktestRun {

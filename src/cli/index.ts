@@ -18,6 +18,13 @@ import { explainNight } from "../features/explainNight.js";
 import { buildNights } from "../features/buildNights.js";
 import { searchPatterns } from "../patterns/searchPatterns.js";
 import { searchGamePatterns } from "../patterns/searchGamePatterns.js";
+import {
+  buildFeatureBins,
+  buildQuantizedGameFeatures,
+  discoverPatternsV2,
+  validatePatternsV2,
+  monitorPatternDecay,
+} from "../patterns/discoveryV2.js";
 import { explainPattern } from "../patterns/explain.js";
 import { rankPatterns } from "../patterns/rank.js";
 import { dedupePatterns } from "../patterns/dedupe.js";
@@ -694,6 +701,26 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
   "build:game-events": async (args) => {
     await buildGameEvents(args);
+  },
+
+  "build:feature-bins": async (args) => {
+    await buildFeatureBins(args);
+  },
+
+  "build:quantized-game-features": async (args) => {
+    await buildQuantizedGameFeatures(args);
+  },
+
+  "search:discover-patterns-v2": async (args) => {
+    await discoverPatternsV2(args);
+  },
+
+  "validate:patterns-v2": async (args) => {
+    await validatePatternsV2(args);
+  },
+
+  "monitor:pattern-decay": async (args) => {
+    await monitorPatternDecay(args);
   },
 
   "search:game-patterns": async (args) => {
