@@ -64,8 +64,24 @@ export async function predictGames(args: string[] = []): Promise<void> {
   const patterns = await prisma.gamePattern.findMany({
     orderBy: { confidenceScore: "desc" },
   });
+  const deployedV2Count = await prisma.patternV2.count({
+    where: { status: "deployed" },
+  });
+  const tokenizedTodayCount = await prisma.gameFeatureToken.count({
+    where: { gameId: { in: games.map((g) => g.id) } },
+  });
   const discoveryV2ByGame = await getDiscoveryV2MatchesForGameIds(games.map((g) => g.id));
-  console.log(`Loaded ${patterns.length} stored patterns\n`);
+  console.log(`Loaded ${patterns.length} legacy stored patterns`);
+  console.log(`Loaded ${deployedV2Count} deployed PatternV2 rows`);
+  console.log(`Found ${tokenizedTodayCount}/${games.length} GameFeatureToken rows for target games\n`);
+  if (deployedV2Count > 0 && tokenizedTodayCount === 0) {
+    console.log(
+      `  Note: deployed v2 patterns exist, but none of today's games are tokenized yet.`,
+    );
+    console.log(
+      `  Run: bun run src/cli/index.ts build:quantized-game-features --from-season ${season} --to-season ${season}\n`,
+    );
+  }
 
   // Load player data for player contexts
   const playerIds = [...new Set(games.flatMap((g) => g.playerStats.map((s) => s.playerId)))];

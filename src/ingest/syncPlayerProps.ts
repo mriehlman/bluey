@@ -339,16 +339,16 @@ export async function syncPlayerPropsLive(): Promise<number> {
     // Process each bookmaker's markets
     for (const bookmaker of propsData.bookmakers) {
       for (const market of bookmaker.markets) {
-        // Group outcomes by player (Over and Under for same player)
-        // Note: 'description' is the player name, 'name' is "Over"/"Under"
+        // Group outcomes by player (Over/Under or Yes/No for same player)
+        // Note: 'description' is the player name.
         const playerOutcomes = new Map<string, { over?: PlayerPropOutcome; under?: PlayerPropOutcome }>();
         
         for (const outcome of market.outcomes) {
           const playerName = outcome.description;
           const existing = playerOutcomes.get(playerName) || {};
-          if (outcome.name === "Over") {
+          if (outcome.name === "Over" || outcome.name === "Yes") {
             existing.over = outcome;
-          } else if (outcome.name === "Under") {
+          } else if (outcome.name === "Under" || outcome.name === "No") {
             existing.under = outcome;
           }
           playerOutcomes.set(playerName, existing);
@@ -359,11 +359,11 @@ export async function syncPlayerPropsLive(): Promise<number> {
           const playerId = await findPlayerId(playerName);
           if (!playerId) continue;
           
-          const line = outcomes.over?.point ?? outcomes.under?.point ?? null;
+          const line = outcomes.over?.point ?? outcomes.under?.point ?? 0.5;
           const overPrice = outcomes.over?.price ?? null;
           const underPrice = outcomes.under?.price ?? null;
           
-          if (line === null) continue;
+          if (!Number.isFinite(line)) continue;
           
           await prisma.playerPropOdds.upsert({
             where: {

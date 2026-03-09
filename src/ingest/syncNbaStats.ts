@@ -205,7 +205,11 @@ export async function syncNbaStatsForDate(date: string): Promise<number> {
       totalStats++;
     }
 
-    console.log(`  ${game.homeTeamNameSnapshot} vs ${game.awayTeamNameSnapshot}: ${box.playerStats.length} player stats`);
+    const homeLabel = game.homeTeamNameSnapshot ?? `Team ${homeTeamBdl}`;
+    const awayLabel = game.awayTeamNameSnapshot ?? `Team ${awayTeamBdl}`;
+    console.log(
+      `  ${homeLabel} vs ${awayLabel} (${box.gameId}): ${box.playerStats.length} player stats`,
+    );
   }
 
   console.log(`\n  Total: ${totalStats} player stat rows synced`);

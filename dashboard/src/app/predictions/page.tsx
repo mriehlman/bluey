@@ -20,12 +20,14 @@ interface TeamContext {
 interface PredictionResult {
   hit: boolean;
   explanation: string | null;
+  scope?: "target" | "outcome";
 }
 
 interface PlayerTarget {
   name: string;
   stat: string;
   statValue: number;
+  rationale?: string;
 }
 
 interface PropLine {
@@ -81,18 +83,69 @@ interface GamePrediction {
     edge: number;
     score: number;
     n: number;
+    playerTarget?: PlayerTarget | null;
+    result?: PredictionResult | null;
   }[];
   suggestedPlays?: {
     outcomeType: string;
+    displayLabel?: string;
     confidence: number;
     posteriorHitRate: number;
     edge: number;
+    metaScore?: number | null;
     votes: number;
+    marketPick?: {
+      market: string;
+      line: number;
+      overPrice: number;
+      impliedProb: number;
+      estimatedProb: number;
+      edge: number;
+      ev: number;
+      label: string;
+    } | null;
+    playerTarget?: PlayerTarget | null;
+    result?: PredictionResult | null;
   }[];
 }
 
 interface PredictionData {
   date: string;
+  season?: number;
+  seasonToDate?: {
+    throughDate: string;
+    v2: { hits: number; total: number; hitRate: number | null };
+    legacy: { hits: number; total: number; hitRate: number | null };
+  };
+  wagerTracking?: {
+    stakePerPick: number;
+    bankrollStart: number;
+    day: {
+      date: string;
+      bets: number;
+      settledBets: number;
+      pendingBets: number;
+      wins: number;
+      losses: number;
+      totalStaked: number;
+      settledStaked: number;
+      netPnl: number;
+      roi: number | null;
+    };
+    seasonToDate: {
+      throughDate: string;
+      bets: number;
+      settledBets: number;
+      pendingBets: number;
+      wins: number;
+      losses: number;
+      totalStaked: number;
+      settledStaked: number;
+      netPnl: number;
+      roi: number | null;
+      bankrollCurrent: number;
+    };
+  } | null;
   games: GamePrediction[];
   message?: string;
 }
@@ -106,15 +159,31 @@ export default function PredictionsPage() {
   const [data, setData] = useState<PredictionData | null>(null);
   const [loading, setLoading] = useState(false);
   const [expandedGame, setExpandedGame] = useState<string | null>(null);
+  const [evidenceOpenByGame, setEvidenceOpenByGame] = useState<Record<string, boolean>>({});
 
   const fetchPredictions = useCallback(async (targetDate: string) => {
     setLoading(true);
     try {
       const res = await fetch(`/api/predictions?date=${targetDate}`);
-      const json = await res.json();
+      const text = await res.text();
+      let json: PredictionData | null = null;
+      try {
+        json = text ? (JSON.parse(text) as PredictionData) : null;
+      } catch {
+        throw new Error(`Predictions API returned invalid JSON (status ${res.status})`);
+      }
+      if (!res.ok) {
+        const message = (json as { message?: string } | null)?.message ?? `HTTP ${res.status}`;
+        throw new Error(`Predictions API failed: ${message}`);
+      }
       setData(json);
     } catch (err) {
       console.error(err);
+      setData((prev) => ({
+        date: targetDate,
+        games: prev?.games ?? [],
+        message: err instanceof Error ? err.message : "Failed to load predictions",
+      }));
     } finally {
       setLoading(false);
     }
@@ -146,6 +215,29 @@ export default function PredictionsPage() {
     if (s < 0) return `L${Math.abs(s)}`;
     return "—";
   };
+
+  const computeGameHitSummary = (game: GamePrediction) => {
+    const allResults = [
+      ...game.predictions.map((p) => p.result).filter((r): r is PredictionResult => r != null),
+      ...(game.suggestedPlays ?? []).map((p) => p.result).filter((r): r is PredictionResult => r != null),
+    ];
+    const total = allResults.length;
+    const hits = allResults.filter((r) => r.hit).length;
+    return { hits, total };
+  };
+
+  const dayHitSummary = (() => {
+    if (!data) return { hits: 0, total: 0 };
+    return data.games.reduce(
+      (acc, game) => {
+        const s = computeGameHitSummary(game);
+        acc.hits += s.hits;
+        acc.total += s.total;
+        return acc;
+      },
+      { hits: 0, total: 0 },
+    );
+  })();
 
   const humanizeLabel = (key: string, includeSide = false) => {
     const sideMatch = key.match(/:([^:]+)$/);
@@ -265,6 +357,96 @@ export default function PredictionsPage() {
         Pattern-based predictions for {date}. Shows games with matching condition patterns from historical data.
       </p>
 
+      {!loading && data && (
+        <div className="card" style={{ marginBottom: "1rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
+            <strong>Day Summary</strong>
+            <div>
+              {dayHitSummary.total > 0 ? (
+                <>
+                  <strong>{dayHitSummary.hits}/{dayHitSummary.total}</strong> graded picks hit
+                  <span className="muted" style={{ marginLeft: "0.5rem" }}>
+                    ({((dayHitSummary.hits / dayHitSummary.total) * 100).toFixed(1)}%)
+                  </span>
+                </>
+              ) : (
+                <span className="muted">No graded results yet.</span>
+              )}
+            </div>
+          </div>
+          {data.seasonToDate && (
+            <div style={{ marginTop: "0.5rem", fontSize: "0.9rem" }}>
+              <div>
+                <span className="muted">Season {data.season ?? "?"} to {data.seasonToDate.throughDate} (v2 deployed): </span>
+                {data.seasonToDate.v2.total > 0 ? (
+                  <>
+                    <strong>{data.seasonToDate.v2.hits}/{data.seasonToDate.v2.total}</strong>
+                    <span className="muted" style={{ marginLeft: "0.5rem" }}>
+                      ({((data.seasonToDate.v2.hitRate ?? 0) * 100).toFixed(1)}%)
+                    </span>
+                  </>
+                ) : (
+                  <span className="muted">No graded picks yet</span>
+                )}
+              </div>
+              <div>
+                <span className="muted">Season {data.season ?? "?"} to {data.seasonToDate.throughDate} (legacy): </span>
+                {data.seasonToDate.legacy.total > 0 ? (
+                  <>
+                    <strong>{data.seasonToDate.legacy.hits}/{data.seasonToDate.legacy.total}</strong>
+                    <span className="muted" style={{ marginLeft: "0.5rem" }}>
+                      ({((data.seasonToDate.legacy.hitRate ?? 0) * 100).toFixed(1)}%)
+                    </span>
+                  </>
+                ) : (
+                  <span className="muted">No graded picks yet</span>
+                )}
+              </div>
+            </div>
+          )}
+          {data.wagerTracking && (
+            <div style={{ marginTop: "0.75rem", fontSize: "0.9rem", borderTop: "1px solid var(--border)", paddingTop: "0.6rem" }}>
+              <div>
+                <span className="muted">Wager tracker ({data.wagerTracking.day.date}, ${data.wagerTracking.stakePerPick.toFixed(2)} flat): </span>
+                <strong>{data.wagerTracking.day.settledBets}</strong>
+                <span className="muted"> settled, </span>
+                <strong>{data.wagerTracking.day.pendingBets}</strong>
+                <span className="muted"> pending, W-L </span>
+                <strong>{data.wagerTracking.day.wins}-{data.wagerTracking.day.losses}</strong>
+                <span className="muted"> | P&L </span>
+                <strong style={{ color: data.wagerTracking.day.netPnl >= 0 ? "var(--success)" : "var(--error)" }}>
+                  {data.wagerTracking.day.netPnl >= 0 ? "+" : ""}${data.wagerTracking.day.netPnl.toFixed(2)}
+                </strong>
+                <span className="muted"> | ROI </span>
+                <strong>
+                  {data.wagerTracking.day.roi != null
+                    ? `${(data.wagerTracking.day.roi * 100).toFixed(1)}%`
+                    : "n/a"}
+                </strong>
+              </div>
+              <div>
+                <span className="muted">Season to {data.wagerTracking.seasonToDate.throughDate} bankroll: </span>
+                <strong>${data.wagerTracking.seasonToDate.bankrollCurrent.toFixed(2)}</strong>
+                <span className="muted"> (start ${data.wagerTracking.bankrollStart.toFixed(2)}) | P&L </span>
+                <strong style={{ color: data.wagerTracking.seasonToDate.netPnl >= 0 ? "var(--success)" : "var(--error)" }}>
+                  {data.wagerTracking.seasonToDate.netPnl >= 0 ? "+" : ""}${data.wagerTracking.seasonToDate.netPnl.toFixed(2)}
+                </strong>
+                <span className="muted"> | ROI </span>
+                <strong>
+                  {data.wagerTracking.seasonToDate.roi != null
+                    ? `${(data.wagerTracking.seasonToDate.roi * 100).toFixed(1)}%`
+                    : "n/a"}
+                </strong>
+                <span className="muted"> | W-L </span>
+                <strong>
+                  {data.wagerTracking.seasonToDate.wins}-{data.wagerTracking.seasonToDate.losses}
+                </strong>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {loading && (
         <div className="card" style={{ opacity: 0.8 }}>
           <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
@@ -287,6 +469,31 @@ export default function PredictionsPage() {
             const awayLabel = game.awayTeam.code ?? game.awayTeam.name ?? `Team ${game.awayTeam.id}`;
             const isExpanded = expandedGame === game.id;
             const isFinal = game.status?.includes("Final");
+            const gameHitSummary = computeGameHitSummary(game);
+            const recommendedPlay = game.suggestedPlays?.[0] ?? null;
+            const collapsedDiscoveryV2 = (() => {
+              const rows = game.discoveryV2Matches ?? [];
+              const grouped = new Map<
+                string,
+                (typeof rows)[number] & { support: number }
+              >();
+              for (const row of rows) {
+                const targetKey = row.playerTarget?.id != null ? `player:${row.playerTarget.id}` : "player:none";
+                const key = `${row.outcomeType}|${targetKey}`;
+                const existing = grouped.get(key);
+                if (!existing) {
+                  grouped.set(key, { ...row, support: 1 });
+                } else {
+                  existing.support += 1;
+                  if (row.score > existing.score) {
+                    grouped.set(key, { ...row, support: existing.support });
+                  }
+                }
+              }
+              return [...grouped.values()]
+                .sort((a, b) => b.score - a.score || b.edge - a.edge)
+                .slice(0, 6);
+            })();
 
             return (
               <div key={game.id} className="card">
@@ -307,6 +514,35 @@ export default function PredictionsPage() {
                       {game.predictionCount > 0 && (
                         <span className="badge" style={{ background: "var(--bg-elevated)", color: "var(--accent-cyan)", borderColor: "var(--accent-cyan)" }}>
                           {game.predictionCount} predictions
+                        </span>
+                      )}
+                      {gameHitSummary.total > 0 && (
+                        <span
+                          className="badge"
+                          style={{
+                            background: "var(--bg-elevated)",
+                            color: gameHitSummary.hits / gameHitSummary.total >= 0.5 ? "var(--success)" : "var(--error)",
+                            borderColor: gameHitSummary.hits / gameHitSummary.total >= 0.5 ? "var(--success)" : "var(--error)",
+                          }}
+                        >
+                          Hits: {gameHitSummary.hits}/{gameHitSummary.total}
+                        </span>
+                      )}
+                      {recommendedPlay && (
+                        <span
+                          className="badge"
+                          style={{
+                            background: "var(--bg-elevated)",
+                            color: "var(--accent-orange)",
+                            borderColor: "var(--accent-orange)",
+                            maxWidth: "520px",
+                            whiteSpace: "nowrap",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                          }}
+                          title={`Recommended: ${recommendedPlay.displayLabel ?? humanizeLabel(recommendedPlay.outcomeType)} (${(recommendedPlay.posteriorHitRate * 100).toFixed(1)}%, edge ${(recommendedPlay.edge * 100).toFixed(2)}%, meta ${recommendedPlay.metaScore != null ? (recommendedPlay.metaScore * 100).toFixed(1) : "n/a"}%, ${recommendedPlay.votes} votes)`}
+                        >
+                          Recommended: {recommendedPlay.displayLabel ?? humanizeLabel(recommendedPlay.outcomeType)} ({(recommendedPlay.posteriorHitRate * 100).toFixed(1)}% | edge {(recommendedPlay.edge * 100).toFixed(2)}% | meta {recommendedPlay.metaScore != null ? (recommendedPlay.metaScore * 100).toFixed(1) : "n/a"}% | {recommendedPlay.votes}v)
                         </span>
                       )}
                     </div>
@@ -359,19 +595,80 @@ export default function PredictionsPage() {
                     {(game.suggestedPlays?.length ?? 0) > 0 && (
                       <div style={{ marginBottom: "1rem" }}>
                         <h4 style={{ marginTop: 0, marginBottom: "0.5rem" }}>Discovery v2 Suggested Plays</h4>
+                        <div className="muted" style={{ marginBottom: "0.5rem", fontSize: "0.82rem" }}>
+                          Suggested action: start with{" "}
+                          <strong style={{ color: "var(--accent-cyan)" }}>
+                            {humanizeLabel(game.suggestedPlays?.[0]?.outcomeType ?? "")}
+                          </strong>
+                          {" "}and use vote count + edge as confidence.
+                        </div>
                         <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
                           {game.suggestedPlays?.map((play) => (
-                            <span key={play.outcomeType} className="badge badge-gray">
-                              {humanizeLabel(play.outcomeType)} | {(play.posteriorHitRate * 100).toFixed(1)}% | edge {(play.edge * 100).toFixed(2)}% | {play.votes} votes
-                            </span>
+                            <div
+                              key={play.outcomeType}
+                              style={{
+                                background: "var(--bg-elevated)",
+                                border: "1px solid var(--border)",
+                                borderLeft: `4px solid ${play.result ? (play.result.hit ? "var(--success)" : "var(--error)") : "var(--accent-cyan)"}`,
+                                borderRadius: "8px",
+                                padding: "0.5rem 0.6rem",
+                                fontSize: "0.82rem",
+                              }}
+                            >
+                              <div>
+                                <strong>{play.displayLabel ?? humanizeLabel(play.outcomeType)}</strong> | {(play.posteriorHitRate * 100).toFixed(1)}% | edge {(play.edge * 100).toFixed(2)}% | meta {play.metaScore != null ? (play.metaScore * 100).toFixed(1) : "n/a"}% | {play.votes} votes
+                              </div>
+                              {play.marketPick && (
+                                <div className="muted" style={{ marginTop: "0.25rem" }}>
+                                  Market EV: {(play.marketPick.ev * 100).toFixed(1)}% | est {(play.marketPick.estimatedProb * 100).toFixed(1)}% vs implied {(play.marketPick.impliedProb * 100).toFixed(1)}%
+                                </div>
+                              )}
+                              {!play.marketPick && (
+                                <div className="muted" style={{ marginTop: "0.25rem" }}>
+                                  No market-backed line available for this game yet.
+                                </div>
+                              )}
+                              {play.playerTarget && (
+                                <div className="muted" style={{ marginTop: "0.25rem" }}>
+                                  Target: <strong style={{ color: "var(--accent-cyan)" }}>{play.playerTarget.name}</strong>{" "}
+                                  ({play.playerTarget.statValue.toFixed(1)} {play.playerTarget.stat})
+                                  {play.playerTarget.rationale ? ` - ${play.playerTarget.rationale}` : ""}
+                                </div>
+                              )}
+                              {play.result && (
+                                <div style={{ marginTop: "0.3rem" }}>
+                                  <span
+                                    className="badge"
+                                    style={{
+                                      background: play.result.hit ? "var(--success)" : "var(--error)",
+                                      color: "white",
+                                      border: "none",
+                                    }}
+                                  >
+                                    {play.result.scope === "target"
+                                      ? play.result.hit
+                                        ? "TARGET HIT"
+                                        : "TARGET MISS"
+                                      : play.result.hit
+                                        ? "OUTCOME HIT"
+                                        : "OUTCOME MISS"}
+                                  </span>
+                                  {play.result.explanation && (
+                                    <span style={{ marginLeft: "0.5rem", color: "var(--text-secondary)" }}>
+                                      {play.result.explanation}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
                           ))}
                         </div>
                       </div>
                     )}
 
-                    {game.predictions.length === 0 ? (
+                    {game.predictions.length === 0 && (game.discoveryV2Matches?.length ?? 0) === 0 ? (
                       <p className="muted">No matching patterns found for this game.</p>
-                    ) : (
+                    ) : game.predictions.length > 0 ? (
                       <>
                         <h4 style={{ marginTop: 0, marginBottom: "0.75rem" }}>Matching Patterns</h4>
                         <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
@@ -486,21 +783,69 @@ export default function PredictionsPage() {
                           })}
                         </div>
                       </>
-                    )}
+                    ) : null}
 
-                    {(game.discoveryV2Matches?.length ?? 0) > 0 && (
+                    {collapsedDiscoveryV2.length > 0 && (
                       <div style={{ marginTop: "1rem" }}>
-                        <h4 style={{ marginTop: 0, marginBottom: "0.5rem" }}>Discovery v2 Deployed Matches</h4>
-                        <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-                          {game.discoveryV2Matches?.slice(0, 6).map((p) => (
-                            <div key={p.id} style={{ background: "var(--bg-elevated)", border: "1px solid var(--border)", padding: "0.6rem", fontSize: "0.82rem" }}>
-                              <div>
-                                <strong>{humanizeLabel(p.outcomeType)}</strong> | posterior {(p.posteriorHitRate * 100).toFixed(1)}% | edge {(p.edge * 100).toFixed(2)}% | n={p.n}
-                              </div>
-                              <div className="muted">{p.conditions.join(" + ")}</div>
+                        <button
+                          className="btn-today"
+                          onClick={() =>
+                            setEvidenceOpenByGame((prev) => ({
+                              ...prev,
+                              [game.id]: !prev[game.id],
+                            }))
+                          }
+                        >
+                          {evidenceOpenByGame[game.id] ? "Hide evidence" : "Show evidence"}
+                        </button>
+                        {evidenceOpenByGame[game.id] && (
+                          <div style={{ marginTop: "0.75rem" }}>
+                            <h4 style={{ marginTop: 0, marginBottom: "0.5rem" }}>Discovery v2 Deployed Matches</h4>
+                            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                              {collapsedDiscoveryV2.map((p) => (
+                                <div key={p.id} style={{ background: "var(--bg-elevated)", border: "1px solid var(--border)", padding: "0.6rem", fontSize: "0.82rem" }}>
+                                  <div>
+                                    <strong>{humanizeLabel(p.outcomeType)}</strong> | posterior {(p.posteriorHitRate * 100).toFixed(1)}% | edge {(p.edge * 100).toFixed(2)}% | n={p.n}
+                                    {p.support > 1 ? ` | ${p.support} pattern variants` : ""}
+                                  </div>
+                                  <div className="muted">{p.conditions.join(" + ")}</div>
+                                  {p.playerTarget && (
+                                    <div className="muted" style={{ marginTop: "0.25rem" }}>
+                                      Target: <strong style={{ color: "var(--accent-cyan)" }}>{p.playerTarget.name}</strong>{" "}
+                                      ({p.playerTarget.statValue.toFixed(1)} {p.playerTarget.stat})
+                                      {p.playerTarget.rationale ? ` - ${p.playerTarget.rationale}` : ""}
+                                    </div>
+                                  )}
+                                  {p.result && (
+                                    <div style={{ marginTop: "0.35rem" }}>
+                                      <span
+                                        className="badge"
+                                        style={{
+                                          background: p.result.hit ? "var(--success)" : "var(--error)",
+                                          color: "white",
+                                          border: "none",
+                                        }}
+                                      >
+                                        {p.result.scope === "target"
+                                          ? p.result.hit
+                                            ? "TARGET HIT"
+                                            : "TARGET MISS"
+                                          : p.result.hit
+                                            ? "OUTCOME HIT"
+                                            : "OUTCOME MISS"}
+                                      </span>
+                                      {p.result.explanation && (
+                                        <span style={{ marginLeft: "0.5rem", color: "var(--text-secondary)" }}>
+                                          {p.result.explanation}
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
                             </div>
-                          ))}
-                        </div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

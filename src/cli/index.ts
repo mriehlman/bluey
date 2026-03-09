@@ -24,7 +24,10 @@ import {
   discoverPatternsV2,
   validatePatternsV2,
   monitorPatternDecay,
+  analyzePatternsV2,
+  analyzeV2Bankroll,
 } from "../patterns/discoveryV2.js";
+import { trainMetaModel, predictMetaScore, evaluateMetaModelMonthly, evaluateMetaModelPurged } from "../patterns/metaModel.js";
 import { explainPattern } from "../patterns/explain.js";
 import { rankPatterns } from "../patterns/rank.js";
 import { dedupePatterns } from "../patterns/dedupe.js";
@@ -39,6 +42,7 @@ import { buildGameEvents } from "../features/buildGameEvents.js";
 import { predictGames, predictPlayers } from "../features/predictGames.js";
 import { dailyPicks } from "../features/dailyPicks.js";
 import { runBacktest, backtestExisting, analyzePattern, quickValidate } from "../backtest/backtest.js";
+import { analyzeSuggestedPlayLedger } from "../backtest/suggestedPlayLedger.js";
 import type { RollupFilters } from "../stats/filters.js";
 import type { PatternFilterConfig } from "../patterns/config.js";
 
@@ -723,6 +727,29 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     await monitorPatternDecay(args);
   },
 
+  "analyze:patterns-v2": async (args) => {
+    await analyzePatternsV2(args);
+  },
+  "analyze:v2-bankroll": async (args) => {
+    await analyzeV2Bankroll(args);
+  },
+
+  "train:meta-model": async (args) => {
+    await trainMetaModel(args);
+  },
+
+  "predict:meta-score": async (args) => {
+    await predictMetaScore(args);
+  },
+
+  "evaluate:meta-monthly": async (args) => {
+    await evaluateMetaModelMonthly(args);
+  },
+
+  "evaluate:meta-purged": async (args) => {
+    await evaluateMetaModelPurged(args);
+  },
+
   "search:game-patterns": async (args) => {
     const flags = parseFlags(args);
     const overrides: Record<string, number> = {};
@@ -761,6 +788,10 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
   "backtest:quick": async (args) => {
     await quickValidate(args);
+  },
+
+  "analyze:suggested-ledger": async (args) => {
+    await analyzeSuggestedPlayLedger(args);
   },
 
   "ingest:raw": async (args) => {

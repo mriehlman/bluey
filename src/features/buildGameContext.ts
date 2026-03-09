@@ -5,6 +5,13 @@ const MIN_GAMES_FOR_CONTEXT = 10;
 const MIN_GAMES_FOR_PLAYER_RANK = 10;
 const MIN_MPG_FOR_PLAYER_RANK = 20;
 
+function hasFinalScore(game: { homeScore: number; awayScore: number; status: string | null }): boolean {
+  const hasAnyScore = (game.homeScore ?? 0) > 0 || (game.awayScore ?? 0) > 0;
+  if (!hasAnyScore) return false;
+  if (game.status == null) return true;
+  return game.status.includes("Final");
+}
+
 interface TeamAccum {
   teamId: number;
   gamesPlayed: number;
@@ -226,7 +233,6 @@ export async function computeContextForDate(
     where: {
       season,
       date: { lt: asOfDate },
-      ...(teamIds ? { OR: [{ homeTeamId: { in: teamIds } }, { awayTeamId: { in: teamIds } }] } : {}),
     },
     include: {
       playerStats: true,
@@ -238,6 +244,8 @@ export async function computeContextForDate(
   const playerAccums = new Map<number, PlayerAccum>();
 
   for (const game of games) {
+    if (!hasFinalScore(game)) continue;
+
     const homeAccum = teamAccums.get(game.homeTeamId) ?? makeTeamAccum(game.homeTeamId);
     const awayAccum = teamAccums.get(game.awayTeamId) ?? makeTeamAccum(game.awayTeamId);
 
@@ -335,7 +343,26 @@ export async function computeContextForDate(
   }
   rankPlayers(playerSnapshots);
 
-  return { teamSnapshots, playerSnapshots };
+  if (!teamIds || teamIds.length === 0) {
+    return { teamSnapshots, playerSnapshots };
+  }
+
+  const requestedTeams = new Set(teamIds);
+  const filteredTeamSnapshots = new Map<number, TeamSnapshot>();
+  for (const [id, snap] of teamSnapshots) {
+    if (requestedTeams.has(id)) {
+      filteredTeamSnapshots.set(id, snap);
+    }
+  }
+
+  const filteredPlayerSnapshots = new Map<number, PlayerSnapshot>();
+  for (const [id, snap] of playerSnapshots) {
+    if (requestedTeams.has(snap.teamId)) {
+      filteredPlayerSnapshots.set(id, snap);
+    }
+  }
+
+  return { teamSnapshots: filteredTeamSnapshots, playerSnapshots: filteredPlayerSnapshots };
 }
 
 function getCurrentSeason(): number {
@@ -400,6 +427,7 @@ export async function buildGameContext(args: string[] = []): Promise<void> {
 
     for (let gi = 0; gi < games.length; gi++) {
       const game = games[gi];
+      if (!hasFinalScore(game)) continue;
 
       const homeAccum = teamAccums.get(game.homeTeamId) ?? makeTeamAccum(game.homeTeamId);
       const awayAccum = teamAccums.get(game.awayTeamId) ?? makeTeamAccum(game.awayTeamId);

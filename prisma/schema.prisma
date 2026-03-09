@@ -68,6 +68,7 @@ model Game {
   gamePatternHits      GamePatternHit[]
   featureTokens        GameFeatureToken[]
   patternV2Hits        PatternV2Hit[]
+  suggestedPlayLedger  SuggestedPlayLedger[]
 
   @@index([date])
   @@index([season, date])
@@ -467,6 +468,43 @@ model PatternV2Hit {
   @@unique([patternId, gameId])
   @@index([patternId, date])
   @@index([date])
+}
+
+model SuggestedPlayLedger {
+  id               String   @id @default(cuid())
+  date             DateTime @db.Date
+  season           Int
+  gameId           String
+  dedupKey         String
+  outcomeType      String
+  displayLabel     String?
+  targetPlayerId   Int?
+  targetPlayerName String?
+  market           String?
+  line             Float?
+  priceAmerican    Int?
+  impliedProb      Float?
+  estimatedProb    Float?
+  modelEdge        Float?
+  ev               Float?
+  posteriorHitRate Float
+  metaScore        Float?
+  confidence       Float
+  votes            Int
+  stake            Float
+  isActionable     Boolean  @default(false)
+  settledResult    String?
+  settledHit       Boolean?
+  payout           Float?
+  profit           Float?
+  capturedAt       DateTime @default(now())
+  updatedAt        DateTime @default(now())
+  game             Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@unique([date, gameId, dedupKey])
+  @@index([season, date])
+  @@index([date, isActionable])
+  @@index([settledResult, date])
 }
 
 model BacktestRun {
