@@ -1,0 +1,7 @@
+ALTER TABLE "SuggestedPlayLedger"
+ADD COLUMN "betImpliedProb" DOUBLE PRECISION,
+ADD COLUMN "closePriceAmerican" INTEGER,
+ADD COLUMN "closeImpliedProb" DOUBLE PRECISION,
+ADD COLUMN "clvDeltaProb" DOUBLE PRECISION,
+ADD COLUMN "clvDeltaCents" DOUBLE PRECISION,
+ADD COLUMN "clvStatus" TEXT;

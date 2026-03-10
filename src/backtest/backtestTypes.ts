@@ -25,6 +25,8 @@ export interface BacktestConfig {
   betFraction: number;
   /** Standard odds for calculating P&L (American format, e.g., -110) */
   standardOdds: number;
+  /** Optional purge/embargo gap before each test fold start */
+  embargoDays?: number;
 }
 
 export const DEFAULT_BACKTEST_CONFIG: BacktestConfig = {
@@ -38,6 +40,7 @@ export const DEFAULT_BACKTEST_CONFIG: BacktestConfig = {
   betSizing: "flat",
   betFraction: 0.02,
   standardOdds: -110,
+  embargoDays: 0,
 };
 
 export interface PatternCandidate {

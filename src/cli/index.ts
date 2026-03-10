@@ -12,12 +12,6 @@ import { ingestSeason, ingestAllSeasons, getIngestionStatus } from "../ingest/in
 import { enrichSeason, enrichAllSeasons, getEnrichmentStatus } from "../ingest/enrichFromRawNba.js";
 import { getPlayerTotals } from "../stats/playerRollup.js";
 import { getTeamTotals } from "../stats/teamRollup.js";
-import { buildNightEvents } from "../features/buildNightEvents.js";
-import { buildNightAggregates } from "../features/buildNightAggregates.js";
-import { explainNight } from "../features/explainNight.js";
-import { buildNights } from "../features/buildNights.js";
-import { searchPatterns } from "../patterns/searchPatterns.js";
-import { searchGamePatterns } from "../patterns/searchGamePatterns.js";
 import {
   buildFeatureBins,
   buildQuantizedGameFeatures,
@@ -26,15 +20,11 @@ import {
   monitorPatternDecay,
   analyzePatternsV2,
   analyzeV2Bankroll,
+  evaluatePatternsV2Purged,
 } from "../patterns/discoveryV2.js";
 import { trainMetaModel, predictMetaScore, evaluateMetaModelMonthly, evaluateMetaModelPurged } from "../patterns/metaModel.js";
-import { explainPattern } from "../patterns/explain.js";
-import { rankPatterns } from "../patterns/rank.js";
-import { dedupePatterns } from "../patterns/dedupe.js";
-import { watchlistAdd, watchlistList, watchlistRemove, checkLatest } from "../patterns/watchlist.js";
 import { coverageReport } from "../reports/coverage.js";
-import { eventCoverageReport } from "../reports/eventCoverage.js";
-import { aggregateCoverageReport } from "../reports/aggregateCoverage.js";
+import { reportProbabilityQuality } from "../reports/probabilityQuality.js";
 import { playerProfile } from "../profiles/playerProfile.js";
 import { teamProfile } from "../profiles/teamProfile.js";
 import { buildGameContext } from "../features/buildGameContext.js";
@@ -43,8 +33,8 @@ import { predictGames, predictPlayers } from "../features/predictGames.js";
 import { dailyPicks } from "../features/dailyPicks.js";
 import { runBacktest, backtestExisting, analyzePattern, quickValidate } from "../backtest/backtest.js";
 import { analyzeSuggestedPlayLedger } from "../backtest/suggestedPlayLedger.js";
+import { updateSuggestedPlayClv } from "../backtest/updateClvSnapshots.js";
 import type { RollupFilters } from "../stats/filters.js";
-import type { PatternFilterConfig } from "../patterns/config.js";
 
 function parseFlags(args: string[]): Record<string, string> {
   const flags: Record<string, string> = {};
@@ -623,72 +613,12 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     }
   },
 
-  "build:nightly-events": async (args) => {
-    await buildNightEvents(args);
-  },
-
-  "build:night-aggregates": async (args) => {
-    await buildNightAggregates(args);
-  },
-
-  "events:explain": async (args) => {
-    await explainNight(args);
-  },
-
-  "build:nights": async (args) => {
-    await buildNights(args);
-  },
-
-  "search:patterns": async (args) => {
-    const flags = parseFlags(args);
-    const overrides: Partial<PatternFilterConfig> = {};
-    if (flags.minOcc) overrides.minOccurrences = Number(flags.minOcc);
-    if (flags.minSeasons) overrides.minSeasonsWithHits = Number(flags.minSeasons);
-    if (flags.maxCluster) overrides.maxClusterShare = Number(flags.maxCluster);
-    if (flags.minAvg) overrides.minAvgHitsPerSeason = Number(flags.minAvg);
-    if (flags.maxAvg) overrides.maxAvgHitsPerSeason = Number(flags.maxAvg);
-    if (flags.maxResults) overrides.maxResults = Number(flags.maxResults);
-    await searchPatterns(Object.keys(overrides).length > 0 ? overrides : undefined);
-  },
-
-  "patterns:explain": async (args) => {
-    await explainPattern(args);
-  },
-
-  "patterns:rank": async (args) => {
-    await rankPatterns(args);
-  },
-
-  "patterns:dedupe": async (args) => {
-    await dedupePatterns(args);
-  },
-
-  "patterns:check-latest": async (args) => {
-    await checkLatest(args);
-  },
-
-  "watchlist:add": async (args) => {
-    await watchlistAdd(args);
-  },
-
-  "watchlist:list": async () => {
-    await watchlistList();
-  },
-
-  "watchlist:remove": async (args) => {
-    await watchlistRemove(args);
-  },
-
   "report:coverage": async () => {
     await coverageReport();
   },
 
-  "report:events": async () => {
-    await eventCoverageReport();
-  },
-
-  "report:aggregates": async () => {
-    await aggregateCoverageReport();
+  "report:probability-quality": async (args) => {
+    await reportProbabilityQuality(args);
   },
 
   "profile:player": async (args) => {
@@ -734,6 +664,10 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     await analyzeV2Bankroll(args);
   },
 
+  "evaluate:patterns-v2-purged": async (args) => {
+    await evaluatePatternsV2Purged(args);
+  },
+
   "train:meta-model": async (args) => {
     await trainMetaModel(args);
   },
@@ -748,22 +682,6 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
   "evaluate:meta-purged": async (args) => {
     await evaluateMetaModelPurged(args);
-  },
-
-  "search:game-patterns": async (args) => {
-    const flags = parseFlags(args);
-    const overrides: Record<string, number> = {};
-    if (flags.minSample) overrides.minSample = Number(flags.minSample);
-    if (flags.minHitRate) overrides.minHitRate = Number(flags.minHitRate);
-    if (flags.maxLegs) overrides.maxLegs = Number(flags.maxLegs);
-    if (flags.maxResults) overrides.maxResults = Number(flags.maxResults);
-    if (flags.minSeasons) overrides.minSeasons = Number(flags.minSeasons);
-    if (flags.minFrequency) overrides.minFrequency = Number(flags.minFrequency);
-    await searchGamePatterns(Object.keys(overrides).length > 0 ? overrides : undefined);
-  },
-
-  "predict:games": async (args) => {
-    await predictGames(args);
   },
 
   "predict:players": async (args) => {
@@ -792,6 +710,10 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
   "analyze:suggested-ledger": async (args) => {
     await analyzeSuggestedPlayLedger(args);
+  },
+
+  "update:clv-snapshots": async (args) => {
+    await updateSuggestedPlayClv(args);
   },
 
   "ingest:raw": async (args) => {

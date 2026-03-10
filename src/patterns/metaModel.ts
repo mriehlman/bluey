@@ -6,6 +6,8 @@ import {
   saveMetaModel,
   scoreMetaModel,
   loadMetaModel,
+  applyMetaCalibrator,
+  type MetaCalibrator,
   type MetaModel,
 } from "./metaModelCore.js";
 import { getDiscoveryV2MatchesForGameIds } from "./discoveryV2.js";
@@ -218,6 +220,86 @@ function fitPlattCalibrator(
   return { a, b };
 }
 
+function fitIsotonicCalibrator(
+  probs: number[],
+  labels: number[],
+): MetaCalibrator {
+  if (probs.length === 0 || labels.length === 0 || probs.length !== labels.length) {
+    return { type: "isotonic", x: [0, 1], y: [0.5, 0.5] };
+  }
+  const pairs = probs
+    .map((p, i) => ({ p: Math.min(1 - 1e-6, Math.max(1e-6, p)), y: labels[i] }))
+    .sort((a, b) => a.p - b.p);
+  type Block = { sumY: number; count: number; minX: number; maxX: number };
+  const blocks: Block[] = [];
+  for (const pair of pairs) {
+    blocks.push({ sumY: pair.y, count: 1, minX: pair.p, maxX: pair.p });
+    while (blocks.length >= 2) {
+      const last = blocks[blocks.length - 1];
+      const prev = blocks[blocks.length - 2];
+      const lastMean = last.sumY / last.count;
+      const prevMean = prev.sumY / prev.count;
+      if (prevMean <= lastMean + 1e-12) break;
+      blocks.splice(blocks.length - 2, 2, {
+        sumY: prev.sumY + last.sumY,
+        count: prev.count + last.count,
+        minX: prev.minX,
+        maxX: last.maxX,
+      });
+    }
+  }
+  const x: number[] = [0];
+  const y: number[] = [Math.min(1 - 1e-6, Math.max(1e-6, blocks[0] ? blocks[0].sumY / blocks[0].count : 0.5))];
+  for (const block of blocks) {
+    const meanY = Math.min(1 - 1e-6, Math.max(1e-6, block.sumY / block.count));
+    x.push(block.maxX);
+    y.push(meanY);
+  }
+  x.push(1);
+  y.push(y[y.length - 1] ?? 0.5);
+  return { type: "isotonic", x, y };
+}
+
+type CalibrationMethod = "platt" | "isotonic" | "auto";
+
+function calibratorByMethod(
+  method: Exclude<CalibrationMethod, "auto">,
+  probs: number[],
+  labels: number[],
+): MetaCalibrator {
+  return method === "isotonic"
+    ? fitIsotonicCalibrator(probs, labels)
+    : fitPlattCalibrator(probs, labels);
+}
+
+function selectBestCalibrator(
+  requested: CalibrationMethod,
+  probs: number[],
+  labels: number[],
+): { methodUsed: "platt" | "isotonic"; calibrator: MetaCalibrator } {
+  if (requested === "platt") {
+    return { methodUsed: "platt", calibrator: fitPlattCalibrator(probs, labels) };
+  }
+  if (requested === "isotonic") {
+    return { methodUsed: "isotonic", calibrator: fitIsotonicCalibrator(probs, labels) };
+  }
+  const candidates: Array<{ methodUsed: "platt" | "isotonic"; calibrator: MetaCalibrator }> = [
+    { methodUsed: "platt", calibrator: calibratorByMethod("platt", probs, labels) },
+    { methodUsed: "isotonic", calibrator: calibratorByMethod("isotonic", probs, labels) },
+  ];
+  let best = candidates[0];
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (const candidate of candidates) {
+    const rows = probs.map((p, i) => ({ y: labels[i], p: applyMetaCalibrator(candidate.calibrator, p) }));
+    const metric = computeBinaryMetrics(rows).logLoss;
+    if (metric < bestScore) {
+      bestScore = metric;
+      best = candidate;
+    }
+  }
+  return best;
+}
+
 async function loadMetaRows(
   statuses: string[],
   fromDate?: Date,
@@ -344,8 +426,12 @@ export async function trainMetaModel(args: string[] = []): Promise<void> {
   const lr = Number(flags.lr ?? 0.03);
   const l2 = Number(flags.l2 ?? 0.0008);
   const modelPath = flags.out ?? DEFAULT_META_MODEL_RELATIVE_PATH;
+  const calibrationMethod = (flags["calibration-method"] ?? "platt") as CalibrationMethod;
   const fromDate = flags.from ? new Date(`${flags.from}T00:00:00Z`) : undefined;
   const toDate = flags.to ? new Date(`${flags.to}T00:00:00Z`) : undefined;
+  if (!["platt", "isotonic", "auto"].includes(calibrationMethod)) {
+    throw new Error(`Invalid --calibration-method '${calibrationMethod}'. Use platt|isotonic|auto.`);
+  }
 
   console.log("\n=== Train Meta Model ===\n");
   const rows = await loadMetaRows(statuses, fromDate, toDate);
@@ -486,12 +572,18 @@ export async function trainMetaModel(args: string[] = []): Promise<void> {
       portabilityScore: s.x[4],
       dependencyRisk: s.x[5],
       recentAtoT: s.x[6],
-    }),
+    }, { calibrated: false }),
+  );
+  const globalCalibration = selectBestCalibrator(
+    calibrationMethod,
+    valPreds,
+    validation.map((s) => s.y),
   );
   model.calibrators = {
-    global: fitPlattCalibrator(valPreds, validation.map((s) => s.y)),
+    global: globalCalibration.calibrator,
     family: {},
   };
+  console.log(`Calibration global: method=${globalCalibration.methodUsed}, n=${validation.length}`);
   for (const family of [...new Set(validation.map((s) => s.family))]) {
     const famRows = validation.filter((s) => s.family === family);
     if (famRows.length < 80) continue;
@@ -505,12 +597,15 @@ export async function trainMetaModel(args: string[] = []): Promise<void> {
         portabilityScore: s.x[4],
         dependencyRisk: s.x[5],
         recentAtoT: s.x[6],
-      }),
+      }, { calibrated: false }),
     );
-    model.calibrators.family![family] = fitPlattCalibrator(
+    const familyCalibration = selectBestCalibrator(
+      calibrationMethod,
       famPreds,
       famRows.map((s) => s.y),
     );
+    model.calibrators.family![family] = familyCalibration.calibrator;
+    console.log(`Calibration family=${family}: method=${familyCalibration.methodUsed}, n=${famRows.length}`);
   }
 
   const outPath = await saveMetaModel(model, modelPath);

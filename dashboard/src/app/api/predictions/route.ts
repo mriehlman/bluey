@@ -737,30 +737,18 @@ export async function GET(req: Request) {
     process.env.SUGGESTED_PLAY_DEFAULT_ODDS ?? -110,
   );
   const seasonDateSql = targetDate.toISOString().slice(0, 10);
-  const [seasonToDateV2, seasonToDateLegacy] = await Promise.all([
-    prisma.$queryRawUnsafe<Array<{ hitBool: boolean; count: number }>>(
-      `SELECT h."hitBool" as "hitBool", COUNT(*)::int as "count"
-       FROM "PatternV2Hit" h
-       JOIN "PatternV2" p ON p."id" = h."patternId"
-       JOIN "Game" g ON g."id" = h."gameId"
-       WHERE p."status" = 'deployed'
-         AND g."season" = ${season}
-         AND g."date" <= '${seasonDateSql}'
-       GROUP BY h."hitBool"`,
-    ),
-    prisma.$queryRawUnsafe<Array<{ hit: boolean; count: number }>>(
-      `SELECT h."hit" as "hit", COUNT(*)::int as "count"
-       FROM "GamePatternHit" h
-       JOIN "Game" g ON g."id" = h."gameId"
-       WHERE g."season" = ${season}
-         AND g."date" <= '${seasonDateSql}'
-       GROUP BY h."hit"`,
-    ),
-  ]);
+  const seasonToDateV2 = await prisma.$queryRawUnsafe<Array<{ hitBool: boolean; count: number }>>(
+    `SELECT h."hitBool" as "hitBool", COUNT(*)::int as "count"
+     FROM "PatternV2Hit" h
+     JOIN "PatternV2" p ON p."id" = h."patternId"
+     JOIN "Game" g ON g."id" = h."gameId"
+     WHERE p."status" = 'deployed'
+       AND g."season" = ${season}
+       AND g."date" <= '${seasonDateSql}'
+     GROUP BY h."hitBool"`,
+  );
   const seasonV2Hits = seasonToDateV2.find((r) => r.hitBool)?.count ?? 0;
   const seasonV2Total = seasonToDateV2.reduce((sum, r) => sum + r.count, 0);
-  const seasonLegacyHits = seasonToDateLegacy.find((r) => r.hit)?.count ?? 0;
-  const seasonLegacyTotal = seasonToDateLegacy.reduce((sum, r) => sum + r.count, 0);
 
   // Query ±1 day to catch games mis-dated during ingestion (e.g. March 2 games stored as March 1)
   const dayMs = 86400000;
@@ -830,11 +818,6 @@ export async function GET(req: Request) {
           total: seasonV2Total,
           hitRate: seasonV2Total > 0 ? seasonV2Hits / seasonV2Total : null,
         },
-        legacy: {
-          hits: seasonLegacyHits,
-          total: seasonLegacyTotal,
-          hitRate: seasonLegacyTotal > 0 ? seasonLegacyHits / seasonLegacyTotal : null,
-        },
       },
       wagerTracking,
       games: [],
@@ -861,10 +844,6 @@ export async function GET(req: Request) {
     playerPropsByGame.get(r.gameId)?.push(r);
   }
 
-  const patterns = await prisma.gamePattern.findMany({
-    orderBy: { confidenceScore: "desc" },
-  });
-
   const discoveryV2ByGame = await getDiscoveryV2MatchesByGame(
     games.map((g) => g.id),
   );
@@ -877,7 +856,7 @@ export async function GET(req: Request) {
     .filter((g) => hasCompletedScore(g))
     .map((g) => g.id);
 
-  const [gameOutcomes, patternHits] = await Promise.all([
+  const [gameOutcomes] = await Promise.all([
     completedGameIds.length > 0
       ? prisma.gameEvent.findMany({
           where: {
@@ -892,12 +871,6 @@ export async function GET(req: Request) {
           },
         })
       : [],
-    completedGameIds.length > 0
-      ? prisma.gamePatternHit.findMany({
-          where: { gameId: { in: completedGameIds } },
-          select: { gameId: true, patternId: true, hit: true },
-        })
-      : [],
   ]);
 
   // Build lookup: gameId -> Set of outcome keys that hit (from GameEvent)
@@ -908,12 +881,6 @@ export async function GET(req: Request) {
     }
     const key = `${ev.eventKey}:${ev.side}`;
     outcomesByGame.get(ev.gameId)!.set(key, { hit: true, meta: ev.meta });
-  }
-
-  // Build lookup: gameId|patternId -> hit (from GamePatternHit - reliable source for completed games)
-  const hitByGameAndPattern = new Map<string, boolean>();
-  for (const h of patternHits) {
-    hitByGameAndPattern.set(`${h.gameId}|${h.patternId}`, h.hit);
   }
 
   // For player outcomes, fetch player names
@@ -1000,32 +967,6 @@ export async function GET(req: Request) {
     }
   }
 
-  // Fetch recent pattern performance (last 30 days)
-  const thirtyDaysAgo = new Date(targetDate);
-  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
-  const patternKeys = patterns.map((p) => p.patternKey);
-  const recentHits = await prisma.gamePatternHit.groupBy({
-    by: ["patternId", "hit"],
-    where: {
-      pattern: { patternKey: { in: patternKeys } },
-      game: { date: { gte: thirtyDaysAgo, lt: targetDate } },
-    },
-    _count: true,
-  });
-
-  // Build lookup: patternId -> { recentHits, recentTotal }
-  const patternIdToKey = new Map(patterns.map((p) => [p.id, p.patternKey]));
-  const recentPerfByPattern = new Map<string, { hits: number; total: number }>();
-  for (const r of recentHits) {
-    const key = patternIdToKey.get(r.patternId);
-    if (!key) continue;
-    if (!recentPerfByPattern.has(key)) recentPerfByPattern.set(key, { hits: 0, total: 0 });
-    const perf = recentPerfByPattern.get(key)!;
-    perf.total += r._count;
-    if (r.hit) perf.hits += r._count;
-  }
-
   const result = games.map((game) => {
     const homeSnap = teamSnapshots.get(game.homeTeamId);
     const awaySnap = teamSnapshots.get(game.awayTeamId);
@@ -1099,132 +1040,10 @@ export async function GET(req: Request) {
       stats: game.playerStats as unknown as GameEventContext["stats"],
       odds: (consensus ?? null) as GameEventContext["odds"],
     } as GameEventContext;
-    const matchingPatterns = findMatchingPatterns(
-      game,
-      homeSnap,
-      awaySnap,
-      patterns,
-      targetDate,
-      consensus ?? undefined,
-      gamePlayerContexts,
-      game.context ?? undefined,
-    );
     const isFinal = hasCompletedScore(game);
     const gameOutcomeMap = outcomesByGame.get(game.id);
     const gamePlayerCtx = playerContextByGame.get(game.id);
     const propsForGame = playerPropsByGame.get(game.id) ?? [];
-
-    // Deduplicate: keep only the best pattern for each unique outcome
-    // "Best" = highest hit rate, then largest sample size
-    const seenOutcomeFamilies = new Set<string>();
-    const deduplicatedPatterns = matchingPatterns.filter((pred) => {
-      const family = outcomeDedupFamily(pred.outcome);
-      if (seenOutcomeFamilies.has(family)) return false;
-      if (!isOutcomeActionableForMarket(pred.outcome, consensus ?? null, pred.hitRate)) return false;
-      seenOutcomeFamilies.add(family);
-      return true;
-    });
-
-    // Enrich predictions with player info, prop lines, recent performance, and outcome results
-    const enrichedPredictions = deduplicatedPatterns.slice(0, 10).map((pred) => {
-      // Determine player target for player-specific outcomes
-      let playerTarget: { name: string; stat: string; statValue: number } | null = null;
-      let propLine: { line: number; market: string } | null = null;
-
-      if (gamePlayerCtx) {
-        const outcome = pred.outcome.replace(/:.*/, "");
-        if (outcome === "HOME_TOP_SCORER_25_PLUS" || outcome === "HOME_TOP_SCORER_30_PLUS") {
-          const p = gamePlayerCtx.homeTopScorer;
-          if (p) playerTarget = { name: p.name, stat: "ppg", statValue: p.stat };
-        } else if (outcome === "AWAY_TOP_SCORER_25_PLUS" || outcome === "AWAY_TOP_SCORER_30_PLUS") {
-          const p = gamePlayerCtx.awayTopScorer;
-          if (p) playerTarget = { name: p.name, stat: "ppg", statValue: p.stat };
-        } else if (outcome === "HOME_TOP_REBOUNDER_10_PLUS" || outcome === "HOME_TOP_REBOUNDER_12_PLUS") {
-          const p = gamePlayerCtx.homeTopRebounder;
-          if (p) playerTarget = { name: p.name, stat: "rpg", statValue: p.stat };
-        } else if (outcome === "AWAY_TOP_REBOUNDER_10_PLUS" || outcome === "AWAY_TOP_REBOUNDER_12_PLUS") {
-          const p = gamePlayerCtx.awayTopRebounder;
-          if (p) playerTarget = { name: p.name, stat: "rpg", statValue: p.stat };
-        } else if (
-          outcome === "HOME_TOP_PLAYMAKER_8_PLUS" || outcome === "HOME_TOP_PLAYMAKER_10_PLUS" ||
-          outcome === "HOME_TOP_ASSIST_8_PLUS" || outcome === "HOME_TOP_ASSIST_10_PLUS"
-        ) {
-          const p = gamePlayerCtx.homeTopPlaymaker;
-          if (p) playerTarget = { name: p.name, stat: "apg", statValue: p.stat };
-        } else if (
-          outcome === "AWAY_TOP_PLAYMAKER_8_PLUS" || outcome === "AWAY_TOP_PLAYMAKER_10_PLUS" ||
-          outcome === "AWAY_TOP_ASSIST_8_PLUS" || outcome === "AWAY_TOP_ASSIST_10_PLUS"
-        ) {
-          const p = gamePlayerCtx.awayTopPlaymaker;
-          if (p) playerTarget = { name: p.name, stat: "apg", statValue: p.stat };
-        } else if (outcome === "HOME_TOP_ASSIST_EXCEEDS_AVG" || outcome === "AWAY_TOP_ASSIST_EXCEEDS_AVG") {
-          const p = outcome.startsWith("HOME_") ? gamePlayerCtx.homeTopPlaymaker : gamePlayerCtx.awayTopPlaymaker;
-          if (p) playerTarget = { name: p.name, stat: "apg", statValue: p.stat };
-        } else if (outcome === "HOME_TOP_SCORER_EXCEEDS_AVG" || outcome === "AWAY_TOP_SCORER_EXCEEDS_AVG") {
-          const p = outcome.startsWith("HOME_") ? gamePlayerCtx.homeTopScorer : gamePlayerCtx.awayTopScorer;
-          if (p) playerTarget = { name: p.name, stat: "ppg", statValue: p.stat };
-        } else if (outcome === "HOME_TOP_REBOUNDER_EXCEEDS_AVG" || outcome === "AWAY_TOP_REBOUNDER_EXCEEDS_AVG") {
-          const p = outcome.startsWith("HOME_") ? gamePlayerCtx.homeTopRebounder : gamePlayerCtx.awayTopRebounder;
-          if (p) playerTarget = { name: p.name, stat: "rpg", statValue: p.stat };
-        } else if (outcome === "HOME_TOP_SCORER_DOUBLE_DOUBLE" || outcome === "AWAY_TOP_SCORER_DOUBLE_DOUBLE") {
-          const p = outcome.startsWith("HOME_") ? gamePlayerCtx.homeTopScorer : gamePlayerCtx.awayTopScorer;
-          if (p) {
-            playerTarget = { name: p.name, stat: "ppg", statValue: p.stat };
-          }
-        }
-      }
-
-      // Recent performance (last 30 days)
-      const recentPerf = recentPerfByPattern.get(pred.patternKey);
-      const recent = recentPerf ? { hits: recentPerf.hits, total: recentPerf.total } : null;
-
-      // High-value pattern detection
-      const isHighValue = pred.outcome.includes("UNDERDOG_COVERED") || 
-                          pred.outcome.includes("FAVORITE_COVERED") ||
-                          (pred.hitRate >= 0.65 && pred.sampleSize >= 100);
-
-      // Result for completed games: use GamePatternHit (primary) or GameEvent/score (fallback)
-      // GamePatternHit is populated by search:game-patterns and explicitly tracks hit/miss per (pattern, game)
-      let result: { hit: boolean; explanation: string | null } | null = null;
-      if (isFinal) {
-        let hit: boolean | undefined;
-        const patternHit = hitByGameAndPattern.get(`${game.id}|${pred.patternId}`);
-        if (patternHit !== undefined) {
-          hit = patternHit;
-        } else {
-          // Fallback: GameEvent outcome lookup (keys stored as eventKey:side, e.g. AWAY_WIN:game)
-          const outcomeResult = gameOutcomeMap
-            ? resolveOutcomeResult(gameOutcomeMap, pred.outcome)
-            : undefined;
-          const catalogOutcome = computeOutcomeFromCatalog(pred.outcome, gameEventContext);
-          const computed = computeOutcomeFromFinalScore(pred.outcome, game, consensus ?? null);
-          if (outcomeResult) {
-            hit = true;
-          } else if (catalogOutcome) {
-            hit = catalogOutcome.hit;
-          } else if (computed) {
-            hit = computed.hit;
-          } else {
-            hit = false;
-          }
-        }
-        if (hit !== undefined) {
-          const outcomeResult = gameOutcomeMap
-            ? resolveOutcomeResult(gameOutcomeMap, pred.outcome)
-            : undefined;
-          const catalogOutcome = computeOutcomeFromCatalog(pred.outcome, gameEventContext);
-          const computed = computeOutcomeFromFinalScore(pred.outcome, game, consensus ?? null);
-          const explanationMeta = outcomeResult?.meta ?? catalogOutcome?.meta;
-          const explanation = hit
-            ? buildOutcomeExplanation(explanationMeta, playerMap) ?? computed?.explanation ?? `Final score ${game.awayScore}-${game.homeScore}`
-            : computed?.explanation ?? `Final score ${game.awayScore}-${game.homeScore}; outcome not hit.`;
-          result = { hit, explanation };
-        }
-      }
-
-      return { ...pred, playerTarget, propLine, recent, isHighValue, result };
-    });
-
     const discoveryV2RawMatches = discoveryV2ByGame.get(game.id) ?? [];
     // Reduce "same pick every game" behavior by suppressing ultra-generic single-condition matches.
     const discoveryV2Matches = discoveryV2RawMatches.filter(
@@ -1597,8 +1416,6 @@ export async function GET(req: Request) {
       awayScore: game.awayScore,
       odds: null,
       context,
-      predictions: enrichedPredictions,
-      predictionCount: deduplicatedPatterns.length,
       discoveryV2Matches: enrichedDiscoveryV2Matches,
       suggestedPlays,
       suggestedBetPicks: bettableSuggestedPlays,
@@ -1637,11 +1454,6 @@ export async function GET(req: Request) {
         hits: seasonV2Hits,
         total: seasonV2Total,
         hitRate: seasonV2Total > 0 ? seasonV2Hits / seasonV2Total : null,
-      },
-      legacy: {
-        hits: seasonLegacyHits,
-        total: seasonLegacyTotal,
-        hitRate: seasonLegacyTotal > 0 ? seasonLegacyHits / seasonLegacyTotal : null,
       },
     },
     wagerTracking,
@@ -1734,7 +1546,8 @@ async function upsertSuggestedPlayLedger(args: {
         `('${crypto.randomUUID()}','${sqlEsc(args.dateStr)}',${args.season},'${sqlEsc(game.id)}','${sqlEsc(dedupKey)}',` +
           `'${sqlEsc(play.outcomeType)}',${sqlStr(play.displayLabel)},${sqlNum(play.playerTarget?.id ?? null)},${sqlStr(targetName)},` +
           `${sqlStr(marketPick?.market ?? null)},${sqlNum(marketPick?.line ?? null)},${sqlNum(priceAmerican)},${sqlNum(marketPick?.impliedProb ?? null)},` +
-          `${sqlNum(marketPick?.estimatedProb ?? null)},${sqlNum(marketPick?.edge ?? null)},${sqlNum(marketPick?.ev ?? null)},` +
+          `${sqlNum(marketPick?.impliedProb ?? null)},${sqlNum(marketPick?.estimatedProb ?? null)},${sqlNum(marketPick?.edge ?? null)},${sqlNum(marketPick?.ev ?? null)},` +
+          `NULL,NULL,NULL,NULL,NULL,` +
           `${sqlNum(play.posteriorHitRate)},${sqlNum(play.metaScore)},${sqlNum(play.confidence)},${Math.max(1, play.votes ?? 1)},` +
           `${sqlNum(stake)},${isActionable ? "TRUE" : "FALSE"},'${settledResult}',${sqlBool(settledHit)},${sqlNum(payout)},${sqlNum(profit)},NOW(),NOW())`,
       );
@@ -1746,7 +1559,7 @@ async function upsertSuggestedPlayLedger(args: {
   if (valueRows.length === 0) return;
   await prisma.$executeRawUnsafe(
     `INSERT INTO "SuggestedPlayLedger"
-      ("id","date","season","gameId","dedupKey","outcomeType","displayLabel","targetPlayerId","targetPlayerName","market","line","priceAmerican","impliedProb","estimatedProb","modelEdge","ev","posteriorHitRate","metaScore","confidence","votes","stake","isActionable","settledResult","settledHit","payout","profit","capturedAt","updatedAt")
+      ("id","date","season","gameId","dedupKey","outcomeType","displayLabel","targetPlayerId","targetPlayerName","market","line","priceAmerican","impliedProb","betImpliedProb","estimatedProb","modelEdge","ev","closePriceAmerican","closeImpliedProb","clvDeltaProb","clvDeltaCents","clvStatus","posteriorHitRate","metaScore","confidence","votes","stake","isActionable","settledResult","settledHit","payout","profit","capturedAt","updatedAt")
      VALUES ${valueRows.join(",")}
      ON CONFLICT ("date","gameId","dedupKey") DO UPDATE SET
        "displayLabel" = EXCLUDED."displayLabel",
@@ -1756,9 +1569,15 @@ async function upsertSuggestedPlayLedger(args: {
        "line" = EXCLUDED."line",
        "priceAmerican" = EXCLUDED."priceAmerican",
        "impliedProb" = EXCLUDED."impliedProb",
+      "betImpliedProb" = EXCLUDED."betImpliedProb",
        "estimatedProb" = EXCLUDED."estimatedProb",
        "modelEdge" = EXCLUDED."modelEdge",
        "ev" = EXCLUDED."ev",
+      "closePriceAmerican" = EXCLUDED."closePriceAmerican",
+      "closeImpliedProb" = EXCLUDED."closeImpliedProb",
+      "clvDeltaProb" = EXCLUDED."clvDeltaProb",
+      "clvDeltaCents" = EXCLUDED."clvDeltaCents",
+      "clvStatus" = EXCLUDED."clvStatus",
        "posteriorHitRate" = EXCLUDED."posteriorHitRate",
        "metaScore" = EXCLUDED."metaScore",
        "confidence" = EXCLUDED."confidence",
@@ -2143,133 +1962,3 @@ async function computeTeamSnapshots(
   return result;
 }
 
-type OddsLike = { spreadHome: number | null; totalOver: number | null } | undefined;
-type PlayerContextLike = { teamId: number; rankPpg: number | null; rankRpg: number | null; rankApg: number | null }[];
-type GameContextLike = import("@prisma/client").GameContext | null;
-
-function findMatchingPatterns(
-  game: { id: string; homeTeamId: number; awayTeamId: number },
-  homeSnap: TeamSnapshot | undefined,
-  awaySnap: TeamSnapshot | undefined,
-  patterns: { id: string; patternKey: string; conditions: string[]; outcome: string; hitRate: number; hitCount: number; sampleSize: number; seasons: number; confidenceScore: number | null }[],
-  targetDate: Date,
-  odds?: OddsLike,
-  playerContexts: PlayerContextLike = [],
-  gameContext?: GameContextLike,
-): { patternKey: string; patternId: string; conditions: string[]; outcome: string; hitRate: number; hitCount: number; sampleSize: number; seasons: number; edge: number }[] {
-  const useStoredContext = gameContext != null;
-  const home = useStoredContext ? null : homeSnap;
-  const away = useStoredContext ? null : awaySnap;
-  if (!useStoredContext && (!home || !away)) return [];
-
-  const homeRestDays = useStoredContext
-    ? gameContext!.homeRestDays
-    : home!.lastGameDate
-      ? Math.floor((targetDate.getTime() - home!.lastGameDate.getTime()) / 86_400_000) - 1
-      : null;
-  const awayRestDays = useStoredContext
-    ? gameContext!.awayRestDays
-    : away!.lastGameDate
-      ? Math.floor((targetDate.getTime() - away!.lastGameDate.getTime()) / 86_400_000) - 1
-      : null;
-
-  const effectiveContext = (
-    gameContext ?? {
-      id: "",
-      gameId: game.id,
-      homeWins: home!.wins,
-      homeLosses: home!.losses,
-      homePpg: home!.ppg,
-      homeOppg: home!.oppg,
-      homePace: home!.pace,
-      homeRebPg: home!.rebPg,
-      homeAstPg: home!.astPg,
-      homeFg3Pct: home!.fg3Pct,
-      homeFtPct: home!.ftPct,
-      homeRankOff: home!.rankOff,
-      homeRankDef: home!.rankDef,
-      homeRankPace: home!.rankPace,
-      homeStreak: home!.streak,
-      awayWins: away!.wins,
-      awayLosses: away!.losses,
-      awayPpg: away!.ppg,
-      awayOppg: away!.oppg,
-      awayPace: away!.pace,
-      awayRebPg: away!.rebPg,
-      awayAstPg: away!.astPg,
-      awayFg3Pct: away!.fg3Pct,
-      awayFtPct: away!.ftPct,
-      awayRankOff: away!.rankOff,
-      awayRankDef: away!.rankDef,
-      awayRankPace: away!.rankPace,
-      awayStreak: away!.streak,
-      homeRestDays,
-      awayRestDays,
-      homeIsB2b: homeRestDays === 0,
-      awayIsB2b: awayRestDays === 0,
-      h2hHomeWins: 0,
-      h2hAwayWins: 0,
-    }
-  ) as GameEventContext["context"];
-
-  const eventContext = {
-    game: {
-      id: game.id,
-      homeTeamId: game.homeTeamId,
-      awayTeamId: game.awayTeamId,
-      homeTeam: { id: game.homeTeamId, name: null, code: null },
-      awayTeam: { id: game.awayTeamId, name: null, code: null },
-    } as unknown as GameEventContext["game"],
-    context: effectiveContext,
-    playerContexts: playerContexts as unknown as GameEventContext["playerContexts"],
-    stats: [] as GameEventContext["stats"],
-    odds: (odds ?? null) as GameEventContext["odds"],
-  } as GameEventContext;
-
-  const activeConditions = new Set<string>();
-  for (const def of GAME_EVENT_CATALOG) {
-    if (def.type !== "condition") continue;
-    for (const side of def.sides) {
-      if (def.compute(eventContext, side).hit) {
-        activeConditions.add(`${def.key}:${side}`);
-      }
-    }
-  }
-
-  // Generic player outcomes are not actionable - filter them out
-  // These don't specify which team's player, so you can't actually bet on them
-  const NON_ACTIONABLE_OUTCOMES = new Set([
-    "PLAYER_10_PLUS_REBOUNDS:game",
-    "PLAYER_10_PLUS_ASSISTS:game",
-    "PLAYER_5_PLUS_THREES:game",
-    "PLAYER_DOUBLE_DOUBLE:game",
-    "PLAYER_TRIPLE_DOUBLE:game",
-    "PLAYER_30_PLUS:game",
-    "PLAYER_40_PLUS:game",
-  ]);
-
-  // Match patterns
-  const matched: { patternKey: string; patternId: string; conditions: string[]; outcome: string; hitRate: number; hitCount: number; sampleSize: number; seasons: number; edge: number }[] = [];
-
-  for (const pattern of patterns) {
-    // Skip non-actionable generic player outcomes
-    if (NON_ACTIONABLE_OUTCOMES.has(pattern.outcome)) continue;
-
-    if (pattern.conditions.every((c) => activeConditions.has(c))) {
-      matched.push({
-        patternKey: pattern.patternKey,
-        patternId: pattern.id,
-        conditions: pattern.conditions,
-        outcome: pattern.outcome,
-        hitRate: pattern.hitRate,
-        hitCount: pattern.hitCount,
-        sampleSize: pattern.sampleSize,
-        seasons: pattern.seasons,
-        edge: (pattern.hitRate - 0.524) * 100,
-      });
-    }
-  }
-
-  matched.sort((a, b) => (b.hitRate - a.hitRate) || (b.sampleSize - a.sampleSize));
-  return matched;
-}

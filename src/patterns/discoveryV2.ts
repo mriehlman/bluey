@@ -454,6 +454,41 @@ function oneSidedPValueFromStats(stats: SplitStats): number {
   return Math.max(0, Math.min(1, normalUpperTail(z)));
 }
 
+function makeSeededRng(seed: number): () => number {
+  let state = seed >>> 0;
+  if (state === 0) state = 0x9e3779b9;
+  return () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return ((state >>> 0) + 0.5) / 4294967296;
+  };
+}
+
+function sampleBinomial(n: number, p: number, rng: () => number): number {
+  let wins = 0;
+  for (let i = 0; i < n; i++) {
+    if (rng() < p) wins++;
+  }
+  return wins;
+}
+
+function permutationPValueFromStats(
+  stats: SplitStats,
+  iterations: number,
+  rng: () => number,
+): number {
+  const n = Math.max(1, Math.floor(stats.n ?? 0));
+  const observedWins = Math.max(0, Math.floor(stats.wins ?? 0));
+  const baseline = clampProb((stats.posteriorHitRate ?? 0.5) - (stats.edge ?? 0));
+  let extreme = 0;
+  for (let i = 0; i < iterations; i++) {
+    const simWins = sampleBinomial(n, baseline, rng);
+    if (simWins >= observedWins) extreme++;
+  }
+  return (extreme + 1) / (iterations + 1);
+}
+
 function bhPassSet(items: Array<{ id: string; pValue: number }>, alpha: number): Set<string> {
   if (items.length === 0 || alpha <= 0) return new Set();
   if (alpha >= 1) return new Set(items.map((i) => i.id));
@@ -1006,11 +1041,18 @@ export async function validatePatternsV2(args: string[] = []): Promise<void> {
   const uncertaintyPenaltyK = Math.max(1, Number(flags["uncertainty-penalty-k"] ?? 120));
   const uncertaintyPenaltyScale = Math.max(0, Number(flags["uncertainty-penalty-scale"] ?? 0.35));
   const fdrAlpha = Math.max(0, Math.min(1, Number(flags["fdr-alpha"] ?? 0.1)));
+  const fdrMethod = (flags["fdr-method"] ?? "bh").toLowerCase();
+  const fdrPermutations = Math.max(100, Number(flags["fdr-permutations"] ?? 3000));
+  const fdrSeed = Number(flags["fdr-seed"] ?? 1337);
   const runDecay = (flags["run-decay"] ?? "true") !== "false";
   const decayMinWindowSamples = Math.max(1, Number(flags["decay-min-window-samples"] ?? 25));
   const decayCollapseEdge = Number(flags["decay-collapse-edge"] ?? -0.005);
   const progressEvery = Math.max(1, Number(flags["progress-every"] ?? 50));
   const startedAt = Date.now();
+  if (!["bh", "perm-bh"].includes(fdrMethod)) {
+    throw new Error(`Invalid --fdr-method '${fdrMethod}'. Use bh|perm-bh.`);
+  }
+  const rng = makeSeededRng(Number.isFinite(fdrSeed) ? fdrSeed : 1337);
 
   console.log("\n=== Validate Patterns v2 ===\n");
   const patterns = await loadStoredPatternsV2();
@@ -1051,8 +1093,14 @@ export async function validatePatternsV2(args: string[] = []): Promise<void> {
       forwardPenalizedEdge >= minForwardEdge &&
       (p.forwardStats.posteriorHitRate ?? 0) >= minForwardPosterior;
 
-    const pVal = oneSidedPValueFromStats(p.valStats);
-    const pForward = oneSidedPValueFromStats(p.forwardStats);
+    const pVal =
+      fdrMethod === "perm-bh"
+        ? permutationPValueFromStats(p.valStats, fdrPermutations, rng)
+        : oneSidedPValueFromStats(p.valStats);
+    const pForward =
+      fdrMethod === "perm-bh"
+        ? permutationPValueFromStats(p.forwardStats, fdrPermutations, rng)
+        : oneSidedPValueFromStats(p.forwardStats);
     evalRows.push({
       id: p.id,
       status: p.status,
@@ -1067,6 +1115,8 @@ export async function validatePatternsV2(args: string[] = []): Promise<void> {
     .filter((r) => r.trainOk && r.valOk && r.forwardOk)
     .map((r) => ({ id: r.id, pValue: r.pValue }));
   const fdrPass = bhPassSet(fdrEligible, fdrAlpha);
+  const familyEligible = new Map<string, number>();
+  const familyPassed = new Map<string, number>();
 
   for (let i = 0; i < evalRows.length; i++) {
     const row = evalRows[i];
@@ -1074,6 +1124,8 @@ export async function validatePatternsV2(args: string[] = []): Promise<void> {
     if (row.trainOk && row.valOk && row.forwardOk && fdrPass.has(row.id)) {
       nextStatus = "deployed";
       deployed++;
+      const family = outcomeFamily(patterns[i]?.outcomeType ?? "");
+      familyPassed.set(family, (familyPassed.get(family) ?? 0) + 1);
     } else if (row.trainOk && row.valOk) {
       nextStatus = "validated";
       validated++;
@@ -1082,6 +1134,10 @@ export async function validatePatternsV2(args: string[] = []): Promise<void> {
       retired++;
     } else {
       candidates++;
+    }
+    if (row.trainOk && row.valOk && row.forwardOk) {
+      const family = outcomeFamily(patterns[i]?.outcomeType ?? "");
+      familyEligible.set(family, (familyEligible.get(family) ?? 0) + 1);
     }
 
     const retiredAt = nextStatus === "retired" ? "NOW()" : "NULL";
@@ -1110,8 +1166,18 @@ export async function validatePatternsV2(args: string[] = []): Promise<void> {
     `Uncertainty penalty: edge -= ${uncertaintyPenaltyScale}/sqrt(n + ${uncertaintyPenaltyK})`,
   );
   console.log(
-    `FDR gate: alpha=${fdrAlpha.toFixed(3)} | eligible=${fdrEligible.length} | passed=${fdrPass.size}`,
+    `FDR gate: method=${fdrMethod}, alpha=${fdrAlpha.toFixed(3)} | eligible=${fdrEligible.length} | passed=${fdrPass.size}` +
+      (fdrMethod === "perm-bh" ? ` | permutations=${fdrPermutations}, seed=${fdrSeed}` : ""),
   );
+  const familyRows = [...new Set([...familyEligible.keys(), ...familyPassed.keys()])].sort();
+  if (familyRows.length > 0) {
+    console.log("FDR by family:");
+    for (const family of familyRows) {
+      const eligible = familyEligible.get(family) ?? 0;
+      const passed = familyPassed.get(family) ?? 0;
+      console.log(`  ${family}: eligible=${eligible}, passed=${passed}`);
+    }
+  }
   if (runDecay) {
     await monitorPatternDecay([
       "--min-window-samples",
@@ -1190,11 +1256,11 @@ export async function monitorPatternDecay(args: string[] = []): Promise<void> {
   if (clvFeedback) {
     try {
       const clvRows = await prisma.$queryRawUnsafe<
-        Array<{ outcomeType: string; samples: number; avgEdge: number }>
+        Array<{ outcomeType: string; samples: number; avgClv: number }>
       >(
         `SELECT l."outcomeType" as "outcomeType",
                 COUNT(*)::int as "samples",
-                AVG(COALESCE(l."modelEdge",0))::float8 as "avgEdge"
+                AVG(COALESCE(l."clvDeltaProb", l."modelEdge", 0))::float8 as "avgClv"
          FROM "SuggestedPlayLedger" l
          WHERE l."isActionable" = TRUE
            AND l."settledResult" IN ('HIT','MISS')
@@ -1202,13 +1268,13 @@ export async function monitorPatternDecay(args: string[] = []): Promise<void> {
          GROUP BY l."outcomeType"`,
       );
       for (const r of clvRows) {
-        if ((r.samples ?? 0) >= clvMinSamples && (r.avgEdge ?? 0) < clvMinEdge) {
+        if ((r.samples ?? 0) >= clvMinSamples && (r.avgClv ?? 0) < clvMinEdge) {
           clvBadOutcomes.add(r.outcomeType);
         }
       }
       if (clvRows.length > 0) {
         console.log(
-          `CLV feedback: scanned ${clvRows.length} outcomes, suppressing ${clvBadOutcomes.size} under edge<${clvMinEdge} with n>=${clvMinSamples}`,
+          `CLV feedback: scanned ${clvRows.length} outcomes, suppressing ${clvBadOutcomes.size} under clv<${clvMinEdge} with n>=${clvMinSamples}`,
         );
       }
     } catch {
@@ -1391,6 +1457,91 @@ export async function analyzeV2Bankroll(args: string[] = []): Promise<void> {
         `  ${s}: ${(sHitRate * 100).toFixed(2)}% (${agg.wins}/${agg.n}), pnl=$${agg.pnl.toFixed(2)}, roi=${(sRoi * 100).toFixed(2)}%`,
       );
     }
+  }
+}
+
+export async function evaluatePatternsV2Purged(args: string[] = []): Promise<void> {
+  const flags = parseFlags(args);
+  const folds = Math.max(3, Number(flags.folds ?? 6));
+  const embargoDays = Math.max(0, Number(flags["embargo-days"] ?? 7));
+  const minTrainSamples = Math.max(20, Number(flags["min-train-samples"] ?? 80));
+  const minTestSamples = Math.max(10, Number(flags["min-test-samples"] ?? 25));
+
+  const rows = await prisma.$queryRawUnsafe<
+    Array<{ patternId: string; outcomeType: string; date: Date; hitBool: boolean }>
+  >(
+    `SELECT h."patternId" as "patternId",
+            p."outcomeType" as "outcomeType",
+            h."date" as "date",
+            h."hitBool" as "hitBool"
+     FROM "PatternV2Hit" h
+     JOIN "PatternV2" p ON p."id" = h."patternId"
+     WHERE p."status" = 'deployed'`,
+  );
+  if (rows.length === 0) {
+    console.log("No deployed PatternV2Hit rows found.");
+    return;
+  }
+  const timestamps = rows.map((r) => new Date(r.date).getTime()).sort((a, b) => a - b);
+  const minTs = timestamps[0] ?? Date.now();
+  const maxTs = timestamps[timestamps.length - 1] ?? minTs + 1;
+  const span = Math.max(1, maxTs - minTs);
+  const embargoMs = embargoDays * 86_400_000;
+  const byPattern = new Map<string, Array<{ ts: number; hit: boolean; outcomeType: string }>>();
+  for (const row of rows) {
+    const arr = byPattern.get(row.patternId) ?? [];
+    arr.push({
+      ts: new Date(row.date).getTime(),
+      hit: row.hitBool,
+      outcomeType: row.outcomeType,
+    });
+    byPattern.set(row.patternId, arr);
+  }
+
+  let usedFolds = 0;
+  let aggTrainN = 0;
+  let aggTestN = 0;
+  let aggTrainHits = 0;
+  let aggTestHits = 0;
+  for (let i = 0; i < folds; i++) {
+    const foldStart = minTs + Math.floor((span * i) / folds);
+    const foldEnd = minTs + Math.floor((span * (i + 1)) / folds);
+    let foldTrainN = 0;
+    let foldTestN = 0;
+    let foldTrainHits = 0;
+    let foldTestHits = 0;
+    for (const entries of byPattern.values()) {
+      const train = entries.filter((e) => e.ts < foldStart - embargoMs);
+      const test = entries.filter((e) => e.ts >= foldStart && e.ts < foldEnd);
+      if (train.length < minTrainSamples || test.length < minTestSamples) continue;
+      const trainHits = train.filter((e) => e.hit).length;
+      const testHits = test.filter((e) => e.hit).length;
+      foldTrainN += train.length;
+      foldTestN += test.length;
+      foldTrainHits += trainHits;
+      foldTestHits += testHits;
+    }
+    if (foldTrainN === 0 || foldTestN === 0) continue;
+    usedFolds++;
+    aggTrainN += foldTrainN;
+    aggTestN += foldTestN;
+    aggTrainHits += foldTrainHits;
+    aggTestHits += foldTestHits;
+    const trainRate = foldTrainHits / foldTrainN;
+    const testRate = foldTestHits / foldTestN;
+    console.log(
+      `Fold ${i + 1}/${folds} | train=${foldTrainN} test=${foldTestN} | trainHit=${(trainRate * 100).toFixed(2)}% testHit=${(testRate * 100).toFixed(2)}% delta=${((testRate - trainRate) * 100).toFixed(2)}pp`,
+    );
+  }
+
+  console.log("\n=== Pattern V2 Purged/Embargo Evaluation ===");
+  console.log(`usedFolds=${usedFolds}/${folds}, embargoDays=${embargoDays}`);
+  if (aggTrainN > 0 && aggTestN > 0) {
+    const trainRate = aggTrainHits / aggTrainN;
+    const testRate = aggTestHits / aggTestN;
+    console.log(
+      `aggregate trainHit=${(trainRate * 100).toFixed(2)}% (n=${aggTrainN}) | testHit=${(testRate * 100).toFixed(2)}% (n=${aggTestN}) | delta=${((testRate - trainRate) * 100).toFixed(2)}pp`,
+    );
   }
 }
 

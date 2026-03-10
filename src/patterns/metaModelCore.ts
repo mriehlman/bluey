@@ -49,14 +49,28 @@ export interface MetaModel {
     }
   >;
   calibrators?: {
-    global?: { a: number; b: number };
-    family?: Record<string, { a: number; b: number }>;
+    global?: MetaCalibrator;
+    family?: Record<string, MetaCalibrator>;
   };
   metrics: {
     train: { logLoss: number; brier: number; accuracy: number };
     validation: { logLoss: number; brier: number; accuracy: number };
   };
 }
+
+export type PlattCalibrator = {
+  type?: "platt";
+  a: number;
+  b: number;
+};
+
+export type IsotonicCalibrator = {
+  type: "isotonic";
+  x: number[];
+  y: number[];
+};
+
+export type MetaCalibrator = PlattCalibrator | IsotonicCalibrator;
 
 export function outcomeFamily(outcomeType: string): string {
   const base = outcomeType.replace(/:.*$/, "");
@@ -72,6 +86,38 @@ export function sigmoid(x: number): number {
   if (x > 35) return 1;
   if (x < -35) return 0;
   return 1 / (1 + Math.exp(-x));
+}
+
+function applyIsotonicCalibrator(cal: IsotonicCalibrator, p: number): number {
+  const clipped = Math.min(1 - 1e-6, Math.max(1e-6, p));
+  const xs = cal.x ?? [];
+  const ys = cal.y ?? [];
+  if (xs.length === 0 || ys.length === 0 || xs.length !== ys.length) return clipped;
+  if (xs.length === 1) return Math.min(1 - 1e-6, Math.max(1e-6, ys[0] ?? clipped));
+  if (clipped <= xs[0]) return Math.min(1 - 1e-6, Math.max(1e-6, ys[0] ?? clipped));
+  const last = xs.length - 1;
+  if (clipped >= xs[last]) return Math.min(1 - 1e-6, Math.max(1e-6, ys[last] ?? clipped));
+  for (let i = 1; i < xs.length; i++) {
+    const x0 = xs[i - 1] ?? 0;
+    const x1 = xs[i] ?? 1;
+    if (clipped > x1) continue;
+    const y0 = ys[i - 1] ?? x0;
+    const y1 = ys[i] ?? x1;
+    if (Math.abs(x1 - x0) < 1e-12) return Math.min(1 - 1e-6, Math.max(1e-6, y1));
+    const t = (clipped - x0) / (x1 - x0);
+    return Math.min(1 - 1e-6, Math.max(1e-6, y0 + t * (y1 - y0)));
+  }
+  return clipped;
+}
+
+export function applyMetaCalibrator(calibrator: MetaCalibrator | undefined, p: number): number {
+  if (!calibrator) return p;
+  if ("type" in calibrator && calibrator.type === "isotonic") {
+    return applyIsotonicCalibrator(calibrator, p);
+  }
+  const clipped = Math.min(1 - 1e-6, Math.max(1e-6, p));
+  const z = Math.log(clipped / (1 - clipped));
+  return sigmoid((calibrator.a ?? 1) * z + (calibrator.b ?? 0));
 }
 
 function quantileLabelToUnit(label: string): number | null {
@@ -158,6 +204,7 @@ export function deriveMetaContextFeatures(input: {
 export function scoreMetaModel(
   model: MetaModel,
   input: MetaModelFeatureInput,
+  options?: { calibrated?: boolean },
 ): number {
   const derived = deriveMetaContextFeatures({
     outcomeType: input.outcomeType,
@@ -174,13 +221,11 @@ export function scoreMetaModel(
   ];
   const family = outcomeFamily(input.outcomeType);
   const applyCalibration = (p: number): number => {
+    if (options?.calibrated === false) return p;
     const familyCal = model.calibrators?.family?.[family];
     const globalCal = model.calibrators?.global;
     const cal = familyCal ?? globalCal;
-    if (!cal) return p;
-    const clipped = Math.min(1 - 1e-6, Math.max(1e-6, p));
-    const z = Math.log(clipped / (1 - clipped));
-    return sigmoid(cal.a * z + cal.b);
+    return applyMetaCalibrator(cal, p);
   };
   const familyModel = model.familyModels?.[family];
   if (familyModel) {

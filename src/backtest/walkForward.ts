@@ -153,10 +153,27 @@ async function runFold(
   config: BacktestConfig,
   foldNumber: number
 ): Promise<WalkForwardFold> {
-  const trainEvents = allEvents.filter(e => trainSeasons.includes(e.season));
-  const testEvents = allEvents.filter(e => e.season === testSeason);
+  const embargoDays = Math.max(0, Number(config.embargoDays ?? 0));
+  const testSeasonEvents = allEvents.filter(e => e.season === testSeason);
+  const testStartTs =
+    testSeasonEvents
+      .map((e) => gameMap.get(e.gameId)?.date?.getTime() ?? Number.POSITIVE_INFINITY)
+      .reduce((mn, ts) => Math.min(mn, ts), Number.POSITIVE_INFINITY);
+  const embargoCutoffTs = Number.isFinite(testStartTs)
+    ? testStartTs - embargoDays * 86_400_000
+    : Number.POSITIVE_INFINITY;
+  const trainEvents = allEvents.filter((e) => {
+    if (!trainSeasons.includes(e.season)) return false;
+    if (embargoDays <= 0) return true;
+    const gameTs = gameMap.get(e.gameId)?.date?.getTime();
+    if (gameTs == null) return false;
+    return gameTs < embargoCutoffTs;
+  });
+  const testEvents = testSeasonEvents;
 
-  console.log(`  Train events: ${trainEvents.length}, Test events: ${testEvents.length}`);
+  console.log(
+    `  Train events: ${trainEvents.length}, Test events: ${testEvents.length}, embargoDays=${embargoDays}`,
+  );
 
   const { conditionIndex: trainConditions, outcomeIndex: trainOutcomes, gameSeason: trainGameSeason } = 
     buildIndexes(trainEvents);

@@ -27,7 +27,7 @@ export async function predictGames(args: string[] = []): Promise<void> {
 
   const dateStr = flags.date;
   if (!dateStr) {
-    console.error("Usage: predict:games --date YYYY-MM-DD");
+    console.error("Usage: --date YYYY-MM-DD");
     process.exit(1);
   }
 

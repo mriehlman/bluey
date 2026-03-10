@@ -30,31 +30,6 @@ interface PlayerTarget {
   rationale?: string;
 }
 
-interface PropLine {
-  line: number;
-  market: string;
-}
-
-interface RecentPerformance {
-  hits: number;
-  total: number;
-}
-
-interface Prediction {
-  conditions: string[];
-  outcome: string;
-  hitRate: number;
-  hitCount: number;
-  sampleSize: number;
-  seasons: number;
-  edge: number;
-  playerTarget: PlayerTarget | null;
-  propLine: PropLine | null;
-  recent: RecentPerformance | null;
-  isHighValue: boolean;
-  result: PredictionResult | null;
-}
-
 interface GamePrediction {
   id: string;
   homeTeam: TeamInfo;
@@ -73,8 +48,6 @@ interface GamePrediction {
     home: TeamContext | null;
     away: TeamContext | null;
   };
-  predictions: Prediction[];
-  predictionCount: number;
   discoveryV2Matches?: {
     id: string;
     outcomeType: string;
@@ -115,7 +88,6 @@ interface PredictionData {
   seasonToDate?: {
     throughDate: string;
     v2: { hits: number; total: number; hitRate: number | null };
-    legacy: { hits: number; total: number; hitRate: number | null };
   };
   wagerTracking?: {
     stakePerPick: number;
@@ -218,7 +190,6 @@ export default function PredictionsPage() {
 
   const computeGameHitSummary = (game: GamePrediction) => {
     const allResults = [
-      ...game.predictions.map((p) => p.result).filter((r): r is PredictionResult => r != null),
       ...(game.suggestedPlays ?? []).map((p) => p.result).filter((r): r is PredictionResult => r != null),
     ];
     const total = allResults.length;
@@ -354,7 +325,7 @@ export default function PredictionsPage() {
       </div>
 
       <p className="muted" style={{ marginBottom: "1rem" }}>
-        Pattern-based predictions for {date}. Shows games with matching condition patterns from historical data.
+        Discovery v2 suggested picks and market-backed signals for {date}.
       </p>
 
       {!loading && data && (
@@ -383,19 +354,6 @@ export default function PredictionsPage() {
                     <strong>{data.seasonToDate.v2.hits}/{data.seasonToDate.v2.total}</strong>
                     <span className="muted" style={{ marginLeft: "0.5rem" }}>
                       ({((data.seasonToDate.v2.hitRate ?? 0) * 100).toFixed(1)}%)
-                    </span>
-                  </>
-                ) : (
-                  <span className="muted">No graded picks yet</span>
-                )}
-              </div>
-              <div>
-                <span className="muted">Season {data.season ?? "?"} to {data.seasonToDate.throughDate} (legacy): </span>
-                {data.seasonToDate.legacy.total > 0 ? (
-                  <>
-                    <strong>{data.seasonToDate.legacy.hits}/{data.seasonToDate.legacy.total}</strong>
-                    <span className="muted" style={{ marginLeft: "0.5rem" }}>
-                      ({((data.seasonToDate.legacy.hitRate ?? 0) * 100).toFixed(1)}%)
                     </span>
                   </>
                 ) : (
@@ -509,11 +467,6 @@ export default function PredictionsPage() {
                       {isFinal && (
                         <span className="badge badge-green">
                           {game.awayScore} - {game.homeScore}
-                        </span>
-                      )}
-                      {game.predictionCount > 0 && (
-                        <span className="badge" style={{ background: "var(--bg-elevated)", color: "var(--accent-cyan)", borderColor: "var(--accent-cyan)" }}>
-                          {game.predictionCount} predictions
                         </span>
                       )}
                       {gameHitSummary.total > 0 && (
@@ -666,123 +619,8 @@ export default function PredictionsPage() {
                       </div>
                     )}
 
-                    {game.predictions.length === 0 && (game.discoveryV2Matches?.length ?? 0) === 0 ? (
+                    {(game.discoveryV2Matches?.length ?? 0) === 0 ? (
                       <p className="muted">No matching patterns found for this game.</p>
-                    ) : game.predictions.length > 0 ? (
-                      <>
-                        <h4 style={{ marginTop: 0, marginBottom: "0.75rem" }}>Matching Patterns</h4>
-                        <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-                          {game.predictions.map((pred, i) => {
-                            const hasResult = pred.result !== null;
-                            const isHit = pred.result?.hit === true;
-                            const borderColor = hasResult
-                              ? isHit
-                                ? "var(--success)"
-                                : "var(--error)"
-                              : pred.isHighValue
-                                ? "var(--accent-orange)"
-                                : "var(--border)";
-
-                            const statLabel = pred.playerTarget?.stat === "ppg" ? "ppg" 
-                              : pred.playerTarget?.stat === "rpg" ? "rpg" 
-                              : pred.playerTarget?.stat === "apg" ? "apg" : "";
-
-                            return (
-                              <div
-                                key={i}
-                                style={{
-                                  background: pred.isHighValue && !hasResult ? "var(--accent-muted)" : "var(--bg-elevated)",
-                                  border: `1px solid ${borderColor}`,
-                                  borderLeftWidth: hasResult || pred.isHighValue ? "4px" : "1px",
-                                  padding: "0.75rem",
-                                  fontSize: "0.85rem",
-                                }}
-                              >
-                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                                  <div style={{ flex: 1 }}>
-                                    {/* High value badge */}
-                                    {pred.isHighValue && !hasResult && (
-                                      <div style={{ marginBottom: "0.5rem" }}>
-                                        <span className="badge" style={{ background: "var(--accent-orange)", color: "white", border: "none" }}>
-                                          HIGH VALUE
-                                        </span>
-                                      </div>
-                                    )}
-
-                                    <div style={{ marginBottom: "0.25rem" }}>
-                                      <span className="muted">Conditions:</span>{" "}
-                                      {pred.conditions.map((c) => humanizeLabel(c, true)).join(" + ")}
-                                    </div>
-                                    <div>
-                                      <span className="muted">Outcome:</span>{" "}
-                                      <strong style={{ color: "var(--accent-orange)" }}>{humanizeLabel(pred.outcome)}</strong>
-                                    </div>
-
-                                    {/* Player target with prop line */}
-                                    {pred.playerTarget && (
-                                      <div style={{ marginTop: "0.5rem", padding: "0.5rem", background: "var(--bg-elevated)", borderRadius: "4px" }}>
-                                        <strong style={{ color: "var(--accent-cyan)" }}>{pred.playerTarget.name}</strong>
-                                        <span className="muted"> ({pred.playerTarget.statValue.toFixed(1)} {statLabel})</span>
-                                        {pred.propLine && (
-                                          <span style={{ marginLeft: "0.75rem" }}>
-                                            Line: <strong>{pred.propLine.line}</strong> {pred.propLine.market}
-                                          </span>
-                                        )}
-                                      </div>
-                                    )}
-
-                                    {/* Result for completed games */}
-                                    {hasResult && (
-                                      <div style={{ marginTop: "0.5rem" }}>
-                                        <span
-                                          className="badge"
-                                          style={{
-                                            background: isHit ? "var(--success)" : "var(--error)",
-                                            color: "white",
-                                            border: "none",
-                                          }}
-                                        >
-                                          {isHit ? "HIT" : "MISS"}
-                                        </span>
-                                        {pred.result?.explanation && (
-                                          <span style={{ marginLeft: "0.5rem", color: "var(--text-secondary)" }}>
-                                            {pred.result.explanation}
-                                          </span>
-                                        )}
-                                      </div>
-                                    )}
-                                  </div>
-                                  <div style={{ textAlign: "right", flexShrink: 0 }}>
-                                    <div style={{ color: pred.edge >= 5 ? "var(--success)" : pred.edge >= 0 ? "var(--accent-cyan)" : "var(--error)" }}>
-                                      {(pred.hitRate * 100).toFixed(1)}%
-                                      <span style={{ fontSize: "0.75rem", marginLeft: "0.25rem" }}>
-                                        ({pred.edge >= 0 ? "+" : ""}{pred.edge.toFixed(1)}% edge)
-                                      </span>
-                                    </div>
-                                    <div className="muted" style={{ fontSize: "0.75rem" }}>
-                                      {pred.hitCount}/{pred.sampleSize} over {pred.seasons} seasons
-                                    </div>
-                                    {/* Recent performance */}
-                                    {pred.recent && pred.recent.total > 0 && (
-                                      <div style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
-                                        <span style={{ 
-                                          color: pred.recent.hits / pred.recent.total >= pred.hitRate 
-                                            ? "var(--success)" 
-                                            : pred.recent.hits / pred.recent.total >= pred.hitRate * 0.8 
-                                              ? "var(--accent-cyan)" 
-                                              : "var(--error)"
-                                        }}>
-                                          Last 30d: {pred.recent.hits}/{pred.recent.total}
-                                        </span>
-                                      </div>
-                                    )}
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </>
                     ) : null}
 
                     {collapsedDiscoveryV2.length > 0 && (

@@ -41,9 +41,6 @@ bun run ingest:games
 # Ingest player stats (upserts players, skips DNP/orphans)
 bun run ingest:playerstats
 
-# Build nightly events from the event catalog
-bun run build:nightly-events
-
 # Search for recurring patterns across seasons
 bun run search:patterns
 ```

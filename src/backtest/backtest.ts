@@ -27,6 +27,7 @@ const DEFAULT_CONFIG: BacktestConfig = {
   betSizing: "flat",
   betFraction: 0.02,
   standardOdds: -110,
+  embargoDays: 0,
 };
 
 /**
@@ -71,6 +72,7 @@ export async function runBacktest(args: string[]): Promise<void> {
     betSizing: (flags.betSizing as "flat" | "kelly" | "halfKelly") ?? DEFAULT_CONFIG.betSizing,
     betFraction: flags.betFraction ? Number(flags.betFraction) : DEFAULT_CONFIG.betFraction,
     standardOdds: flags.odds ? Number(flags.odds) : DEFAULT_CONFIG.standardOdds,
+    embargoDays: flags["embargo-days"] ? Number(flags["embargo-days"]) : DEFAULT_CONFIG.embargoDays,
   };
 
   const result = await walkForwardValidation(config);
