@@ -75,6 +75,16 @@ If you can't state your edge in quantitative terms — correct price, rationale,
 - **Travel / jetlag**: Days since last game, miles traveled, cross-timezone direction (e.g. East→West vs West→East), back-to-back. DARKO already models rest/travel; we could derive tokens for `rest:0`, `rest:1`, `rest:2plus`, `travel:cross_country`, `jetlag:west_to_east`, etc.
 - **Implementation**: Need schedule data (tip time, venue, prior game location). Common in NBA APIs.
 
+### 7. Line movement (opening → closing)
+- **Hypothesis**: How odds move from open to close correlates with outcome. Sharp money, late news, and public flow drive movement; movement can predict who covers or whether over/under hits.
+- **Current state**: Odds API snapshots at `dateT12:00:00Z` = 7am ET ≈ opening/morning odds. Need a second fetch near tip-off for closing (extra API cost).
+- **Potential tokens**:
+  - Spread: `spread_moved_home_favor`, `spread_moved_away_favor`, `spread_move_magnitude:large`, `spread_move_magnitude:small`, `spread_unchanged`
+  - Total: `total_moved_up`, `total_moved_down`, `total_move_magnitude:large`, etc.
+  - Steam / reverse: `spread_moved_toward_winner`, `spread_moved_against_winner`, `line_moved_with_public`, `reverse_line_movement`
+- **Use case**: Combine opening odds + movement tokens → new patterns. E.g. "spread moved toward favorite and favorite covered" vs "spread moved toward underdog and underdog covered."
+- **Implementation**: Fetch opening (7am) and closing (e.g. 30–60 min before tip) via Odds API; store both snapshots; compute delta per market per book or consensus; tokenize for pattern discovery.
+
 ---
 
 ## External data / projection sources
