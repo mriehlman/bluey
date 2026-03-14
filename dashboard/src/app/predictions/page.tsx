@@ -30,6 +30,28 @@ interface PlayerTarget {
   rationale?: string;
 }
 
+interface SuggestedPick {
+  outcomeType: string;
+  displayLabel?: string;
+  confidence: number;
+  posteriorHitRate: number;
+  edge: number;
+  metaScore?: number | null;
+  votes: number;
+  marketPick?: {
+    market: string;
+    line: number;
+    overPrice: number;
+    impliedProb: number;
+    estimatedProb: number;
+    edge: number;
+    ev: number;
+    label: string;
+  } | null;
+  playerTarget?: PlayerTarget | null;
+  result?: PredictionResult | null;
+}
+
 interface GamePrediction {
   id: string;
   homeTeam: TeamInfo;
@@ -59,32 +81,14 @@ interface GamePrediction {
     playerTarget?: PlayerTarget | null;
     result?: PredictionResult | null;
   }[];
-  suggestedPlays?: {
-    outcomeType: string;
-    displayLabel?: string;
-    confidence: number;
-    posteriorHitRate: number;
-    edge: number;
-    metaScore?: number | null;
-    votes: number;
-    marketPick?: {
-      market: string;
-      line: number;
-      overPrice: number;
-      impliedProb: number;
-      estimatedProb: number;
-      edge: number;
-      ev: number;
-      label: string;
-    } | null;
-    playerTarget?: PlayerTarget | null;
-    result?: PredictionResult | null;
-  }[];
+  suggestedPlays?: SuggestedPick[];
+  suggestedBetPicks?: SuggestedPick[];
 }
 
 interface PredictionData {
   date: string;
   season?: number;
+  dayBetSummary?: { hits: number; total: number; hitRate: number | null };
   seasonToDate?: {
     throughDate: string;
     v2: { hits: number; total: number; hitRate: number | null };
@@ -123,7 +127,19 @@ interface PredictionData {
 }
 
 function getLocalDateString(d: Date = new Date()) {
-  return d.toLocaleDateString("en-CA"); // YYYY-MM-DD in local timezone
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function parseDateInput(value: string): Date {
+  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return new Date();
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  return new Date(year, month - 1, day);
 }
 
 export default function PredictionsPage() {
@@ -166,9 +182,11 @@ export default function PredictionsPage() {
   }, [date, fetchPredictions]);
 
   const changeDate = (delta: number) => {
-    const [y, m, day] = date.split("-").map(Number);
-    const d = new Date(y, m - 1, day + delta);
-    setDate(getLocalDateString(d));
+    setDate((prev) => {
+      const current = parseDateInput(prev);
+      const d = new Date(current.getFullYear(), current.getMonth(), current.getDate() + delta);
+      return getLocalDateString(d);
+    });
   };
 
   const fmtOdds = (n: number | null | undefined) => {
@@ -190,25 +208,14 @@ export default function PredictionsPage() {
 
   const computeGameHitSummary = (game: GamePrediction) => {
     const allResults = [
-      ...(game.suggestedPlays ?? []).map((p) => p.result).filter((r): r is PredictionResult => r != null),
+      ...(game.suggestedBetPicks ?? []).map((p) => p.result).filter((r): r is PredictionResult => r != null),
     ];
     const total = allResults.length;
     const hits = allResults.filter((r) => r.hit).length;
     return { hits, total };
   };
 
-  const dayHitSummary = (() => {
-    if (!data) return { hits: 0, total: 0 };
-    return data.games.reduce(
-      (acc, game) => {
-        const s = computeGameHitSummary(game);
-        acc.hits += s.hits;
-        acc.total += s.total;
-        return acc;
-      },
-      { hits: 0, total: 0 },
-    );
-  })();
+  const dayHitSummary = data?.dayBetSummary ?? { hits: 0, total: 0, hitRate: null };
 
   const humanizeLabel = (key: string, includeSide = false) => {
     const sideMatch = key.match(/:([^:]+)$/);
@@ -303,7 +310,7 @@ export default function PredictionsPage() {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <h1>Predictions</h1>
         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-          <button onClick={() => changeDate(-1)} style={{ padding: "0.5rem 1rem" }}>
+          <button type="button" onClick={() => changeDate(-1)} style={{ padding: "0.5rem 1rem" }}>
             &larr; Prev
           </button>
           <input
@@ -312,10 +319,11 @@ export default function PredictionsPage() {
             onChange={(e) => setDate(e.target.value)}
             style={{ padding: "0.5rem", fontSize: "1rem" }}
           />
-          <button onClick={() => changeDate(1)} style={{ padding: "0.5rem 1rem" }}>
+          <button type="button" onClick={() => changeDate(1)} style={{ padding: "0.5rem 1rem" }}>
             Next &rarr;
           </button>
           <button
+            type="button"
             onClick={() => setDate(getLocalDateString())}
             className="btn-today"
           >
@@ -337,7 +345,7 @@ export default function PredictionsPage() {
                 <>
                   <strong>{dayHitSummary.hits}/{dayHitSummary.total}</strong> graded picks hit
                   <span className="muted" style={{ marginLeft: "0.5rem" }}>
-                    ({((dayHitSummary.hits / dayHitSummary.total) * 100).toFixed(1)}%)
+                    ({((dayHitSummary.hitRate ?? 0) * 100).toFixed(1)}%)
                   </span>
                 </>
               ) : (
@@ -348,7 +356,7 @@ export default function PredictionsPage() {
           {data.seasonToDate && (
             <div style={{ marginTop: "0.5rem", fontSize: "0.9rem" }}>
               <div>
-                <span className="muted">Season {data.season ?? "?"} to {data.seasonToDate.throughDate} (v2 deployed): </span>
+                <span className="muted">Season {data.season ?? "?"} to {data.seasonToDate.throughDate} (bettable picks): </span>
                 {data.seasonToDate.v2.total > 0 ? (
                   <>
                     <strong>{data.seasonToDate.v2.hits}/{data.seasonToDate.v2.total}</strong>
@@ -359,46 +367,6 @@ export default function PredictionsPage() {
                 ) : (
                   <span className="muted">No graded picks yet</span>
                 )}
-              </div>
-            </div>
-          )}
-          {data.wagerTracking && (
-            <div style={{ marginTop: "0.75rem", fontSize: "0.9rem", borderTop: "1px solid var(--border)", paddingTop: "0.6rem" }}>
-              <div>
-                <span className="muted">Wager tracker ({data.wagerTracking.day.date}, ${data.wagerTracking.stakePerPick.toFixed(2)} flat): </span>
-                <strong>{data.wagerTracking.day.settledBets}</strong>
-                <span className="muted"> settled, </span>
-                <strong>{data.wagerTracking.day.pendingBets}</strong>
-                <span className="muted"> pending, W-L </span>
-                <strong>{data.wagerTracking.day.wins}-{data.wagerTracking.day.losses}</strong>
-                <span className="muted"> | P&L </span>
-                <strong style={{ color: data.wagerTracking.day.netPnl >= 0 ? "var(--success)" : "var(--error)" }}>
-                  {data.wagerTracking.day.netPnl >= 0 ? "+" : ""}${data.wagerTracking.day.netPnl.toFixed(2)}
-                </strong>
-                <span className="muted"> | ROI </span>
-                <strong>
-                  {data.wagerTracking.day.roi != null
-                    ? `${(data.wagerTracking.day.roi * 100).toFixed(1)}%`
-                    : "n/a"}
-                </strong>
-              </div>
-              <div>
-                <span className="muted">Season to {data.wagerTracking.seasonToDate.throughDate} bankroll: </span>
-                <strong>${data.wagerTracking.seasonToDate.bankrollCurrent.toFixed(2)}</strong>
-                <span className="muted"> (start ${data.wagerTracking.bankrollStart.toFixed(2)}) | P&L </span>
-                <strong style={{ color: data.wagerTracking.seasonToDate.netPnl >= 0 ? "var(--success)" : "var(--error)" }}>
-                  {data.wagerTracking.seasonToDate.netPnl >= 0 ? "+" : ""}${data.wagerTracking.seasonToDate.netPnl.toFixed(2)}
-                </strong>
-                <span className="muted"> | ROI </span>
-                <strong>
-                  {data.wagerTracking.seasonToDate.roi != null
-                    ? `${(data.wagerTracking.seasonToDate.roi * 100).toFixed(1)}%`
-                    : "n/a"}
-                </strong>
-                <span className="muted"> | W-L </span>
-                <strong>
-                  {data.wagerTracking.seasonToDate.wins}-{data.wagerTracking.seasonToDate.losses}
-                </strong>
               </div>
             </div>
           )}
@@ -428,7 +396,7 @@ export default function PredictionsPage() {
             const isExpanded = expandedGame === game.id;
             const isFinal = game.status?.includes("Final");
             const gameHitSummary = computeGameHitSummary(game);
-            const recommendedPlay = game.suggestedPlays?.[0] ?? null;
+            const recommendedPlay = game.suggestedBetPicks?.[0] ?? null;
             const collapsedDiscoveryV2 = (() => {
               const rows = game.discoveryV2Matches ?? [];
               const grouped = new Map<
@@ -545,18 +513,18 @@ export default function PredictionsPage() {
 
                 {isExpanded && (
                   <div style={{ marginTop: "1rem", borderTop: "1px solid var(--border)", paddingTop: "1rem" }}>
-                    {(game.suggestedPlays?.length ?? 0) > 0 && (
+                    {(game.suggestedBetPicks?.length ?? 0) > 0 && (
                       <div style={{ marginBottom: "1rem" }}>
-                        <h4 style={{ marginTop: 0, marginBottom: "0.5rem" }}>Discovery v2 Suggested Plays</h4>
+                        <h4 style={{ marginTop: 0, marginBottom: "0.5rem" }}>Bettable Picks</h4>
                         <div className="muted" style={{ marginBottom: "0.5rem", fontSize: "0.82rem" }}>
                           Suggested action: start with{" "}
                           <strong style={{ color: "var(--accent-cyan)" }}>
-                            {humanizeLabel(game.suggestedPlays?.[0]?.outcomeType ?? "")}
+                            {humanizeLabel(game.suggestedBetPicks?.[0]?.outcomeType ?? "")}
                           </strong>
                           {" "}and use vote count + edge as confidence.
                         </div>
                         <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
-                          {game.suggestedPlays?.map((play) => (
+                          {game.suggestedBetPicks?.map((play) => (
                             <div
                               key={play.outcomeType}
                               style={{

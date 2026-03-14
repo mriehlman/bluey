@@ -22,6 +22,7 @@ import {
   analyzeV2Bankroll,
   evaluatePatternsV2Purged,
 } from "../patterns/discoveryV2.js";
+import { evaluatePatternIdeas } from "../patterns/patternIdeas.js";
 import { trainMetaModel, predictMetaScore, evaluateMetaModelMonthly, evaluateMetaModelPurged } from "../patterns/metaModel.js";
 import { coverageReport } from "../reports/coverage.js";
 import { reportProbabilityQuality } from "../reports/probabilityQuality.js";
@@ -34,6 +35,7 @@ import { dailyPicks } from "../features/dailyPicks.js";
 import { runBacktest, backtestExisting, analyzePattern, quickValidate } from "../backtest/backtest.js";
 import { analyzeSuggestedPlayLedger } from "../backtest/suggestedPlayLedger.js";
 import { updateSuggestedPlayClv } from "../backtest/updateClvSnapshots.js";
+import { backfillSuggestedLedger } from "../backtest/backfillSuggestedLedger.js";
 import type { RollupFilters } from "../stats/filters.js";
 
 function parseFlags(args: string[]): Record<string, string> {
@@ -667,6 +669,9 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   "evaluate:patterns-v2-purged": async (args) => {
     await evaluatePatternsV2Purged(args);
   },
+  "evaluate:pattern-ideas": async (args) => {
+    await evaluatePatternIdeas(args);
+  },
 
   "train:meta-model": async (args) => {
     await trainMetaModel(args);
@@ -710,6 +715,9 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
   "analyze:suggested-ledger": async (args) => {
     await analyzeSuggestedPlayLedger(args);
+  },
+  "backfill:suggested-ledger": async (args) => {
+    await backfillSuggestedLedger(args);
   },
 
   "update:clv-snapshots": async (args) => {

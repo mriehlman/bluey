@@ -4,6 +4,7 @@ import { getEasternDateFromUtc } from "@/lib/format";
 import { GAME_EVENT_CATALOG } from "../../../../../src/features/gameEventCatalog";
 import type { GameEventContext } from "../../../../../src/features/gameEventCatalog";
 import { loadMetaModel, scoreMetaModel } from "../../../../../src/patterns/metaModelCore";
+import { LEDGER_TUNING, PREDICTION_TUNING } from "../../../../../src/config/tuning";
 
 export const dynamic = "force-dynamic";
 
@@ -53,6 +54,12 @@ type OutcomeEval = {
   scope: "target" | "outcome";
 };
 
+type DayBetSummary = {
+  hits: number;
+  total: number;
+  hitRate: number | null;
+};
+
 type V2PlayerTarget = {
   id: number;
   name: string;
@@ -81,7 +88,7 @@ type PlayerPropRow = {
   line: number | null;
   overPrice: number | null;
   underPrice: number | null;
-  player: { firstname: string; lastname: string };
+  player: { firstname: string | null; lastname: string | null };
 };
 
 const OUTCOME_EVENT_DEFS = GAME_EVENT_CATALOG.filter((d) => d.type === "outcome");
@@ -461,6 +468,14 @@ function labelForMarketPick(
   line: number,
   overPrice: number,
 ): string {
+  if (market === "moneyline_home") {
+    const oddsLabel = overPrice > 0 ? `+${overPrice}` : `${overPrice}`;
+    return `Home ML @ ${oddsLabel}`;
+  }
+  if (market === "moneyline_away") {
+    const oddsLabel = overPrice > 0 ? `+${overPrice}` : `${overPrice}`;
+    return `Away ML @ ${oddsLabel}`;
+  }
   const threshold = Math.floor(line) + 1;
   const suffix =
     market === "player_points"
@@ -481,8 +496,102 @@ function selectBestMarketBackedPick(args: {
   baseProb: number;
   confidence?: number;
   supportN?: number;
+  gameOdds?: { mlHome: number | null; mlAway: number | null; spreadHome: number | null; totalOver: number | null } | null;
+  defaultMarketPrice?: number;
 }): SuggestedMarketPick | null {
   const { outcomeType, target, propsForGame, baseProb } = args;
+  const baseOutcome = outcomeType.replace(/:.*$/, "");
+
+  if (baseOutcome === "HOME_WIN" || baseOutcome === "AWAY_WIN") {
+    const consensusPrice = baseOutcome === "HOME_WIN" ? args.gameOdds?.mlHome : args.gameOdds?.mlAway;
+    const fallbackPrice =
+      Number.isFinite(args.defaultMarketPrice ?? NaN) && (args.defaultMarketPrice ?? 0) !== 0
+        ? Number(args.defaultMarketPrice)
+        : null;
+    const price = consensusPrice != null && Number.isFinite(consensusPrice) && consensusPrice !== 0
+      ? consensusPrice
+      : fallbackPrice;
+    if (price == null || !Number.isFinite(price) || price === 0) return null;
+    if (price < PREDICTION_TUNING.maxNegativeAmericanOdds) return null;
+    const implied = impliedProbFromAmerican(price);
+    if (implied == null) return null;
+    const est = Math.max(0.05, Math.min(0.95, baseProb));
+    const ev = est * payoutFromAmerican(price) - (1 - est);
+    const market = baseOutcome === "HOME_WIN" ? "moneyline_home" : "moneyline_away";
+    return {
+      playerId: 0,
+      playerName: baseOutcome === "HOME_WIN" ? "Home" : "Away",
+      market,
+      line: 0,
+      overPrice: price,
+      impliedProb: implied,
+      estimatedProb: est,
+      edge: est - implied,
+      ev,
+      label: labelForMarketPick(baseOutcome === "HOME_WIN" ? "Home" : "Away", market, 0, price),
+    };
+  }
+
+  // Spread/total mapping using game consensus lines.
+  if (baseOutcome === "HOME_COVERED" || baseOutcome === "AWAY_COVERED" || baseOutcome === "FAVORITE_COVERED" || baseOutcome === "UNDERDOG_COVERED") {
+    const spread = args.gameOdds?.spreadHome;
+    if (spread == null || !Number.isFinite(spread)) return null;
+    const price = Number.isFinite(args.defaultMarketPrice ?? NaN) && (args.defaultMarketPrice ?? 0) !== 0
+      ? Number(args.defaultMarketPrice)
+      : -110;
+    if (price < PREDICTION_TUNING.maxNegativeAmericanOdds) return null;
+    const implied = impliedProbFromAmerican(price);
+    if (implied == null) return null;
+    const est = Math.max(0.05, Math.min(0.95, baseProb));
+    const ev = est * payoutFromAmerican(price) - (1 - est);
+    const market =
+      baseOutcome === "HOME_COVERED"
+        ? "spread_home"
+        : baseOutcome === "AWAY_COVERED"
+          ? "spread_away"
+          : baseOutcome === "FAVORITE_COVERED"
+            ? "spread_favorite"
+            : "spread_underdog";
+    return {
+      playerId: 0,
+      playerName: "Game",
+      market,
+      line: spread,
+      overPrice: price,
+      impliedProb: implied,
+      estimatedProb: est,
+      edge: est - implied,
+      ev,
+      label: `${baseOutcome.replaceAll("_", " ")} @ ${price > 0 ? `+${price}` : `${price}`}`,
+    };
+  }
+
+  if (baseOutcome === "OVER_HIT" || baseOutcome === "UNDER_HIT" || baseOutcome.startsWith("TOTAL_OVER_") || baseOutcome.startsWith("TOTAL_UNDER_")) {
+    const total = args.gameOdds?.totalOver;
+    if (total == null || !Number.isFinite(total)) return null;
+    const price = Number.isFinite(args.defaultMarketPrice ?? NaN) && (args.defaultMarketPrice ?? 0) !== 0
+      ? Number(args.defaultMarketPrice)
+      : -110;
+    if (price < PREDICTION_TUNING.maxNegativeAmericanOdds) return null;
+    const implied = impliedProbFromAmerican(price);
+    if (implied == null) return null;
+    const est = Math.max(0.05, Math.min(0.95, baseProb));
+    const ev = est * payoutFromAmerican(price) - (1 - est);
+    const market = baseOutcome.includes("UNDER") ? "total_under" : "total_over";
+    return {
+      playerId: 0,
+      playerName: "Game",
+      market,
+      line: total,
+      overPrice: price,
+      impliedProb: implied,
+      estimatedProb: est,
+      edge: est - implied,
+      ev,
+      label: `${market === "total_under" ? "Under" : "Over"} ${total} @ ${price > 0 ? `+${price}` : `${price}`}`,
+    };
+  }
+
   if (!target) return null;
   const spec = marketSpecForOutcome(outcomeType);
   if (!spec) return null;
@@ -508,6 +617,8 @@ function selectBestMarketBackedPick(args: {
   const confidence = Math.max(0, Math.min(1, args.confidence ?? 0));
 
   for (const c of candidates) {
+    const overPrice = c.overPrice ?? 0;
+    if (overPrice < PREDICTION_TUNING.maxNegativeAmericanOdds) continue;
     const implied = impliedProbFromAmerican(c.overPrice);
     if (implied == null) continue;
     const offeredThreshold = Math.floor((c.line ?? 0) + 0.5);
@@ -529,7 +640,7 @@ function selectBestMarketBackedPick(args: {
       0.05,
       Math.min(0.95, blendWeightModel * estModel + (1 - blendWeightModel) * implied),
     );
-    const ev = est * payoutFromAmerican(c.overPrice) - (1 - est);
+    const ev = est * payoutFromAmerican(overPrice) - (1 - est);
     if (ev > bestEv) {
       bestEv = ev;
       best = {
@@ -638,46 +749,114 @@ function gateThresholdsForFamily(family: BetFamily): {
   minMeta: number;
   minEv: number;
 } {
-  if (family === "PLAYER") return { minPosterior: 0.54, minMeta: 0.58, minEv: 0.02 };
-  if (family === "TOTAL") return { minPosterior: 0.535, minMeta: 0.56, minEv: 0.018 };
-  if (family === "SPREAD") return { minPosterior: 0.53, minMeta: 0.55, minEv: 0.015 };
-  if (family === "MONEYLINE") return { minPosterior: 0.525, minMeta: 0.54, minEv: 0.012 };
-  return { minPosterior: 0.55, minMeta: 0.58, minEv: 0.02 };
+  if (family === "PLAYER") return PREDICTION_TUNING.familyGates.PLAYER;
+  if (family === "TOTAL") return PREDICTION_TUNING.familyGates.TOTAL;
+  if (family === "SPREAD") return PREDICTION_TUNING.familyGates.SPREAD;
+  if (family === "MONEYLINE") return PREDICTION_TUNING.familyGates.MONEYLINE;
+  return PREDICTION_TUNING.familyGates.OTHER;
 }
 
-function passesSuggestedPlayQualityGate(play: {
+type GateRejectReason =
+  | "posterior_below_min"
+  | "meta_below_min"
+  | "player_target_stat_mismatch"
+  | "player_target_baseline_too_low"
+  | "no_market_pick"
+  | "ev_below_min"
+  | "ev_too_negative"
+  | "edge_too_low"
+  | "odds_too_negative";
+
+type GateStageStats = {
+  considered: number;
+  passed: number;
+  rejected: number;
+  reasons: Record<string, number>;
+};
+
+type GateDiagnostics = {
+  quality: GateStageStats;
+  bettable: GateStageStats;
+};
+
+function newGateStageStats(): GateStageStats {
+  return {
+    considered: 0,
+    passed: 0,
+    rejected: 0,
+    reasons: {},
+  };
+}
+
+function newGateDiagnostics(): GateDiagnostics {
+  return {
+    quality: newGateStageStats(),
+    bettable: newGateStageStats(),
+  };
+}
+
+function recordGateEval(
+  stage: GateStageStats,
+  evalResult: { pass: boolean; reason?: GateRejectReason },
+): void {
+  stage.considered += 1;
+  if (evalResult.pass) {
+    stage.passed += 1;
+    return;
+  }
+  stage.rejected += 1;
+  const reason = evalResult.reason ?? "unknown";
+  stage.reasons[reason] = (stage.reasons[reason] ?? 0) + 1;
+}
+
+function evaluateSuggestedPlayQualityGate(play: {
   outcomeType: string;
   posteriorHitRate: number;
   metaScore: number | null;
   playerTarget?: { stat: "ppg" | "rpg" | "apg"; statValue: number } | null;
   marketPick?: SuggestedMarketPick | null;
   requireMarketLine?: boolean;
-}): boolean {
+}): { pass: boolean; reason?: GateRejectReason } {
   const family = betFamilyForOutcome(play.outcomeType);
   const gates = gateThresholdsForFamily(family);
-  if (play.posteriorHitRate < gates.minPosterior) return false;
-  if (play.metaScore != null && play.metaScore < gates.minMeta) return false;
+  if (play.posteriorHitRate < gates.minPosterior) {
+    return { pass: false, reason: "posterior_below_min" };
+  }
+  if (play.metaScore != null && play.metaScore < gates.minMeta) {
+    return { pass: false, reason: "meta_below_min" };
+  }
 
   // Guard against implausible target ladders (e.g. 10+ assists on a 4.3 APG target).
   const threshold = parsePlayerThresholdOutcome(play.outcomeType);
   if (threshold && play.playerTarget) {
-    if (play.playerTarget.stat !== threshold.stat) return false;
+    if (play.playerTarget.stat !== threshold.stat) {
+      return { pass: false, reason: "player_target_stat_mismatch" };
+    }
     const minBaseline = threshold.line * 0.65;
-    if (play.playerTarget.statValue < minBaseline) return false;
+    if (play.playerTarget.statValue < minBaseline) {
+      return { pass: false, reason: "player_target_baseline_too_low" };
+    }
   }
 
   const requireMarketLine = play.requireMarketLine ?? true;
   // For live-bet suggestions, require real market pricing and a positive EV buffer.
   if (requireMarketLine) {
-    if (!play.marketPick) return false;
-    if (play.marketPick.ev < gates.minEv) return false;
-    if (play.marketPick.edge <= 0) return false;
+    if (!play.marketPick) return { pass: false, reason: "no_market_pick" };
+    if (play.marketPick.ev < gates.minEv) return { pass: false, reason: "ev_below_min" };
+    // Allow modestly negative edge so posterior/meta gates can drive bootstrap selection.
+    if (play.marketPick.edge < -0.03) return { pass: false, reason: "edge_too_low" };
+    if (play.marketPick.overPrice < PREDICTION_TUNING.maxNegativeAmericanOdds) {
+      return { pass: false, reason: "odds_too_negative" };
+    }
   } else if (play.marketPick) {
-    // If market exists, still reject strongly negative EV.
-    if (play.marketPick.ev < -0.01) return false;
+    // If market exists, still reject strongly negative EV and bad odds.
+    if (play.marketPick.ev < -0.01) return { pass: false, reason: "ev_too_negative" };
+    if (play.marketPick.overPrice < PREDICTION_TUNING.maxNegativeAmericanOdds) {
+      return { pass: false, reason: "odds_too_negative" };
+    }
   }
 
-  return true;
+  return { pass: true };
 }
 
 function selectDiversifiedBetPicks<T extends {
@@ -717,6 +896,7 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const dateStr = url.searchParams.get("date");
   const refreshLedger = url.searchParams.get("refreshLedger") === "1";
+  const includeDebugPlays = url.searchParams.get("debugPlays") === "1";
 
   if (!dateStr) {
     const today = new Date().toISOString().slice(0, 10);
@@ -726,29 +906,15 @@ export async function GET(req: Request) {
   const targetDate = new Date(dateStr + "T00:00:00Z");
   const season = getSeasonForDate(targetDate);
   const metaModel = await loadMetaModel();
-  const defaultStake = Math.max(0, Number(process.env.SUGGESTED_PLAY_STAKE ?? 10));
-  const bankrollStart = Math.max(0, Number(process.env.SUGGESTED_PLAY_BANKROLL ?? 1000));
-  const maxBetPicksPerGame = Math.max(
-    1,
-    Math.min(2, Number(process.env.SUGGESTED_PLAY_MAX_PER_GAME ?? 2)),
-  );
-  const allowFallbackOddsForLedger = (process.env.SUGGESTED_PLAY_ALLOW_FALLBACK_ODDS ?? "false") === "true";
-  const fallbackAmericanOdds = Number(
-    process.env.SUGGESTED_PLAY_DEFAULT_ODDS ?? -110,
-  );
-  const seasonDateSql = targetDate.toISOString().slice(0, 10);
-  const seasonToDateV2 = await prisma.$queryRawUnsafe<Array<{ hitBool: boolean; count: number }>>(
-    `SELECT h."hitBool" as "hitBool", COUNT(*)::int as "count"
-     FROM "PatternV2Hit" h
-     JOIN "PatternV2" p ON p."id" = h."patternId"
-     JOIN "Game" g ON g."id" = h."gameId"
-     WHERE p."status" = 'deployed'
-       AND g."season" = ${season}
-       AND g."date" <= '${seasonDateSql}'
-     GROUP BY h."hitBool"`,
-  );
-  const seasonV2Hits = seasonToDateV2.find((r) => r.hitBool)?.count ?? 0;
-  const seasonV2Total = seasonToDateV2.reduce((sum, r) => sum + r.count, 0);
+  const defaultStake = LEDGER_TUNING.stake;
+  const bankrollStart = LEDGER_TUNING.bankrollStart;
+  const maxBetPicksPerGame = Math.max(1, LEDGER_TUNING.maxBetPicksPerGame);
+  const allowFallbackOddsForLedger = LEDGER_TUNING.allowFallbackOddsForLedger;
+  const fallbackAmericanOdds = LEDGER_TUNING.fallbackAmericanOdds;
+  const seasonBetSummary = await getSeasonBetHitSummary(dateStr, season);
+  const seasonV2Hits = seasonBetSummary.hits;
+  const seasonV2Total = seasonBetSummary.total;
+  const gateDiagnostics = includeDebugPlays ? newGateDiagnostics() : null;
 
   // Query ±1 day to catch games mis-dated during ingestion (e.g. March 2 games stored as March 1)
   const dayMs = 86400000;
@@ -1366,6 +1532,8 @@ export async function GET(req: Request) {
           baseProb,
           confidence,
           supportN: r.bestN,
+          gameOdds: consensus ?? null,
+          defaultMarketPrice: fallbackAmericanOdds,
         });
         return {
           outcomeType: r.outcomeType,
@@ -1386,24 +1554,29 @@ export async function GET(req: Request) {
           b.confidence - a.confidence ||
           b.posteriorHitRate - a.posteriorHitRate,
       );
-    const qualitySuggestedPlays = rankedSuggestedPlays.filter((p) =>
-      passesSuggestedPlayQualityGate({
+    const qualitySuggestedPlays = rankedSuggestedPlays.filter((p) => {
+      const evalResult = evaluateSuggestedPlayQualityGate({
         ...p,
         requireMarketLine: false,
-      }),
-    );
-    const bettableSuggestedPlays = qualitySuggestedPlays.filter((p) =>
-      passesSuggestedPlayQualityGate({
+      });
+      if (gateDiagnostics) recordGateEval(gateDiagnostics.quality, evalResult);
+      return evalResult.pass;
+    });
+    const bettableSuggestedPlays = qualitySuggestedPlays.filter((p) => {
+      const evalResult = evaluateSuggestedPlayQualityGate({
         ...p,
         requireMarketLine: true,
-      }),
-    );
+      });
+      if (gateDiagnostics) recordGateEval(gateDiagnostics.bettable, evalResult);
+      return evalResult.pass;
+    });
+    const suggestedBetPicks =
+      bettableSuggestedPlays.length > 0
+        ? selectDiversifiedBetPicks(bettableSuggestedPlays, maxBetPicksPerGame)
+        : [];
     const suggestedPlays =
-      qualitySuggestedPlays.length > 0
-        ? selectDiversifiedBetPicks(
-            qualitySuggestedPlays,
-            Math.max(3, maxBetPicksPerGame),
-          )
+      includeDebugPlays && qualitySuggestedPlays.length > 0
+        ? selectDiversifiedBetPicks(qualitySuggestedPlays, Math.max(3, maxBetPicksPerGame))
         : [];
 
     return {
@@ -1418,9 +1591,26 @@ export async function GET(req: Request) {
       context,
       discoveryV2Matches: enrichedDiscoveryV2Matches,
       suggestedPlays,
-      suggestedBetPicks: bettableSuggestedPlays,
+      suggestedBetPicks,
     };
   });
+
+  const dayBetSummary: DayBetSummary = (() => {
+    let hits = 0;
+    let total = 0;
+    for (const game of result) {
+      for (const play of game.suggestedBetPicks ?? []) {
+        if (!play.result) continue;
+        total += 1;
+        if (play.result.hit) hits += 1;
+      }
+    }
+    return {
+      hits,
+      total,
+      hitRate: total > 0 ? hits / total : null,
+    };
+  })();
 
   try {
     const shouldUpsert = await shouldUpsertLedgerSnapshot(dateStr, refreshLedger);
@@ -1448,6 +1638,8 @@ export async function GET(req: Request) {
   return NextResponse.json({
     date: dateStr,
     season,
+    dayBetSummary,
+    ...(includeDebugPlays ? { gateDiagnostics } : {}),
     seasonToDate: {
       throughDate: dateStr,
       v2: {
@@ -1519,7 +1711,7 @@ async function upsertSuggestedPlayLedger(args: {
     : -110;
   const valueRows: string[] = [];
   for (const game of args.games) {
-    const playsForLedger = game.suggestedBetPicks ?? game.suggestedPlays ?? [];
+    const playsForLedger = game.suggestedBetPicks ?? [];
     for (const play of playsForLedger) {
       const dedupKey = ledgerDedupKey(play);
       const marketPick = play.marketPick ?? null;
@@ -1713,6 +1905,33 @@ async function hasLedgerRowsForDate(dateStr: string): Promise<boolean> {
     `SELECT COUNT(*)::int as "count" FROM "SuggestedPlayLedger" WHERE "date" = '${sqlEsc(dateStr)}'`,
   );
   return (rows[0]?.count ?? 0) > 0;
+}
+
+async function getSeasonBetHitSummary(
+  dateStr: string,
+  season: number,
+): Promise<{ hits: number; total: number; hitRate: number | null }> {
+  if (!(await isSuggestedPlayLedgerAvailable())) {
+    return { hits: 0, total: 0, hitRate: null };
+  }
+  const rows = await prisma.$queryRawUnsafe<Array<{ settledHit: boolean; count: number }>>(
+    `SELECT
+       l."settledHit" as "settledHit",
+       COUNT(*)::int as "count"
+     FROM "SuggestedPlayLedger" l
+     WHERE l."isActionable" = TRUE
+       AND l."season" = ${season}
+       AND l."date" <= '${sqlEsc(dateStr)}'
+       AND COALESCE(l."settledResult",'PENDING') IN ('HIT','MISS')
+     GROUP BY l."settledHit"`,
+  );
+  const hits = rows.find((r) => r.settledHit)?.count ?? 0;
+  const total = rows.reduce((sum, r) => sum + r.count, 0);
+  return {
+    hits,
+    total,
+    hitRate: total > 0 ? hits / total : null,
+  };
 }
 
 async function shouldUpsertLedgerSnapshot(
