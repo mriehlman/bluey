@@ -470,3 +470,21 @@ model BacktestResult {
   @@index([grade])
   @@index([pnlROI])
 }
+
+model IngestDay {
+  id         String   @id @default(cuid())
+  date       DateTime @unique @db.Date
+  status     String
+  checksum   String?
+  sourceFile String?
+  startedAt  DateTime?
+  finishedAt DateTime?
+  durationMs Int?
+  error      String?
+  metrics    Json?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([status])
+  @@index([date])
+}

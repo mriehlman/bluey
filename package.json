@@ -6,8 +6,8 @@
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
     "prisma:migrate": "bunx prisma migrate dev",
-    "ingest:games": "bun run src/cli/index.ts ingest:games",
-    "ingest:playerstats": "bun run src/cli/index.ts ingest:playerstats",
+    "build:day-bundles": "bun run src/cli/index.ts build:day-bundles",
+    "ingest:day-bundles": "bun run src/cli/index.ts ingest:day-bundles",
     "sync:games": "bun run src/cli/index.ts sync:games",
     "sync:stats": "bun run src/cli/index.ts sync:stats",
     "sync:odds": "bun run src/cli/index.ts sync:odds",
@@ -42,8 +42,6 @@
     "predict:today": "bun run src/cli/index.ts predict:today",
     "sync:upcoming": "bun run src/cli/index.ts sync:upcoming",
     "sync:nba-stats": "bun run src/cli/index.ts sync:nba-stats",
-    "fetch:season": "bun run src/cli/index.ts fetch:season",
-    "process:season": "bun run src/cli/index.ts process:season",
     "backfill:odds": "bun run src/cli/index.ts backfill:odds"
   },
   "dependencies": {

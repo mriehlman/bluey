@@ -27,22 +27,18 @@ bun run prisma:migrate
 
 Place your data files in `./data/` (or set `DATA_DIR` in `.env`):
 
-- `games.json` — game records (API-Sports format with `response[]` wrapper or top-level array)
-- `playerstats.json` — player stat lines (API-Sports format with `response[]` wrapper or top-level array)
+- `raw/day/YYYY-MM-DD.json` — daily all-in-one bundle (games, stats, odds, props)
 
 ## Commands
 
-Run the full pipeline in order:
+Run the ingest pipeline in order:
 
 ```bash
-# Ingest games (upserts teams + games, skips preseason)
-bun run ingest:games
+# Build daily bundles from raw source files
+bun run build:day-bundles
 
-# Ingest player stats (upserts players, skips DNP/orphans)
-bun run ingest:playerstats
-
-# Search for recurring patterns across seasons
-bun run search:patterns
+# Ingest day bundles into Postgres
+bun run ingest:day-bundles
 ```
 
 ### Stats queries
@@ -166,9 +162,12 @@ src/
   cli/index.ts            # CLI entry point and command router
   db/prisma.ts            # PrismaClient singleton
   ingest/
-    utils.ts              # JSON reading, date/time parsing, chunking
-    games.ts              # Game ingestion pipeline
-    playerstats.ts        # Player stat ingestion pipeline
+    buildDailyDataBundles.ts  # Builds one JSON bundle per date
+    ingestDayBundles.ts       # High-throughput day-bundle ingestion
+    syncNbaStats.ts           # nba_api-based stat/game sync
+    syncOdds.ts               # Odds API sync
+    syncPlayerProps.ts        # Player props sync
+    utils.ts                  # Shared date/time helpers
   stats/
     filters.ts            # RollupFilters type + Prisma where builders
     playerRollup.ts       # Player aggregate stats

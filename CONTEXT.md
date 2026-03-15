@@ -15,10 +15,10 @@ Bluey is an NBA betting analytics system that:
 ### 1. NBA Stats (Player/Game Data)
 - **Source**: Python `nba_api` library (scrapes NBA.com)
 - **Script**: `scripts/nba_fetch.py`
-- **Storage**: Raw JSON saved to `data/nba_raw/{season}/` then processed into PostgreSQL
+- **Storage**: Day bundles in `data/raw/day/YYYY-MM-DD.json`
 - **Commands**:
-  - `bun run fetch:season -- --season 2024-25` - Fetch raw JSON
-  - `bun run process:season -- --season 2024-25` - Process JSON into DB
+  - `bun run build:day-bundles` - Build day bundles from raw sources
+  - `bun run ingest:day-bundles` - Ingest bundles into PostgreSQL
 
 ### 2. The Odds API (Betting Lines)
 - **API Key**: Stored in `.env` as `ODDS_API_KEY`
@@ -70,7 +70,7 @@ PlayerPropOdds (id, gameId, playerId, source, market, line, overPrice, underPric
 - `fetchHistoricalOdds(date)` - historical snapshot
 
 ### src/cli/index.ts
-- Added commands: `sync:player-props`, `backfill:odds`, `fetch:season`, `process:season`
+- Primary ingestion commands: `build:day-bundles`, `ingest:day-bundles`
 
 ## Cron Job Setup (Windows)
 
@@ -121,9 +121,9 @@ bun run sync:player-props                      # Live player props
 bun run sync:upcoming                          # Sync today's games + odds
 
 # Historical backfill
-bun run fetch:season -- --season 2024-25       # Fetch NBA stats to JSON
-bun run process:season -- --season 2024-25     # Process JSON to DB
-bun run backfill:odds -- --from 2024-10-22     # Historical odds
+bun run build:day-bundles                       # Build all daily bundles
+bun run ingest:day-bundles -- --concurrency 1   # Ingest all daily bundles
+bun run backfill:odds -- --from 2024-10-22      # Historical odds
 
 # Analysis
 bun run predict:today                          # Run predictions for today

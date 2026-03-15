@@ -1,15 +1,12 @@
 import * as fs from "fs/promises";
 import { prisma } from "../db/prisma.js";
-import { ingestGames } from "../ingest/games.js";
-import { ingestPlayerStats } from "../ingest/playerstats.js";
 import { syncGamesForDate, syncGamesForRange, syncUpcomingGames, backfillGameExternalIds } from "../ingest/syncGames.js";
 import { getEasternDateFromUtc } from "../ingest/utils.js";
 import { syncNbaStatsForDate, syncNbaStatsForDateRange, syncUpcomingFromNba } from "../ingest/syncNbaStats.js";
 import { syncOddsLive, syncOddsForDate } from "../ingest/syncOdds.js";
 import { syncPlayerPropsLive } from "../ingest/syncPlayerProps.js";
-import { fetchSeasonToJson, processSeasonFromJson } from "../ingest/rawDataPipeline.js";
-import { ingestSeason, ingestAllSeasons, getIngestionStatus } from "../ingest/ingestRawNbaData.js";
-import { enrichSeason, enrichAllSeasons, getEnrichmentStatus } from "../ingest/enrichFromRawNba.js";
+import { buildDailyDataBundles } from "../ingest/buildDailyDataBundles.js";
+import { ingestDayBundles } from "../ingest/ingestDayBundles.js";
 import { getPlayerTotals } from "../stats/playerRollup.js";
 import { getTeamTotals } from "../stats/teamRollup.js";
 import {
@@ -64,14 +61,6 @@ function filtersFromFlags(flags: Record<string, string>): RollupFilters {
 }
 
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
-  "ingest:games": async () => {
-    await ingestGames();
-  },
-
-  "ingest:playerstats": async () => {
-    await ingestPlayerStats();
-  },
-
   "sync:games": async (args) => {
     const flags = parseFlags(args);
     if (flags.date) {
@@ -177,6 +166,14 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     await syncPlayerPropsLive();
   },
 
+  "build:day-bundles": async (args) => {
+    await buildDailyDataBundles(args);
+  },
+
+  "ingest:day-bundles": async (args) => {
+    await ingestDayBundles(args);
+  },
+
   "sync:catchup": async () => {
     console.log("\n=== Sync Catchup: backfill stats and odds to current ===\n");
     console.log("Step 1/2: Syncing stats...");
@@ -276,30 +273,6 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
       const totalStats = await syncNbaStatsForDateRange(fromStr, toStr);
       console.log(`\n=== Season ${season} backfill complete: ${totalStats} total stats ===`);
     }
-  },
-
-  "fetch:season": async (args) => {
-    const flags = parseFlags(args);
-    const season = flags.season;
-    
-    if (!season) {
-      console.error("Usage: fetch:season --season 2024-25 [--from YYYY-MM-DD] [--to YYYY-MM-DD]");
-      process.exit(1);
-    }
-    
-    await fetchSeasonToJson(season, flags.from, flags.to);
-  },
-
-  "process:season": async (args) => {
-    const flags = parseFlags(args);
-    const season = flags.season;
-    
-    if (!season) {
-      console.error("Usage: process:season --season 2024-25");
-      process.exit(1);
-    }
-    
-    await processSeasonFromJson(season);
   },
 
   "backfill:odds": async (args) => {
@@ -724,51 +697,6 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     await updateSuggestedPlayClv(args);
   },
 
-  "ingest:raw": async (args) => {
-    const flags = parseFlags(args);
-    const force = args.includes("--force");
-    
-    if (flags.season) {
-      await ingestSeason(flags.season, { force });
-    } else if (args.includes("--all")) {
-      await ingestAllSeasons({ force });
-    } else {
-      console.error("Usage: ingest:raw --season 2024-25  or  ingest:raw --all");
-      console.error("  --force    Re-ingest all games (ignore progress)");
-      process.exit(1);
-    }
-  },
-
-  "ingest:status": async () => {
-    const status = await getIngestionStatus();
-    console.log("\n=== Raw Data Ingestion Status ===\n");
-    console.log("Season     | Raw Games | Ingested | In DB | Complete");
-    console.log("-----------|-----------|----------|-------|----------");
-    for (const [season, data] of Object.entries(status)) {
-      console.log(
-        `${season.padEnd(10)} | ${String(data.rawGames).padStart(9)} | ${String(data.ingestedGames).padStart(8)} | ${String(data.dbGames).padStart(5)} | ${data.percentComplete}%`
-      );
-    }
-    console.log("");
-  },
-
-  "enrich:raw": async (args) => {
-    const flags = parseFlags(args);
-    
-    if (flags.season) {
-      await enrichSeason(flags.season);
-    } else if (args.includes("--all")) {
-      await enrichAllSeasons();
-    } else {
-      console.error("Usage: enrich:raw --season 2024-25  or  enrich:raw --all");
-      console.error("  Enriches existing games with detailed stats from raw NBA JSON files");
-      process.exit(1);
-    }
-  },
-
-  "enrich:status": async () => {
-    await getEnrichmentStatus();
-  },
 };
 
 async function main() {

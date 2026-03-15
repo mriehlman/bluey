@@ -66,10 +66,19 @@ interface PlayerPropBookmaker {
 interface EventOddsResponse {
   id: string;
   sport_key: string;
+  sport_title?: string;
   home_team: string;
   away_team: string;
   commence_time: string;
   bookmakers: PlayerPropBookmaker[];
+}
+
+interface PlayerPropsDayBundle {
+  date: string;
+  generatedAt: string;
+  source: "player-props-day-bundle-v1";
+  eventCount: number;
+  events: EventOddsResponse[];
 }
 
 /**
@@ -306,6 +315,97 @@ function hashString(str: string): number {
   return Math.abs(hash);
 }
 
+function parseFlags(args: string[]): Record<string, string> {
+  const flags: Record<string, string> = {};
+  for (let i = 0; i < args.length; i++) {
+    if (!args[i].startsWith("--")) continue;
+    if (i + 1 < args.length && !args[i + 1].startsWith("--")) {
+      flags[args[i].slice(2)] = args[i + 1];
+      i++;
+    } else {
+      flags[args[i].slice(2)] = "true";
+    }
+  }
+  return flags;
+}
+
+function listRawPropDates(rawRoot: string): string[] {
+  if (!fs.existsSync(rawRoot)) return [];
+  return fs
+    .readdirSync(rawRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && /^\d{4}-\d{2}-\d{2}$/.test(entry.name))
+    .map((entry) => entry.name)
+    .sort();
+}
+
+function dateRange(from: string, to: string): string[] {
+  const out: string[] = [];
+  const cur = new Date(`${from}T00:00:00Z`);
+  const end = new Date(`${to}T00:00:00Z`);
+  while (cur <= end) {
+    out.push(cur.toISOString().slice(0, 10));
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return out;
+}
+
+async function upsertPropsForGame(gameId: string, propsData: EventOddsResponse): Promise<number> {
+  let upserted = 0;
+  for (const bookmaker of propsData.bookmakers) {
+    for (const market of bookmaker.markets) {
+      const playerOutcomes = new Map<string, { over?: PlayerPropOutcome; under?: PlayerPropOutcome }>();
+
+      for (const outcome of market.outcomes) {
+        const playerName = outcome.description;
+        if (!playerName) continue;
+        const existing = playerOutcomes.get(playerName) || {};
+        if (outcome.name === "Over" || outcome.name === "Yes") {
+          existing.over = outcome;
+        } else if (outcome.name === "Under" || outcome.name === "No") {
+          existing.under = outcome;
+        }
+        playerOutcomes.set(playerName, existing);
+      }
+
+      for (const [playerName, outcomes] of playerOutcomes) {
+        const playerId = await findPlayerId(playerName);
+        if (!playerId) continue;
+
+        const line = outcomes.over?.point ?? outcomes.under?.point ?? null;
+        if (line == null || !Number.isFinite(line)) continue;
+
+        await prisma.playerPropOdds.upsert({
+          where: {
+            gameId_playerId_source_market: {
+              gameId,
+              playerId,
+              source: bookmaker.key,
+              market: market.key,
+            },
+          },
+          create: {
+            gameId,
+            playerId,
+            source: bookmaker.key,
+            market: market.key,
+            line,
+            overPrice: outcomes.over?.price ?? null,
+            underPrice: outcomes.under?.price ?? null,
+          },
+          update: {
+            line,
+            overPrice: outcomes.over?.price ?? null,
+            underPrice: outcomes.under?.price ?? null,
+            fetchedAt: new Date(),
+          },
+        });
+        upserted++;
+      }
+    }
+  }
+  return upserted;
+}
+
 /**
  * Sync player props for upcoming games
  */
@@ -336,64 +436,7 @@ export async function syncPlayerPropsLive(): Promise<number> {
     const eventDate = event.commence_time.slice(0, 10);
     saveRawPlayerProps(eventDate, event.id, propsData);
     
-    // Process each bookmaker's markets
-    for (const bookmaker of propsData.bookmakers) {
-      for (const market of bookmaker.markets) {
-        // Group outcomes by player (Over/Under or Yes/No for same player)
-        // Note: 'description' is the player name.
-        const playerOutcomes = new Map<string, { over?: PlayerPropOutcome; under?: PlayerPropOutcome }>();
-        
-        for (const outcome of market.outcomes) {
-          const playerName = outcome.description;
-          const existing = playerOutcomes.get(playerName) || {};
-          if (outcome.name === "Over" || outcome.name === "Yes") {
-            existing.over = outcome;
-          } else if (outcome.name === "Under" || outcome.name === "No") {
-            existing.under = outcome;
-          }
-          playerOutcomes.set(playerName, existing);
-        }
-        
-        // Upsert each player's prop
-        for (const [playerName, outcomes] of playerOutcomes) {
-          const playerId = await findPlayerId(playerName);
-          if (!playerId) continue;
-          
-          const line = outcomes.over?.point ?? outcomes.under?.point ?? 0.5;
-          const overPrice = outcomes.over?.price ?? null;
-          const underPrice = outcomes.under?.price ?? null;
-          
-          if (!Number.isFinite(line)) continue;
-          
-          await prisma.playerPropOdds.upsert({
-            where: {
-              gameId_playerId_source_market: {
-                gameId,
-                playerId,
-                source: bookmaker.key,
-                market: market.key,
-              },
-            },
-            create: {
-              gameId,
-              playerId,
-              source: bookmaker.key,
-              market: market.key,
-              line,
-              overPrice,
-              underPrice,
-            },
-            update: {
-              line,
-              overPrice,
-              underPrice,
-              fetchedAt: new Date(),
-            },
-          });
-          totalUpserted++;
-        }
-      }
-    }
+    totalUpserted += await upsertPropsForGame(gameId, propsData);
   }
   
   console.log(`  Upserted ${totalUpserted} player prop odds`);
@@ -414,4 +457,134 @@ export async function syncPlayerPropsForDate(date: string): Promise<number> {
   console.log("  (Requires additional API endpoint investigation)");
   
   return 0;
+}
+
+export async function buildPlayerPropsDayFiles(args: string[] = []): Promise<void> {
+  const flags = parseFlags(args);
+  const dataDir = getDataDir();
+  const rawRoot = path.join(dataDir, "raw", "odds", "player-props");
+  const outDir = path.join(dataDir, "raw", "odds", "player-props-day");
+  fs.mkdirSync(outDir, { recursive: true });
+
+  const discovered = listRawPropDates(rawRoot);
+  if (discovered.length === 0) {
+    throw new Error(`No raw player prop folders found at ${rawRoot}`);
+  }
+
+  const from = flags.from ?? discovered[0];
+  const to = flags.to ?? discovered[discovered.length - 1];
+  const targets = dateRange(from, to);
+
+  console.log(`Building day bundle files for ${from} -> ${to} (${targets.length} dates)...`);
+
+  for (const date of targets) {
+    const dateDir = path.join(rawRoot, date);
+    if (!fs.existsSync(dateDir)) continue;
+
+    const files = fs.readdirSync(dateDir).filter((f) => f.endsWith(".json")).sort();
+    const events: EventOddsResponse[] = [];
+    for (const file of files) {
+      const filePath = path.join(dateDir, file);
+      try {
+        const raw = fs.readFileSync(filePath, "utf-8");
+        const parsed = JSON.parse(raw) as EventOddsResponse;
+        if (
+          parsed &&
+          typeof parsed.id === "string" &&
+          typeof parsed.home_team === "string" &&
+          typeof parsed.away_team === "string" &&
+          Array.isArray(parsed.bookmakers)
+        ) {
+          events.push(parsed);
+        }
+      } catch (err) {
+        console.warn(`  Skipping unreadable props file ${filePath}: ${(err as Error).message}`);
+      }
+    }
+
+    events.sort((a, b) => {
+      const at = Date.parse(a.commence_time || "");
+      const bt = Date.parse(b.commence_time || "");
+      if (Number.isFinite(at) && Number.isFinite(bt) && at !== bt) return at - bt;
+      return a.id.localeCompare(b.id);
+    });
+
+    const bundle: PlayerPropsDayBundle = {
+      date,
+      generatedAt: new Date().toISOString(),
+      source: "player-props-day-bundle-v1",
+      eventCount: events.length,
+      events,
+    };
+
+    const outPath = path.join(outDir, `${date}.json`);
+    fs.writeFileSync(outPath, JSON.stringify(bundle, null, 2));
+    console.log(`  ${date}: ${events.length} events -> ${outPath}`);
+  }
+}
+
+function loadDayBundle(date: string): EventOddsResponse[] {
+  const filePath = path.join(getDataDir(), "raw", "odds", "player-props-day", `${date}.json`);
+  if (!fs.existsSync(filePath)) return [];
+  const raw = fs.readFileSync(filePath, "utf-8");
+  const parsed = JSON.parse(raw) as PlayerPropsDayBundle | EventOddsResponse[];
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && Array.isArray(parsed.events)) return parsed.events;
+  return [];
+}
+
+function loadRawPropEventsForDate(date: string): EventOddsResponse[] {
+  const dateDir = path.join(getDataDir(), "raw", "odds", "player-props", date);
+  if (!fs.existsSync(dateDir)) return [];
+  const files = fs.readdirSync(dateDir).filter((f) => f.endsWith(".json")).sort();
+  const events: EventOddsResponse[] = [];
+  for (const file of files) {
+    try {
+      const raw = fs.readFileSync(path.join(dateDir, file), "utf-8");
+      const parsed = JSON.parse(raw) as EventOddsResponse;
+      if (parsed && typeof parsed.id === "string" && Array.isArray(parsed.bookmakers)) {
+        events.push(parsed);
+      }
+    } catch {
+      // Best-effort ingest: skip malformed files.
+    }
+  }
+  return events;
+}
+
+export async function ingestPlayerPropsRaw(args: string[] = []): Promise<number> {
+  const flags = parseFlags(args);
+  const preferDayFiles = (flags["prefer-day-files"] ?? "false") === "true";
+  const rawRoot = path.join(getDataDir(), "raw", "odds", "player-props");
+  const discovered = listRawPropDates(rawRoot);
+  if (discovered.length === 0) {
+    throw new Error(`No raw player prop date folders found at ${rawRoot}`);
+  }
+
+  const from = flags.from ?? discovered[0];
+  const to = flags.to ?? discovered[discovered.length - 1];
+  const targets = dateRange(from, to);
+
+  console.log(`Ingesting raw player props for ${from} -> ${to} (${targets.length} dates)...`);
+  let totalUpserted = 0;
+  let totalEvents = 0;
+
+  for (const date of targets) {
+    const events = preferDayFiles ? loadDayBundle(date) : loadRawPropEventsForDate(date);
+    if (events.length === 0) continue;
+
+    let dateUpserted = 0;
+    for (const event of events) {
+      const gameId = await findOrCreateGame(event.home_team, event.away_team, event.commence_time, event.id);
+      if (!gameId) continue;
+      dateUpserted += await upsertPropsForGame(gameId, event);
+    }
+
+    totalEvents += events.length;
+    totalUpserted += dateUpserted;
+    console.log(`  ${date}: ${events.length} events, ${dateUpserted} prop rows upserted`);
+  }
+
+  console.log(`Raw props ingest complete: ${totalEvents} events, ${totalUpserted} prop rows upserted`);
+  return totalUpserted;
 }

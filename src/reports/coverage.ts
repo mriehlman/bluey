@@ -42,7 +42,7 @@ export async function coverageReport(): Promise<void> {
 
   console.log("Orphan Counts by Reason:");
   if (orphansByReason.length === 0) {
-    console.log("  (none logged yet -- re-run ingest:playerstats to populate)");
+    console.log("  (none logged yet -- no orphan rows recorded)");
   }
   for (const row of orphansByReason) {
     console.log(`  ${row.reason}: ${row._count.id.toLocaleString()}`);
