@@ -291,9 +291,13 @@ function parseMinutesToInt(raw?: string): { minutes: number; minutesRaw: string 
   const s = String(raw).trim();
   if (!s) return { minutes: 0, minutesRaw: null };
   const m = s.match(/^(\d+):(\d{1,2})$/);
-  if (m) return { minutes: Number(m[1]), minutesRaw: s };
+  if (m) return { minutes: Number(m[1]) * 60 + Number(m[2]), minutesRaw: s };
   const n = Number(s);
-  if (Number.isFinite(n) && n >= 0) return { minutes: Math.floor(n), minutesRaw: s };
+  if (Number.isFinite(n) && n >= 0) {
+    // Keep this field in seconds across ingest paths.
+    const asSeconds = n > 100 ? Math.round(n) : Math.round(n * 60);
+    return { minutes: asSeconds, minutesRaw: s };
+  }
   return { minutes: 0, minutesRaw: s };
 }
 
@@ -465,6 +469,18 @@ function outcomeKey(event: OddsEvent): string {
   return `${event.id ?? "unknown"}|${event.home_team ?? ""}|${event.away_team ?? ""}|${event.commence_time ?? ""}`;
 }
 
+function resolveGameIdForEvent(
+  date: string,
+  homeTeam: string,
+  awayTeam: string,
+  gameIdByMatch: Map<string, string>,
+): string | undefined {
+  const direct = gameIdByMatch.get(gameMatchKey(date, homeTeam, awayTeam));
+  if (direct) return direct;
+  // Some feeds can have home/away orientation flipped relative to game records.
+  return gameIdByMatch.get(gameMatchKey(date, awayTeam, homeTeam));
+}
+
 async function ingestDayBundle(filePath: string, force = false): Promise<void> {
   const startedAt = Date.now();
   const raw = await fs.readFile(filePath, "utf-8");
@@ -556,13 +572,15 @@ async function ingestDayBundle(filePath: string, force = false): Promise<void> {
     }
 
     for (const [gameId, stats] of statsByGame.entries()) {
-      await prisma.playerGameStat.deleteMany({ where: { gameId } });
-      if (stats.length > 0) {
-        await prisma.playerGameStat.createMany({
-          data: stats as never,
-          skipDuplicates: true,
-        });
-      }
+      await prisma.$transaction(async (tx) => {
+        await tx.playerGameStat.deleteMany({ where: { gameId } });
+        if (stats.length > 0) {
+          await tx.playerGameStat.createMany({
+            data: stats as never,
+            skipDuplicates: true,
+          });
+        }
+      });
     }
 
     const dbGames = await prisma.game.findMany({
@@ -587,8 +605,7 @@ async function ingestDayBundle(filePath: string, force = false): Promise<void> {
     for (const event of dedupOdds.values()) {
       const home = event.home_team ?? "";
       const away = event.away_team ?? "";
-      const key = gameMatchKey(date, home, away);
-      const gameId = gameIdByMatch.get(key);
+      const gameId = resolveGameIdForEvent(date, home, away, gameIdByMatch);
       if (!gameId) continue;
 
       for (const book of event.bookmakers ?? []) {
@@ -643,10 +660,12 @@ async function ingestDayBundle(filePath: string, force = false): Promise<void> {
     }
 
     for (const [gameId, rows] of oddsRowsByGame.entries()) {
-      await prisma.gameOdds.deleteMany({ where: { gameId } });
-      if (rows.length > 0) {
-        await prisma.gameOdds.createMany({ data: rows as never });
-      }
+      await prisma.$transaction(async (tx) => {
+        await tx.gameOdds.deleteMany({ where: { gameId } });
+        if (rows.length > 0) {
+          await tx.gameOdds.createMany({ data: rows as never });
+        }
+      });
     }
 
     const allPlayers = await prisma.player.findMany({
@@ -664,7 +683,7 @@ async function ingestDayBundle(filePath: string, force = false): Promise<void> {
     for (const event of bundle.playerProps?.events ?? []) {
       const home = event.home_team ?? "";
       const away = event.away_team ?? "";
-      const gameId = gameIdByMatch.get(gameMatchKey(date, home, away));
+      const gameId = resolveGameIdForEvent(date, home, away, gameIdByMatch);
       if (!gameId) continue;
 
       for (const book of event.bookmakers ?? []) {
@@ -703,10 +722,12 @@ async function ingestDayBundle(filePath: string, force = false): Promise<void> {
     }
 
     for (const [gameId, rows] of propRowsByGame.entries()) {
-      await prisma.playerPropOdds.deleteMany({ where: { gameId } });
-      if (rows.length > 0) {
-        await prisma.playerPropOdds.createMany({ data: rows as never, skipDuplicates: true });
-      }
+      await prisma.$transaction(async (tx) => {
+        await tx.playerPropOdds.deleteMany({ where: { gameId } });
+        if (rows.length > 0) {
+          await tx.playerPropOdds.createMany({ data: rows as never, skipDuplicates: true });
+        }
+      });
     }
 
     const durationMs = Date.now() - startedAt;

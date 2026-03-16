@@ -342,7 +342,7 @@ export async function syncOddsLive(debug = false): Promise<number> {
   console.log(`  Found ${events.length} events with odds`);
   
   if (events.length > 0) {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getEasternDateFromUtc(new Date());
     saveRawOdds(today, events, "live");
   }
   

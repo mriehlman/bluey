@@ -48,7 +48,10 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const status = url.searchParams.get("status") ?? "deployed";
   const outcomeType = url.searchParams.get("outcomeType");
-  const limit = Math.min(200, Number(url.searchParams.get("limit") ?? 50));
+  const requestedLimit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10);
+  const limit = Number.isFinite(requestedLimit) && requestedLimit > 0
+    ? Math.min(200, requestedLimit)
+    : 50;
 
   const whereClauses = [`"status" = '${sqlEsc(status)}'`];
   if (outcomeType) {
