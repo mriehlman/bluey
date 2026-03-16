@@ -14,6 +14,7 @@
     "sync:stats": "bun run src/cli/index.ts sync:stats",
     "sync:odds": "bun run src/cli/index.ts sync:odds",
     "sync:player-props": "bun run src/cli/index.ts sync:player-props",
+    "sync:injuries": "bun run src/cli/index.ts sync:injuries",
     "sync:catchup": "bun run src/cli/index.ts sync:catchup",
     "sync:daily": "bun run src/cli/index.ts sync:daily",
     "sync:backfill": "bun run src/cli/index.ts sync:backfill",

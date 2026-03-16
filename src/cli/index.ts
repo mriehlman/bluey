@@ -5,6 +5,7 @@ import { getEasternDateFromUtc } from "../ingest/utils.js";
 import { syncNbaStatsForDate, syncNbaStatsForDateRange, syncUpcomingFromNba } from "../ingest/syncNbaStats.js";
 import { syncOddsLive, syncOddsForDate } from "../ingest/syncOdds.js";
 import { syncPlayerPropsLive } from "../ingest/syncPlayerProps.js";
+import { syncInjuries } from "../ingest/syncInjuries.js";
 import { buildDailyDataBundles } from "../ingest/buildDailyDataBundles.js";
 import { ingestDayBundles } from "../ingest/ingestDayBundles.js";
 import { normalizePlayerMinutes } from "../ingest/normalizePlayerMinutes.js";
@@ -166,6 +167,10 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
   "sync:player-props": async () => {
     await syncPlayerPropsLive();
+  },
+
+  "sync:injuries": async (args) => {
+    await syncInjuries(args);
   },
 
   "build:day-bundles": async (args) => {
