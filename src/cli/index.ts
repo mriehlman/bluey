@@ -7,6 +7,7 @@ import { syncOddsLive, syncOddsForDate } from "../ingest/syncOdds.js";
 import { syncPlayerPropsLive } from "../ingest/syncPlayerProps.js";
 import { buildDailyDataBundles } from "../ingest/buildDailyDataBundles.js";
 import { ingestDayBundles } from "../ingest/ingestDayBundles.js";
+import { normalizePlayerMinutes } from "../ingest/normalizePlayerMinutes.js";
 import { getPlayerTotals } from "../stats/playerRollup.js";
 import { getTeamTotals } from "../stats/teamRollup.js";
 import {
@@ -172,6 +173,10 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
   "ingest:day-bundles": async (args) => {
     await ingestDayBundles(args);
+  },
+
+  "repair:minutes": async (args) => {
+    await normalizePlayerMinutes(args);
   },
 
   "sync:catchup": async () => {

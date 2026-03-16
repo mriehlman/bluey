@@ -8,6 +8,7 @@
     "prisma:migrate": "bunx prisma migrate dev",
     "build:day-bundles": "bun run src/cli/index.ts build:day-bundles",
     "ingest:day-bundles": "bun run src/cli/index.ts ingest:day-bundles",
+    "repair:minutes": "bun run src/cli/index.ts repair:minutes",
     "sync:games": "bun run src/cli/index.ts sync:games",
     "sync:stats": "bun run src/cli/index.ts sync:stats",
     "sync:odds": "bun run src/cli/index.ts sync:odds",
