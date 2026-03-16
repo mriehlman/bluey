@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "sync:fill-missing-days": "bun run src/cli/index.ts sync:fill-missing-days",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
     "prisma:migrate": "bunx prisma migrate dev",

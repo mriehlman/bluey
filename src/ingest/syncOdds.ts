@@ -373,8 +373,10 @@ export async function syncPlayerPropsForDate(date: string): Promise<number> {
   console.log(`  Found ${events.length} events`);
   let totalUpserted = 0;
   
-  const propsDir = path.join(getDataDir(), "raw", "odds", "player-props-historical", date);
+  const propsDir = path.join(getDataDir(), "raw", "odds", "player-props", date);
+  const legacyPropsDir = path.join(getDataDir(), "raw", "odds", "player-props-historical", date);
   fs.mkdirSync(propsDir, { recursive: true });
+  fs.mkdirSync(legacyPropsDir, { recursive: true });
   
   for (const event of events) {
     const propsData = await fetchHistoricalEventOdds(event.id, date, PLAYER_PROP_MARKETS);
@@ -382,10 +384,10 @@ export async function syncPlayerPropsForDate(date: string): Promise<number> {
       continue;
     }
     
-    fs.writeFileSync(
-      path.join(propsDir, `${event.id}.json`),
-      JSON.stringify(propsData, null, 2)
-    );
+    const payload = JSON.stringify(propsData, null, 2);
+    fs.writeFileSync(path.join(propsDir, `${event.id}.json`), payload);
+    // Keep legacy path for compatibility with any existing local workflows.
+    fs.writeFileSync(path.join(legacyPropsDir, `${event.id}.json`), payload);
     
     const gameId = await findOrCreateGame(propsData);
     if (!gameId) continue;

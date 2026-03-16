@@ -663,7 +663,7 @@ async function ingestDayBundle(filePath: string, force = false): Promise<void> {
       await prisma.$transaction(async (tx) => {
         await tx.gameOdds.deleteMany({ where: { gameId } });
         if (rows.length > 0) {
-          await tx.gameOdds.createMany({ data: rows as never });
+          await tx.gameOdds.createMany({ data: rows as never, skipDuplicates: true });
         }
       });
     }

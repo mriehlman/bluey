@@ -8,6 +8,7 @@ import { syncPlayerPropsLive } from "../ingest/syncPlayerProps.js";
 import { buildDailyDataBundles } from "../ingest/buildDailyDataBundles.js";
 import { ingestDayBundles } from "../ingest/ingestDayBundles.js";
 import { normalizePlayerMinutes } from "../ingest/normalizePlayerMinutes.js";
+import { syncMissingDays } from "../ingest/syncMissingDays.js";
 import { getPlayerTotals } from "../stats/playerRollup.js";
 import { getTeamTotals } from "../stats/teamRollup.js";
 import {
@@ -177,6 +178,10 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
   "repair:minutes": async (args) => {
     await normalizePlayerMinutes(args);
+  },
+
+  "sync:fill-missing-days": async (args) => {
+    await syncMissingDays(args);
   },
 
   "sync:catchup": async () => {
