@@ -160,6 +160,7 @@ export function deriveMetaContextFeatures(input: {
   let resilienceUnit: number | null = null;
   let roleDepUnit: number | null = null;
 
+  let injuryLineupDependency = 0;
   for (const token of conditions) {
     if (
       token.startsWith("home_role_dependency:") ||
@@ -181,7 +182,31 @@ export function deriveMetaContextFeatures(input: {
         resilienceUnit = resilienceUnit == null ? unit : (resilienceUnit + unit) / 2;
       }
     }
+    if (
+      token.startsWith("home_injury_") ||
+      token.startsWith("away_injury_") ||
+      token.startsWith("injury_out_delta:") ||
+      token.startsWith("injury_questionable_delta:")
+    ) {
+      injuryLineupDependency = Math.max(injuryLineupDependency, 0.12);
+    }
+    if (
+      token.startsWith("home_lineup_certainty:") ||
+      token.startsWith("away_lineup_certainty:") ||
+      token.startsWith("lineup_certainty_delta:")
+    ) {
+      injuryLineupDependency = Math.max(injuryLineupDependency, 0.08);
+    }
+    if (
+      token.startsWith("home_late_scratch_risk:") ||
+      token.startsWith("away_late_scratch_risk:") ||
+      token.startsWith("late_scratch_risk_delta:")
+    ) {
+      injuryLineupDependency = Math.max(injuryLineupDependency, 0.18);
+    }
   }
+
+  dependencyRisk += injuryLineupDependency;
 
   if (roleDepUnit != null) {
     dependencyRisk = Math.max(0, Math.min(1, dependencyRisk + (roleDepUnit - 0.5) * 0.6));
@@ -194,7 +219,7 @@ export function deriveMetaContextFeatures(input: {
 
   portabilityScore = Math.max(
     0.05,
-    Math.min(0.95, portabilityScore - dependencyRisk * 0.2),
+    Math.min(0.95, portabilityScore - dependencyRisk * 0.2 - injuryLineupDependency * 0.15),
   );
   dependencyRisk = Math.max(0.05, Math.min(0.95, dependencyRisk));
 

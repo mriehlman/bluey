@@ -1,0 +1,13 @@
+ALTER TABLE "GameContext"
+  ADD COLUMN IF NOT EXISTS "homeInjuryOutCount" INTEGER,
+  ADD COLUMN IF NOT EXISTS "homeInjuryDoubtfulCount" INTEGER,
+  ADD COLUMN IF NOT EXISTS "homeInjuryQuestionableCount" INTEGER,
+  ADD COLUMN IF NOT EXISTS "homeInjuryProbableCount" INTEGER,
+  ADD COLUMN IF NOT EXISTS "awayInjuryOutCount" INTEGER,
+  ADD COLUMN IF NOT EXISTS "awayInjuryDoubtfulCount" INTEGER,
+  ADD COLUMN IF NOT EXISTS "awayInjuryQuestionableCount" INTEGER,
+  ADD COLUMN IF NOT EXISTS "awayInjuryProbableCount" INTEGER,
+  ADD COLUMN IF NOT EXISTS "homeLineupCertainty" DOUBLE PRECISION,
+  ADD COLUMN IF NOT EXISTS "awayLineupCertainty" DOUBLE PRECISION,
+  ADD COLUMN IF NOT EXISTS "homeLateScratchRisk" DOUBLE PRECISION,
+  ADD COLUMN IF NOT EXISTS "awayLateScratchRisk" DOUBLE PRECISION;

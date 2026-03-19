@@ -1,6 +1,7 @@
 import { RateLimiter } from "./rateLimiter.js";
 
 const BASE_URL = "https://api.the-odds-api.com/v4";
+const ODDS_SNAPSHOT_TIME_ET = process.env.ODDS_SNAPSHOT_TIME_ET || "07:30";
 
 // ── Response types ──
 
@@ -43,6 +44,27 @@ function getApiKey(): string {
   return key;
 }
 
+function parseEasternUtcOffsetMinutes(utcDate: Date): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    timeZoneName: "shortOffset",
+  }).formatToParts(utcDate);
+  const tzPart = parts.find((p) => p.type === "timeZoneName")?.value ?? "GMT-5";
+  const match = tzPart.match(/^GMT([+-]\d{1,2})(?::?(\d{2}))?$/);
+  if (!match) return -5 * 60;
+  const signHours = Number(match[1]);
+  const minsPart = Number(match[2] ?? "0");
+  return signHours * 60 + (signHours >= 0 ? minsPart : -minsPart);
+}
+
+export function getHistoricalSnapshotIsoUtc(date: string, timeEt = ODDS_SNAPSHOT_TIME_ET): string {
+  const [year, month, day] = date.split("-").map(Number);
+  const [hourEt, minuteEt] = timeEt.split(":").map(Number);
+  const offsetMinutes = parseEasternUtcOffsetMinutes(new Date(`${date}T12:00:00Z`));
+  const utcMs = Date.UTC(year, month - 1, day, hourEt, minuteEt) - offsetMinutes * 60_000;
+  return new Date(utcMs).toISOString().replace(".000Z", "Z");
+}
+
 async function fetchJson<T>(url: string): Promise<T> {
   await limiter.acquire();
   const res = await fetch(url);
@@ -72,7 +94,7 @@ export async function fetchHistoricalOdds(date: string): Promise<OddsEvent[]> {
     regions: "us",
     markets: "spreads,totals,h2h",
     oddsFormat: "american",
-    date: `${date}T12:00:00Z`,
+    date: getHistoricalSnapshotIsoUtc(date),
   });
   const res = await fetchJson<{ data: OddsEvent[] }>(
     `${BASE_URL}/historical/sports/basketball_nba/odds?${params.toString()}`,
@@ -83,7 +105,7 @@ export async function fetchHistoricalOdds(date: string): Promise<OddsEvent[]> {
 export async function fetchHistoricalEvents(date: string): Promise<Array<{ id: string; home_team: string; away_team: string; commence_time: string }>> {
   const params = new URLSearchParams({
     apiKey: getApiKey(),
-    date: `${date}T12:00:00Z`,
+    date: getHistoricalSnapshotIsoUtc(date),
   });
   const res = await fetchJson<{ data: Array<{ id: string; home_team: string; away_team: string; commence_time: string }> }>(
     `${BASE_URL}/historical/sports/basketball_nba/events?${params.toString()}`,
@@ -101,7 +123,7 @@ export async function fetchHistoricalEventOdds(
     regions: "us",
     markets,
     oddsFormat: "american",
-    date: `${date}T12:00:00Z`,
+    date: getHistoricalSnapshotIsoUtc(date),
   });
   try {
     const res = await fetchJson<{ data: OddsEvent }>(

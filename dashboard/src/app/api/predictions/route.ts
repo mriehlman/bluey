@@ -5,6 +5,18 @@ import { GAME_EVENT_CATALOG } from "../../../../../src/features/gameEventCatalog
 import type { GameEventContext } from "../../../../../src/features/gameEventCatalog";
 import { loadMetaModel, scoreMetaModel } from "../../../../../src/patterns/metaModelCore";
 import { LEDGER_TUNING, PREDICTION_TUNING } from "../../../../../src/config/tuning";
+import {
+  buildPregameTokenSet,
+  loadLatestFeatureBins,
+  matchDeployedPatterns,
+  type DeployedPatternV2,
+} from "../../../../../src/features/v2PregameMatching";
+import {
+  evaluateSuggestedPlayQualityGate as evaluateSuggestedPlayQualityGateShared,
+  isOutcomeActionableForMarket as isOutcomeActionableForMarketShared,
+  outcomeDedupFamily as outcomeDedupFamilyShared,
+  selectDiversifiedBetPicks as selectDiversifiedBetPicksShared,
+} from "../../../../../src/features/productionPickSelection";
 
 export const dynamic = "force-dynamic";
 
@@ -37,16 +49,6 @@ interface TeamSnapshot {
   streak: number;
   lastGameDate: Date | null;
 }
-
-type DiscoveryV2Pattern = {
-  id: string;
-  outcomeType: string;
-  conditions: string[];
-  posteriorHitRate: number;
-  edge: number;
-  score: number;
-  n: number;
-};
 
 type OutcomeEval = {
   hit: boolean;
@@ -273,103 +275,6 @@ function isGenericPlayerOutcome(outcomeType: string): boolean {
     base === "PLAYER_DOUBLE_DOUBLE" ||
     base === "PLAYER_10_PLUS_REBOUNDS"
   );
-}
-
-function parseTotalThresholdOutcome(
-  outcomeType: string,
-): { direction: "over" | "under"; line: number } | null {
-  const base = outcomeType.replace(/:.*$/, "");
-  const over = base.match(/^TOTAL_OVER_(\d+(?:\.\d+)?)$/);
-  if (over) {
-    return { direction: "over", line: Number(over[1]) };
-  }
-  const under = base.match(/^TOTAL_UNDER_(\d+(?:\.\d+)?)$/);
-  if (under) {
-    return { direction: "under", line: Number(under[1]) };
-  }
-  return null;
-}
-
-function outcomeDedupFamily(outcomeType: string): string {
-  const base = outcomeType.replace(/:.*$/, "");
-  if (
-    base === "PLAYER_10_PLUS_ASSISTS" ||
-    base === "HOME_TOP_ASSIST_8_PLUS" ||
-    base === "HOME_TOP_ASSIST_10_PLUS" ||
-    base === "AWAY_TOP_ASSIST_8_PLUS" ||
-    base === "AWAY_TOP_ASSIST_10_PLUS" ||
-    base === "HOME_TOP_PLAYMAKER_8_PLUS" ||
-    base === "HOME_TOP_PLAYMAKER_10_PLUS" ||
-    base === "AWAY_TOP_PLAYMAKER_8_PLUS" ||
-    base === "AWAY_TOP_PLAYMAKER_10_PLUS"
-  ) {
-    return "ASSISTS_LADDER";
-  }
-  if (
-    base === "PLAYER_10_PLUS_REBOUNDS" ||
-    base === "HOME_TOP_REBOUNDER_10_PLUS" ||
-    base === "HOME_TOP_REBOUNDER_12_PLUS" ||
-    base === "AWAY_TOP_REBOUNDER_10_PLUS" ||
-    base === "AWAY_TOP_REBOUNDER_12_PLUS"
-  ) {
-    return "REBOUNDS_LADDER";
-  }
-  if (
-    base === "PLAYER_30_PLUS" ||
-    base === "PLAYER_40_PLUS" ||
-    base === "HOME_TOP_SCORER_25_PLUS" ||
-    base === "HOME_TOP_SCORER_30_PLUS" ||
-    base === "AWAY_TOP_SCORER_25_PLUS" ||
-    base === "AWAY_TOP_SCORER_30_PLUS"
-  ) {
-    return "POINTS_LADDER";
-  }
-  return base;
-}
-
-function parsePlayerThresholdOutcome(
-  outcomeType: string,
-): { stat: "ppg" | "rpg" | "apg"; line: number } | null {
-  const base = outcomeType.replace(/:.*$/, "");
-  if (
-    base === "PLAYER_10_PLUS_ASSISTS" ||
-    base === "HOME_TOP_ASSIST_10_PLUS" ||
-    base === "AWAY_TOP_ASSIST_10_PLUS" ||
-    base === "HOME_TOP_PLAYMAKER_10_PLUS" ||
-    base === "AWAY_TOP_PLAYMAKER_10_PLUS"
-  ) {
-    return { stat: "apg", line: 10 };
-  }
-  if (
-    base === "HOME_TOP_ASSIST_8_PLUS" ||
-    base === "AWAY_TOP_ASSIST_8_PLUS" ||
-    base === "HOME_TOP_PLAYMAKER_8_PLUS" ||
-    base === "AWAY_TOP_PLAYMAKER_8_PLUS"
-  ) {
-    return { stat: "apg", line: 8 };
-  }
-  if (
-    base === "PLAYER_10_PLUS_REBOUNDS" ||
-    base === "HOME_TOP_REBOUNDER_10_PLUS" ||
-    base === "AWAY_TOP_REBOUNDER_10_PLUS"
-  ) {
-    return { stat: "rpg", line: 10 };
-  }
-  if (base === "HOME_TOP_REBOUNDER_12_PLUS" || base === "AWAY_TOP_REBOUNDER_12_PLUS") {
-    return { stat: "rpg", line: 12 };
-  }
-  if (
-    base === "PLAYER_30_PLUS" ||
-    base === "HOME_TOP_SCORER_30_PLUS" ||
-    base === "AWAY_TOP_SCORER_30_PLUS"
-  ) {
-    return { stat: "ppg", line: 30 };
-  }
-  if (base === "PLAYER_40_PLUS") return { stat: "ppg", line: 40 };
-  if (base === "HOME_TOP_SCORER_25_PLUS" || base === "AWAY_TOP_SCORER_25_PLUS") {
-    return { stat: "ppg", line: 25 };
-  }
-  return null;
 }
 
 function parsePlayerOutcomeRequirement(
@@ -688,85 +593,6 @@ function buildTargetOutcomeExplanation(
   return `${target.name}, ${actual} ${req.label} (needed ${req.line}+)`;
 }
 
-function isOutcomeActionableForMarket(
-  outcomeType: string,
-  odds?: { spreadHome: number | null; totalOver: number | null } | null,
-  posteriorHitRate?: number,
-): boolean {
-  const totalThreshold = parseTotalThresholdOutcome(outcomeType);
-  if (!totalThreshold) {
-    return true;
-  }
-
-  // Threshold total outcomes should be reasonably close to current market total.
-  const marketTotal = odds?.totalOver;
-  if (marketTotal == null) return false;
-
-  const delta = totalThreshold.line - marketTotal;
-  const withinBand =
-    totalThreshold.direction === "over"
-      ? delta <= 8
-      : delta >= -8;
-  if (!withinBand) return false;
-
-  // Extra guard against low absolute-hit "looks good vs baseline" outcomes.
-  if (posteriorHitRate != null && posteriorHitRate < 0.5) {
-    return false;
-  }
-
-  return true;
-}
-
-type BetFamily = "PLAYER" | "TOTAL" | "SPREAD" | "MONEYLINE" | "OTHER";
-
-function betFamilyForOutcome(outcomeType: string): BetFamily {
-  const base = outcomeType.replace(/:.*$/, "");
-  if (
-    base.startsWith("PLAYER_") ||
-    base.startsWith("HOME_TOP_") ||
-    base.startsWith("AWAY_TOP_")
-  ) {
-    return "PLAYER";
-  }
-  if (
-    base.startsWith("TOTAL_") ||
-    base === "OVER_HIT" ||
-    base === "UNDER_HIT"
-  ) {
-    return "TOTAL";
-  }
-  if (base.includes("COVERED")) {
-    return "SPREAD";
-  }
-  if (base === "HOME_WIN" || base === "AWAY_WIN") {
-    return "MONEYLINE";
-  }
-  return "OTHER";
-}
-
-function gateThresholdsForFamily(family: BetFamily): {
-  minPosterior: number;
-  minMeta: number;
-  minEv: number;
-} {
-  if (family === "PLAYER") return PREDICTION_TUNING.familyGates.PLAYER;
-  if (family === "TOTAL") return PREDICTION_TUNING.familyGates.TOTAL;
-  if (family === "SPREAD") return PREDICTION_TUNING.familyGates.SPREAD;
-  if (family === "MONEYLINE") return PREDICTION_TUNING.familyGates.MONEYLINE;
-  return PREDICTION_TUNING.familyGates.OTHER;
-}
-
-type GateRejectReason =
-  | "posterior_below_min"
-  | "meta_below_min"
-  | "player_target_stat_mismatch"
-  | "player_target_baseline_too_low"
-  | "no_market_pick"
-  | "ev_below_min"
-  | "ev_too_negative"
-  | "edge_too_low"
-  | "odds_too_negative";
-
 type GateStageStats = {
   considered: number;
   passed: number;
@@ -797,7 +623,7 @@ function newGateDiagnostics(): GateDiagnostics {
 
 function recordGateEval(
   stage: GateStageStats,
-  evalResult: { pass: boolean; reason?: GateRejectReason },
+  evalResult: { pass: boolean; reason?: string },
 ): void {
   stage.considered += 1;
   if (evalResult.pass) {
@@ -809,87 +635,42 @@ function recordGateEval(
   stage.reasons[reason] = (stage.reasons[reason] ?? 0) + 1;
 }
 
-function evaluateSuggestedPlayQualityGate(play: {
-  outcomeType: string;
-  posteriorHitRate: number;
-  metaScore: number | null;
-  playerTarget?: { stat: "ppg" | "rpg" | "apg"; statValue: number } | null;
-  marketPick?: SuggestedMarketPick | null;
-  requireMarketLine?: boolean;
-}): { pass: boolean; reason?: GateRejectReason } {
-  const family = betFamilyForOutcome(play.outcomeType);
-  const gates = gateThresholdsForFamily(family);
-  if (play.posteriorHitRate < gates.minPosterior) {
-    return { pass: false, reason: "posterior_below_min" };
-  }
-  if (play.metaScore != null && play.metaScore < gates.minMeta) {
-    return { pass: false, reason: "meta_below_min" };
-  }
-
-  // Guard against implausible target ladders (e.g. 10+ assists on a 4.3 APG target).
-  const threshold = parsePlayerThresholdOutcome(play.outcomeType);
-  if (threshold && play.playerTarget) {
-    if (play.playerTarget.stat !== threshold.stat) {
-      return { pass: false, reason: "player_target_stat_mismatch" };
-    }
-    const minBaseline = threshold.line * 0.65;
-    if (play.playerTarget.statValue < minBaseline) {
-      return { pass: false, reason: "player_target_baseline_too_low" };
-    }
-  }
-
-  const requireMarketLine = play.requireMarketLine ?? true;
-  // For live-bet suggestions, require real market pricing and a positive EV buffer.
-  if (requireMarketLine) {
-    if (!play.marketPick) return { pass: false, reason: "no_market_pick" };
-    if (play.marketPick.ev < gates.minEv) return { pass: false, reason: "ev_below_min" };
-    // Allow modestly negative edge so posterior/meta gates can drive bootstrap selection.
-    if (play.marketPick.edge < -0.03) return { pass: false, reason: "edge_too_low" };
-    if (play.marketPick.overPrice < PREDICTION_TUNING.maxNegativeAmericanOdds) {
-      return { pass: false, reason: "odds_too_negative" };
-    }
-  } else if (play.marketPick) {
-    // If market exists, still reject strongly negative EV and bad odds.
-    if (play.marketPick.ev < -0.01) return { pass: false, reason: "ev_too_negative" };
-    if (play.marketPick.overPrice < PREDICTION_TUNING.maxNegativeAmericanOdds) {
-      return { pass: false, reason: "odds_too_negative" };
-    }
-  }
-
-  return { pass: true };
+function isMissingTableError(err: unknown): boolean {
+  const e = err as { code?: string; meta?: { code?: string } };
+  return e?.code === "P2021" || (e?.code === "P2010" && e?.meta?.code === "42P01");
 }
 
-function selectDiversifiedBetPicks<T extends {
-  outcomeType: string;
-  marketPick?: SuggestedMarketPick | null;
-  metaScore?: number | null;
-  posteriorHitRate: number;
-  confidence: number;
-}>(
-  plays: T[],
-  maxPicks: number,
-): T[] {
-  const selected: T[] = [];
-  const usedFamilies = new Set<string>();
-  const usedDedupFamilies = new Set<string>();
-  const ranked = [...plays].sort(
-    (a, b) =>
-      (b.marketPick?.ev ?? -999) - (a.marketPick?.ev ?? -999) ||
-      (b.metaScore ?? -1) - (a.metaScore ?? -1) ||
-      b.posteriorHitRate - a.posteriorHitRate ||
-      b.confidence - a.confidence,
-  );
-  for (const p of ranked) {
-    const family = betFamilyForOutcome(p.outcomeType);
-    const dedupFamily = outcomeDedupFamily(p.outcomeType);
-    if (usedFamilies.has(family)) continue;
-    if (usedDedupFamilies.has(dedupFamily)) continue;
-    selected.push(p);
-    usedFamilies.add(family);
-    usedDedupFamilies.add(dedupFamily);
-    if (selected.length >= maxPicks) break;
+async function loadDeployedV2PatternsSafe(): Promise<DeployedPatternV2[]> {
+  try {
+    return await prisma.$queryRawUnsafe<DeployedPatternV2[]>(
+      `SELECT "id","outcomeType","conditions","posteriorHitRate","edge","score","n"
+       FROM "PatternV2"
+       WHERE "status" = 'deployed'
+       ORDER BY "score" DESC`,
+    );
+  } catch (err) {
+    if (isMissingTableError(err)) {
+      console.warn(
+        "PatternV2 table is missing; continuing without v2 deployed matches.",
+      );
+      return [];
+    }
+    throw err;
   }
-  return selected;
+}
+
+async function loadFeatureBinsSafe() {
+  try {
+    return await loadLatestFeatureBins(prisma);
+  } catch (err) {
+    if (isMissingTableError(err)) {
+      console.warn(
+        "FeatureBin table is missing; continuing with empty feature bins.",
+      );
+      return new Map();
+    }
+    throw err;
+  }
 }
 
 export async function GET(req: Request) {
@@ -1010,9 +791,10 @@ export async function GET(req: Request) {
     playerPropsByGame.get(r.gameId)?.push(r);
   }
 
-  const discoveryV2ByGame = await getDiscoveryV2MatchesByGame(
-    games.map((g) => g.id),
-  );
+  const [deployedV2Patterns, featureBins] = await Promise.all([
+    loadDeployedV2PatternsSafe(),
+    loadFeatureBinsSafe(),
+  ]);
 
   const teamIds = [...new Set(games.flatMap((g) => [g.homeTeamId, g.awayTeamId]))];
   const teamSnapshots = await computeTeamSnapshots(season, targetDate, teamIds);
@@ -1210,13 +992,30 @@ export async function GET(req: Request) {
     const gameOutcomeMap = outcomesByGame.get(game.id);
     const gamePlayerCtx = playerContextByGame.get(game.id);
     const propsForGame = playerPropsByGame.get(game.id) ?? [];
-    const discoveryV2RawMatches = discoveryV2ByGame.get(game.id) ?? [];
+    const pregameTokenSet = buildPregameTokenSet({
+      season,
+      context: gameEventContext.context,
+      odds: consensus
+        ? {
+            spreadHome: consensus.spreadHome ?? null,
+            totalOver: consensus.totalOver ?? null,
+            mlHome: consensus.mlHome ?? null,
+            mlAway: consensus.mlAway ?? null,
+          }
+        : null,
+      bins: featureBins,
+    });
+    const discoveryV2RawMatches = matchDeployedPatterns(
+      pregameTokenSet,
+      deployedV2Patterns,
+      8,
+    );
     // Reduce "same pick every game" behavior by suppressing ultra-generic single-condition matches.
     const discoveryV2Matches = discoveryV2RawMatches.filter(
       (p) => !isLowSpecificityPattern(p.conditions ?? []),
     );
     const actionableDiscoveryV2Matches = discoveryV2Matches.filter((p) =>
-      isOutcomeActionableForMarket(p.outcomeType, consensus ?? null, p.posteriorHitRate),
+      isOutcomeActionableForMarketShared(p.outcomeType, consensus ?? null, p.posteriorHitRate),
     );
     const nonGenericV2Matches = discoveryV2Matches.filter(
       (p) => !isGenericPlayerOutcome(p.outcomeType),
@@ -1484,7 +1283,7 @@ export async function GET(req: Request) {
     >();
     for (const p of curatedDiscoveryV2Matches) {
       const target = pickV2PlayerTarget(p.outcomeType);
-      const dedupKey = `${outcomeDedupFamily(p.outcomeType)}|${target?.id ?? "none"}`;
+      const dedupKey = `${outcomeDedupFamilyShared(p.outcomeType)}|${target?.id ?? "none"}`;
       const existing = suggestedPlayMap.get(dedupKey);
       if (!existing) {
         suggestedPlayMap.set(dedupKey, {
@@ -1555,7 +1354,7 @@ export async function GET(req: Request) {
           b.posteriorHitRate - a.posteriorHitRate,
       );
     const qualitySuggestedPlays = rankedSuggestedPlays.filter((p) => {
-      const evalResult = evaluateSuggestedPlayQualityGate({
+      const evalResult = evaluateSuggestedPlayQualityGateShared({
         ...p,
         requireMarketLine: false,
       });
@@ -1563,7 +1362,7 @@ export async function GET(req: Request) {
       return evalResult.pass;
     });
     const bettableSuggestedPlays = qualitySuggestedPlays.filter((p) => {
-      const evalResult = evaluateSuggestedPlayQualityGate({
+      const evalResult = evaluateSuggestedPlayQualityGateShared({
         ...p,
         requireMarketLine: true,
       });
@@ -1572,11 +1371,11 @@ export async function GET(req: Request) {
     });
     const suggestedBetPicks =
       bettableSuggestedPlays.length > 0
-        ? selectDiversifiedBetPicks(bettableSuggestedPlays, maxBetPicksPerGame)
+        ? selectDiversifiedBetPicksShared(bettableSuggestedPlays, maxBetPicksPerGame)
         : [];
     const suggestedPlays =
       includeDebugPlays && qualitySuggestedPlays.length > 0
-        ? selectDiversifiedBetPicks(qualitySuggestedPlays, Math.max(3, maxBetPicksPerGame))
+        ? selectDiversifiedBetPicksShared(qualitySuggestedPlays, Math.max(3, maxBetPicksPerGame))
         : [];
 
     return {
@@ -1943,52 +1742,6 @@ async function shouldUpsertLedgerSnapshot(
   if (dateStr >= today) return true; // today/future can change as markets/results update
   const hasRows = await hasLedgerRowsForDate(dateStr);
   return !hasRows; // past dates are immutable once captured
-}
-
-function matchesConditions(tokens: Set<string>, conditions: string[]): boolean {
-  for (const c of conditions) {
-    if (c.startsWith("!")) {
-      if (tokens.has(c.slice(1))) return false;
-    } else if (!tokens.has(c)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-async function getDiscoveryV2MatchesByGame(
-  gameIds: string[],
-): Promise<Map<string, DiscoveryV2Pattern[]>> {
-  const out = new Map<string, DiscoveryV2Pattern[]>();
-  for (const id of gameIds) out.set(id, []);
-  if (gameIds.length === 0) return out;
-
-  const inClause = gameIds.map((id) => `'${sqlEsc(id)}'`).join(",");
-  const tokenRows = await prisma.$queryRawUnsafe<Array<{ gameId: string; tokens: string[] }>>(
-    `SELECT "gameId", "tokens" FROM "GameFeatureToken" WHERE "gameId" IN (${inClause})`,
-  );
-  const patterns = await prisma.$queryRawUnsafe<DiscoveryV2Pattern[]>(
-    `SELECT "id","outcomeType","conditions","posteriorHitRate","edge","score","n"
-     FROM "PatternV2"
-     WHERE "status" = 'deployed'
-     ORDER BY "score" DESC`,
-  );
-  const tokensByGame = new Map(tokenRows.map((r) => [r.gameId, new Set(r.tokens ?? [])]));
-
-  for (const p of patterns) {
-    for (const gameId of gameIds) {
-      const tokens = tokensByGame.get(gameId);
-      if (!tokens) continue;
-      if (!matchesConditions(tokens, p.conditions ?? [])) continue;
-      out.get(gameId)?.push(p);
-    }
-  }
-  for (const gameId of gameIds) {
-    const list = out.get(gameId) ?? [];
-    list.sort((a, b) => b.score - a.score || b.edge - a.edge);
-    out.set(gameId, list.slice(0, 8));
-  }
-  return out;
 }
 
 async function computePlayerContextFallback(

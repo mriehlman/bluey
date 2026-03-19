@@ -1,0 +1,170 @@
+import type { GameContext } from "@prisma/client";
+
+export type FeatureBinDef = {
+  kind: "quantile" | "fixed";
+  labels: string[];
+  edges: number[];
+};
+
+export type DeployedPatternV2 = {
+  id: string;
+  outcomeType: string;
+  conditions: string[];
+  posteriorHitRate: number;
+  edge: number;
+  score: number;
+  n: number;
+};
+
+export type OddsLite = {
+  spreadHome?: number | null;
+  totalOver?: number | null;
+  mlHome?: number | null;
+  mlAway?: number | null;
+};
+
+function bucketValue(value: number, def: FeatureBinDef): string {
+  for (let i = 0; i < def.edges.length; i++) {
+    if (value <= def.edges[i]) return def.labels[i] ?? `B${i + 1}`;
+  }
+  return def.labels[def.labels.length - 1] ?? `B${def.edges.length + 1}`;
+}
+
+function matchesConditions(tokens: Set<string>, conditions: string[]): boolean {
+  for (const c of conditions ?? []) {
+    if (!c) continue;
+    if (c.startsWith("!")) {
+      if (tokens.has(c.slice(1))) return false;
+    } else if (!tokens.has(c)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export async function loadLatestFeatureBins(
+  prisma: {
+    $queryRawUnsafe: <T>(query: string) => Promise<T>;
+  },
+): Promise<Map<string, FeatureBinDef>> {
+  const rows = await prisma.$queryRawUnsafe<Array<{ featureName: string; binEdges: unknown }>>(
+    `SELECT DISTINCT ON ("featureName") "featureName", "binEdges"
+     FROM "FeatureBin"
+     ORDER BY "featureName", "createdAt" DESC`,
+  );
+  const out = new Map<string, FeatureBinDef>();
+  for (const row of rows) {
+    const parsed = row.binEdges as FeatureBinDef;
+    if (!parsed || !Array.isArray(parsed.labels) || !Array.isArray(parsed.edges)) continue;
+    out.set(row.featureName, parsed);
+  }
+  return out;
+}
+
+export function buildPregameTokenSet(input: {
+  season: number;
+  context: GameContext;
+  odds: OddsLite | null;
+  bins: Map<string, FeatureBinDef>;
+}): Set<string> {
+  const { season, context, odds, bins } = input;
+  const tokens = new Set<string>();
+  tokens.add(`season:${season}`);
+
+  const spreadHome = odds?.spreadHome ?? null;
+  const totalLine = odds?.totalOver ?? null;
+  const mlHome = odds?.mlHome ?? null;
+  const mlAway = odds?.mlAway ?? null;
+
+  if (spreadHome != null && Number.isFinite(spreadHome)) {
+    const absDef = bins.get("spread_abs");
+    const homeDef = bins.get("spread_home");
+    if (absDef) tokens.add(`spread_abs:${bucketValue(Math.abs(spreadHome), absDef)}`);
+    if (homeDef) tokens.add(`spread_home:${bucketValue(spreadHome, homeDef)}`);
+  }
+  if (totalLine != null && Number.isFinite(totalLine)) {
+    const def = bins.get("total_line");
+    if (def) tokens.add(`total_line:${bucketValue(totalLine, def)}`);
+  }
+  if (mlHome != null && Number.isFinite(mlHome)) {
+    const def = bins.get("ml_home");
+    if (def) tokens.add(`ml_home:${bucketValue(mlHome, def)}`);
+  }
+  if (mlAway != null && Number.isFinite(mlAway)) {
+    const def = bins.get("ml_away");
+    if (def) tokens.add(`ml_away:${bucketValue(mlAway, def)}`);
+  }
+
+  const addQ = (featureName: string, value: number | null | undefined) => {
+    if (value == null || !Number.isFinite(value)) return;
+    const def = bins.get(featureName);
+    if (!def) return;
+    tokens.add(`${featureName}:${bucketValue(value, def)}`);
+  };
+
+  addQ("home_oppg", context.homeOppg);
+  addQ("away_oppg", context.awayOppg);
+  addQ("home_ppg", context.homePpg);
+  addQ("away_ppg", context.awayPpg);
+  addQ("home_rank_def", context.homeRankDef);
+  addQ("away_rank_def", context.awayRankDef);
+  addQ("home_rank_off", context.homeRankOff);
+  addQ("away_rank_off", context.awayRankOff);
+  addQ("home_rest_days", context.homeRestDays);
+  addQ("away_rest_days", context.awayRestDays);
+  addQ("home_net_rating", Number.isFinite(context.homePpg) && Number.isFinite(context.homeOppg) ? context.homePpg - context.homeOppg : null);
+  addQ("away_net_rating", Number.isFinite(context.awayPpg) && Number.isFinite(context.awayOppg) ? context.awayPpg - context.awayOppg : null);
+  addQ("home_injury_out", context.homeInjuryOutCount);
+  addQ("away_injury_out", context.awayInjuryOutCount);
+  addQ(
+    "injury_out_delta",
+    Number.isFinite(context.homeInjuryOutCount ?? null) && Number.isFinite(context.awayInjuryOutCount ?? null)
+      ? (context.homeInjuryOutCount ?? 0) - (context.awayInjuryOutCount ?? 0)
+      : null,
+  );
+  addQ("home_injury_questionable", context.homeInjuryQuestionableCount);
+  addQ("away_injury_questionable", context.awayInjuryQuestionableCount);
+  addQ(
+    "injury_questionable_delta",
+    Number.isFinite(context.homeInjuryQuestionableCount ?? null) && Number.isFinite(context.awayInjuryQuestionableCount ?? null)
+      ? (context.homeInjuryQuestionableCount ?? 0) - (context.awayInjuryQuestionableCount ?? 0)
+      : null,
+  );
+  addQ("home_lineup_certainty", context.homeLineupCertainty);
+  addQ("away_lineup_certainty", context.awayLineupCertainty);
+  addQ(
+    "lineup_certainty_delta",
+    Number.isFinite(context.homeLineupCertainty ?? null) && Number.isFinite(context.awayLineupCertainty ?? null)
+      ? (context.homeLineupCertainty ?? 0) - (context.awayLineupCertainty ?? 0)
+      : null,
+  );
+  addQ("home_late_scratch_risk", context.homeLateScratchRisk);
+  addQ("away_late_scratch_risk", context.awayLateScratchRisk);
+  addQ(
+    "late_scratch_risk_delta",
+    Number.isFinite(context.homeLateScratchRisk ?? null) && Number.isFinite(context.awayLateScratchRisk ?? null)
+      ? (context.homeLateScratchRisk ?? 0) - (context.awayLateScratchRisk ?? 0)
+      : null,
+  );
+  addQ("home_is_b2b", context.homeIsB2b ? 1 : 0);
+  addQ("away_is_b2b", context.awayIsB2b ? 1 : 0);
+  tokens.add(`home_is_b2b:${context.homeIsB2b ? "true" : "false"}`);
+  tokens.add(`away_is_b2b:${context.awayIsB2b ? "true" : "false"}`);
+
+  return tokens;
+}
+
+export function matchDeployedPatterns(
+  tokenSet: Set<string>,
+  deployedPatterns: DeployedPatternV2[],
+  limit = 8,
+): DeployedPatternV2[] {
+  const out: DeployedPatternV2[] = [];
+  for (const p of deployedPatterns) {
+    if (!matchesConditions(tokenSet, p.conditions ?? [])) continue;
+    out.push(p);
+  }
+  out.sort((a, b) => b.score - a.score || b.edge - a.edge);
+  return out.slice(0, limit);
+}
+

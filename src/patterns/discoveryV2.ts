@@ -168,6 +168,24 @@ function featureExtractors(): Record<string, FeatureExtractor> {
     away_rest_days: (r) => r.context?.awayRestDays ?? null,
     home_streak: (r) => r.context?.homeStreak ?? null,
     away_streak: (r) => r.context?.awayStreak ?? null,
+    home_injury_out: (r) => r.context?.homeInjuryOutCount ?? null,
+    away_injury_out: (r) => r.context?.awayInjuryOutCount ?? null,
+    injury_out_delta: (r) =>
+      r.context ? (r.context.homeInjuryOutCount ?? 0) - (r.context.awayInjuryOutCount ?? 0) : null,
+    home_injury_questionable: (r) => r.context?.homeInjuryQuestionableCount ?? null,
+    away_injury_questionable: (r) => r.context?.awayInjuryQuestionableCount ?? null,
+    injury_questionable_delta: (r) =>
+      r.context
+        ? (r.context.homeInjuryQuestionableCount ?? 0) - (r.context.awayInjuryQuestionableCount ?? 0)
+        : null,
+    home_lineup_certainty: (r) => r.context?.homeLineupCertainty ?? null,
+    away_lineup_certainty: (r) => r.context?.awayLineupCertainty ?? null,
+    lineup_certainty_delta: (r) =>
+      r.context ? (r.context.homeLineupCertainty ?? 0) - (r.context.awayLineupCertainty ?? 0) : null,
+    home_late_scratch_risk: (r) => r.context?.homeLateScratchRisk ?? null,
+    away_late_scratch_risk: (r) => r.context?.awayLateScratchRisk ?? null,
+    late_scratch_risk_delta: (r) =>
+      r.context ? (r.context.homeLateScratchRisk ?? 0) - (r.context.awayLateScratchRisk ?? 0) : null,
     home_net_rating: (r) => (r.context ? r.context.homePpg - r.context.homeOppg : null),
     away_net_rating: (r) => (r.context ? r.context.awayPpg - r.context.awayOppg : null),
     spread_home: (r) => getConsensusOdds(r)?.spreadHome ?? null,
@@ -524,19 +542,37 @@ function bhPassSet(items: Array<{ id: string; pValue: number }>, alpha: number):
   return new Set(sorted.slice(0, maxIdx + 1).map((x) => x.id));
 }
 
+/**
+ * Builds a season weight function: most recent season = 1.0, oldest = minWeight (e.g. 0.4).
+ * Linear interpolation between min and max season.
+ */
+function makeSeasonWeightFn(
+  minSeason: number,
+  maxSeason: number,
+  minWeight: number,
+): (season: number) => number {
+  const span = Math.max(1, maxSeason - minSeason);
+  return (season: number) => {
+    const t = (season - minSeason) / span;
+    return minWeight + (1 - minWeight) * Math.max(0, Math.min(1, t));
+  };
+}
+
 function computeStats(
   rows: TokenizedGame[],
   outcomeType: string,
   conditions: string[],
   baselineRate: number,
   priorStrength: number,
+  seasonWeight?: (season: number) => number,
 ): SplitStats {
   let n = 0;
   let wins = 0;
   for (const r of rows) {
     if (!matchesConditions(r.tokens, conditions)) continue;
-    n++;
-    if (r.outcomes.has(outcomeType)) wins++;
+    const w = seasonWeight ? seasonWeight(r.season) : 1;
+    n += w;
+    if (r.outcomes.has(outcomeType)) wins += w;
   }
   const rawHitRate = n > 0 ? wins / n : 0;
   const priorBase = clampProb(baselineRate);
@@ -555,9 +591,10 @@ function computeWeightedStats(
   baselineRate: number,
   priorStrength: number,
   halfLifeDays: number,
+  seasonWeight?: (season: number) => number,
 ): SplitStats {
   if (rows.length === 0) {
-    return computeStats(rows, outcomeType, conditions, baselineRate, priorStrength);
+    return computeStats(rows, outcomeType, conditions, baselineRate, priorStrength, seasonWeight);
   }
   const anchor = rows.reduce((mx, r) => Math.max(mx, r.date.getTime()), 0);
   const lambda = Math.log(2) / Math.max(1, halfLifeDays);
@@ -834,6 +871,12 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
     0,
     Number(flags["forward-stability-weight"] ?? DISCOVERY_DEFAULTS.forwardStabilityWeight),
   );
+  const seasonWeightEnabled =
+    (flags["season-weight"] ?? String(DISCOVERY_DEFAULTS.seasonWeightEnabled)) !== "false";
+  const seasonWeightMin = Math.max(
+    0.1,
+    Math.min(1, Number(flags["season-weight-min"] ?? DISCOVERY_DEFAULTS.seasonWeightMin)),
+  );
 
   console.log("\n=== Discover Patterns v2 ===\n");
   const games = await loadTokenizedGames();
@@ -860,6 +903,21 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
       `Note: min-loso-folds-pass (${minLosoFoldsPass}) > folds (${splits.losoFolds.length}); using ${effectiveMinLosoFolds}.\n`,
     );
   }
+  const allSeasons = [...new Set(games.map((r) => r.season))].sort((a, b) => a - b);
+  const minSeason = allSeasons[0] ?? 2023;
+  const maxSeason = allSeasons[allSeasons.length - 1] ?? 2025;
+  const seasonWeight =
+    seasonWeightEnabled && allSeasons.length > 1
+      ? makeSeasonWeightFn(minSeason, maxSeason, seasonWeightMin)
+      : undefined;
+  if (seasonWeight != null) {
+    console.log(
+      `Season weighting: enabled (min=${seasonWeightMin}, ${minSeason}..${maxSeason}), recent seasons upweighted.\n`,
+    );
+  }
+  // Note: Discovery uses GameFeatureToken from build:quantized-game-features (default from-season 2023).
+  // To use 2021+ game-odds data, run build:day-bundles + ingest:day-bundles for that range first, then
+  // build:game-context, build:game-events, build:feature-bins, build:quantized-game-features --from-season 2021.
   if (splits.mode === "loso") {
     const seasons = splits.losoFolds.map((f) => f.season).join(", ");
     console.log(
@@ -933,7 +991,14 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
     const forwardBase =
       splits.forward.filter((r) => r.outcomes.has(c.outcomeType)).length / Math.max(1, splits.forward.length);
 
-    const train = computeStats(splits.train, c.outcomeType, c.conditions, trainBase, priorStrength);
+    const train = computeStats(
+      splits.train,
+      c.outcomeType,
+      c.conditions,
+      trainBase,
+      priorStrength,
+      seasonWeight,
+    );
     if (train.n < minLeaf) continue;
     const trainRecency = computeWeightedStats(
       splits.train,
@@ -942,8 +1007,16 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
       trainBase,
       priorStrength,
       recencyHalfLifeDays,
+      seasonWeight,
     );
-    const forward = computeStats(splits.forward, c.outcomeType, c.conditions, forwardBase, priorStrength);
+    const forward = computeStats(
+      splits.forward,
+      c.outcomeType,
+      c.conditions,
+      forwardBase,
+      priorStrength,
+      seasonWeight,
+    );
     if (forward.n < minForwardSamples) continue;
     if (useHitRateObjective) {
       if (forward.posteriorHitRate < minForwardPosteriorDiscovery) continue;
@@ -957,7 +1030,14 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
       const valRows = splits.val;
       const valBase =
         valRows.filter((r) => r.outcomes.has(c.outcomeType)).length / Math.max(1, valRows.length);
-      val = computeStats(valRows, c.outcomeType, c.conditions, valBase, priorStrength);
+      val = computeStats(
+        valRows,
+        c.outcomeType,
+        c.conditions,
+        valBase,
+        priorStrength,
+        seasonWeight,
+      );
       valOk = useHitRateObjective
         ? val.n >= minValSamples && val.posteriorHitRate >= minValPosteriorDiscovery
         : val.n >= minValSamples && val.edge >= minValEdge;
@@ -967,7 +1047,16 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
         const foldBase =
           fold.valRows.filter((r) => r.outcomes.has(c.outcomeType)).length /
           Math.max(1, fold.valRows.length);
-        losoFoldStats.push(computeStats(fold.valRows, c.outcomeType, c.conditions, foldBase, priorStrength));
+        losoFoldStats.push(
+          computeStats(
+            fold.valRows,
+            c.outcomeType,
+            c.conditions,
+            foldBase,
+            priorStrength,
+            seasonWeight,
+          ),
+        );
       }
       const foldsWithPositiveSignal = losoFoldStats.filter(
         (s) =>

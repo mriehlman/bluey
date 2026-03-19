@@ -43,6 +43,8 @@ export const DISCOVERY_DEFAULTS = {
   recencyHalfLifeDays: 90,
   lowNPenaltyK: 120,
   forwardStabilityWeight: 12,
+  seasonWeightEnabled: true,
+  seasonWeightMin: 0.4,
 } as const;
 
 export const VALIDATION_DEFAULTS = {

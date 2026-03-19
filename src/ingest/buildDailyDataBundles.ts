@@ -26,6 +26,13 @@ interface DayDataBundle {
     oddsHistorical: { available: boolean; eventCount: number; sameDayEventCount: number };
     oddsLive: { available: boolean; eventCount: number };
     playerProps: { available: boolean; eventCount: number; source: string };
+    injuries: {
+      source: string;
+      earlyAvailable: boolean;
+      earlyRowCount: number;
+      finalAvailable: boolean;
+      finalRowCount: number;
+    };
   };
   games: Array<{ season: string; file: string; data: RawGameFile }>;
   odds: {
@@ -37,6 +44,11 @@ interface DayDataBundle {
     source: string;
     eventCount: number;
     events: JsonValue[];
+  };
+  injuries: {
+    source: string;
+    early: JsonValue | null;
+    final: JsonValue | null;
   };
 }
 
@@ -126,6 +138,39 @@ function loadOddsFileEvents(filePath: string): JsonValue[] {
   return Array.isArray(parsed) ? parsed : [];
 }
 
+function listInjurySnapshotDates(dir: string): string[] {
+  if (!fs.existsSync(dir)) return [];
+  const dates = new Set<string>();
+  for (const f of fs.readdirSync(dir)) {
+    const m = f.match(/^(\d{4}-\d{2}-\d{2})\.(?:early|final|custom|t\d{4})\.json$/);
+    if (m) dates.add(m[1]);
+  }
+  return Array.from(dates).sort();
+}
+
+function countRowsInInjuryPayload(payload: JsonValue | null): number {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return 0;
+  const rows = (payload as { rows?: unknown }).rows;
+  return Array.isArray(rows) ? rows.length : 0;
+}
+
+function loadInjurySnapshots(dataDir: string, date: string): {
+  source: string;
+  early: JsonValue | null;
+  final: JsonValue | null;
+} {
+  const injuriesDir = path.join(dataDir, "raw", "injuries");
+  const earlyPath = path.join(injuriesDir, `${date}.early.json`);
+  const finalPath = path.join(injuriesDir, `${date}.final.json`);
+  const early = fs.existsSync(earlyPath) ? readJsonFile<JsonValue>(earlyPath) : null;
+  const final = fs.existsSync(finalPath) ? readJsonFile<JsonValue>(finalPath) : null;
+  return {
+    source: "raw-injuries-snapshots-v1",
+    early,
+    final,
+  };
+}
+
 export async function buildDailyDataBundles(args: string[] = []): Promise<void> {
   const flags = parseFlags(args);
   const dataDir = getDataDir();
@@ -135,6 +180,7 @@ export async function buildDailyDataBundles(args: string[] = []): Promise<void> 
   const liveOddsDir = path.join(dataDir, "raw", "odds", "live");
   const propsDayDir = path.join(dataDir, "raw", "odds", "player-props-day");
   const propsRawDir = path.join(dataDir, "raw", "odds", "player-props");
+  const injuriesDir = path.join(dataDir, "raw", "injuries");
   const outDir = path.join(dataDir, "raw", "day");
   fs.mkdirSync(outDir, { recursive: true });
 
@@ -183,6 +229,9 @@ export async function buildDailyDataBundles(args: string[] = []): Promise<void> 
   for (const d of listDateDirs(propsRawDir)) {
     if (dateInRange(d, from, to)) allDates.add(d);
   }
+  for (const d of listInjurySnapshotDates(injuriesDir)) {
+    if (dateInRange(d, from, to)) allDates.add(d);
+  }
 
   const dates = Array.from(allDates).sort();
   console.log(`Building day bundles in ${outDir}`);
@@ -204,6 +253,9 @@ export async function buildDailyDataBundles(args: string[] = []): Promise<void> 
     const live = fs.existsSync(livePath) ? loadOddsFileEvents(livePath) : [];
 
     const props = loadPlayerPropsEvents(dataDir, date);
+    const injuries = loadInjurySnapshots(dataDir, date);
+    const injuryEarlyRows = countRowsInInjuryPayload(injuries.early);
+    const injuryFinalRows = countRowsInInjuryPayload(injuries.final);
 
     const seasons = Array.from(new Set(games.map((g) => g.season))).sort();
 
@@ -227,6 +279,13 @@ export async function buildDailyDataBundles(args: string[] = []): Promise<void> 
           eventCount: props.events.length,
           source: props.source,
         },
+        injuries: {
+          source: injuries.source,
+          earlyAvailable: injuries.early != null,
+          earlyRowCount: injuryEarlyRows,
+          finalAvailable: injuries.final != null,
+          finalRowCount: injuryFinalRows,
+        },
       },
       games,
       odds: {
@@ -239,6 +298,7 @@ export async function buildDailyDataBundles(args: string[] = []): Promise<void> 
         eventCount: props.events.length,
         events: props.events,
       },
+      injuries,
     };
 
     const outPath = path.join(outDir, `${date}.json`);

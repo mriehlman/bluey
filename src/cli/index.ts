@@ -6,6 +6,7 @@ import { syncNbaStatsForDate, syncNbaStatsForDateRange, syncUpcomingFromNba } fr
 import { syncOddsLive, syncOddsForDate } from "../ingest/syncOdds.js";
 import { syncPlayerPropsLive } from "../ingest/syncPlayerProps.js";
 import { syncInjuries } from "../ingest/syncInjuries.js";
+import { syncLineups } from "../ingest/syncLineups.js";
 import { buildDailyDataBundles } from "../ingest/buildDailyDataBundles.js";
 import { ingestDayBundles } from "../ingest/ingestDayBundles.js";
 import { normalizePlayerMinutes } from "../ingest/normalizePlayerMinutes.js";
@@ -171,6 +172,10 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
   "sync:injuries": async (args) => {
     await syncInjuries(args);
+  },
+
+  "sync:lineups": async (args) => {
+    await syncLineups(args);
   },
 
   "build:day-bundles": async (args) => {

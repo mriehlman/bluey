@@ -231,6 +231,19 @@ model GameContext {
   homeIsB2b    Boolean @default(false)
   awayIsB2b    Boolean @default(false)
 
+  homeInjuryOutCount          Int?
+  homeInjuryDoubtfulCount     Int?
+  homeInjuryQuestionableCount Int?
+  homeInjuryProbableCount     Int?
+  awayInjuryOutCount          Int?
+  awayInjuryDoubtfulCount     Int?
+  awayInjuryQuestionableCount Int?
+  awayInjuryProbableCount     Int?
+  homeLineupCertainty         Float?
+  awayLineupCertainty         Float?
+  homeLateScratchRisk         Float?
+  awayLateScratchRisk         Float?
+
   h2hHomeWins  Int     @default(0)
   h2hAwayWins  Int     @default(0)
 

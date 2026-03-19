@@ -1,5 +1,5 @@
 import { prisma } from "../db/prisma.js";
-import { fetchNbaOdds, fetchHistoricalOdds, fetchHistoricalEvents, fetchHistoricalEventOdds, type OddsEvent } from "../api/oddsApi.js";
+import { fetchHistoricalOdds, fetchHistoricalEvents, fetchHistoricalEventOdds, getHistoricalSnapshotIsoUtc, type OddsEvent } from "../api/oddsApi.js";
 import { getEasternDateFromUtc, dateStringToUtcMidday } from "./utils.js";
 import * as fs from "fs";
 import * as path from "path";
@@ -337,12 +337,12 @@ async function processOddsEvents(events: OddsEvent[], debug = false): Promise<nu
 }
 
 export async function syncOddsLive(debug = false): Promise<number> {
-  console.log("Fetching live NBA odds...");
-  const events = await fetchNbaOdds();
+  const today = getEasternDateFromUtc(new Date());
+  console.log(`Fetching NBA odds snapshot for ${today} at ${getHistoricalSnapshotIsoUtc(today)} (target: 7am ET window)...`);
+  const events = await fetchHistoricalOdds(today);
   console.log(`  Found ${events.length} events with odds`);
   
   if (events.length > 0) {
-    const today = getEasternDateFromUtc(new Date());
     saveRawOdds(today, events, "live");
   }
   
@@ -350,7 +350,7 @@ export async function syncOddsLive(debug = false): Promise<number> {
 }
 
 export async function syncOddsForDate(date: string): Promise<number> {
-  console.log(`Fetching historical odds for ${date}...`);
+  console.log(`Fetching historical odds for ${date} at ${getHistoricalSnapshotIsoUtc(date)} (target: 7am ET window)...`);
   const events = await fetchHistoricalOdds(date);
   console.log(`  Found ${events.length} events with odds`);
   
@@ -362,7 +362,8 @@ export async function syncOddsForDate(date: string): Promise<number> {
 }
 
 export async function syncPlayerPropsForDate(date: string): Promise<number> {
-  console.log(`Fetching historical player props for ${date}...`);
+  console.log(`Fetching historical player props for ${date} at ${getHistoricalSnapshotIsoUtc(date)} (target: 7am ET window)...`);
+  console.log("  Writing canonical raw files to data/raw/odds/player-props only (legacy files are left untouched).");
   
   const events = await fetchHistoricalEvents(date);
   if (events.length === 0) {
@@ -374,9 +375,7 @@ export async function syncPlayerPropsForDate(date: string): Promise<number> {
   let totalUpserted = 0;
   
   const propsDir = path.join(getDataDir(), "raw", "odds", "player-props", date);
-  const legacyPropsDir = path.join(getDataDir(), "raw", "odds", "player-props-historical", date);
   fs.mkdirSync(propsDir, { recursive: true });
-  fs.mkdirSync(legacyPropsDir, { recursive: true });
   
   for (const event of events) {
     const propsData = await fetchHistoricalEventOdds(event.id, date, PLAYER_PROP_MARKETS);
@@ -386,8 +385,6 @@ export async function syncPlayerPropsForDate(date: string): Promise<number> {
     
     const payload = JSON.stringify(propsData, null, 2);
     fs.writeFileSync(path.join(propsDir, `${event.id}.json`), payload);
-    // Keep legacy path for compatibility with any existing local workflows.
-    fs.writeFileSync(path.join(legacyPropsDir, `${event.id}.json`), payload);
     
     const gameId = await findOrCreateGame(propsData);
     if (!gameId) continue;

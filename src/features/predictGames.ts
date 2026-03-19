@@ -3,7 +3,67 @@ import { computeContextForDate } from "./buildGameContext.js";
 import { GAME_EVENT_CATALOG } from "./gameEventCatalog.js";
 import type { GameEventContext } from "./gameEventCatalog.js";
 import type { GameContext, PlayerGameContext } from "@prisma/client";
-import { getDiscoveryV2MatchesForGameIds } from "../patterns/discoveryV2.js";
+import { loadMetaModel, scoreMetaModel } from "../patterns/metaModelCore.js";
+import {
+  buildPregameTokenSet,
+  loadLatestFeatureBins,
+  matchDeployedPatterns,
+  type DeployedPatternV2,
+} from "./v2PregameMatching.js";
+import {
+  evaluateSuggestedPlayQualityGate,
+  impliedProbFromAmerican,
+  payoutFromAmerican,
+  selectDiversifiedBetPicks,
+} from "./productionPickSelection.js";
+
+function clamp01(x: number): number {
+  return Math.max(0, Math.min(1, x));
+}
+
+ 
+
+type ActionablePick = {
+  outcomeType: string;
+  conditions: string[];
+  posterior: number;
+  metaScore: number | null;
+  edgeModelVsMarket: number;
+  ev: number;
+  priceAmerican: number;
+  label: string;
+};
+
+function marketPriceForOutcome(
+  outcomeType: string,
+  odds: { spreadHome?: number | null; totalOver?: number | null; mlHome?: number | null; mlAway?: number | null } | null,
+): { priceAmerican: number; label: string } | null {
+  const base = outcomeType.replace(/:.*$/, "");
+  if (base === "HOME_WIN") {
+    const p = odds?.mlHome;
+    if (p == null || !Number.isFinite(p) || p === 0) return null;
+    return { priceAmerican: p, label: `Home ML @ ${p > 0 ? `+${p}` : p}` };
+  }
+  if (base === "AWAY_WIN") {
+    const p = odds?.mlAway;
+    if (p == null || !Number.isFinite(p) || p === 0) return null;
+    return { priceAmerican: p, label: `Away ML @ ${p > 0 ? `+${p}` : p}` };
+  }
+  if (base.includes("COVERED")) {
+    const spread = odds?.spreadHome;
+    if (spread == null || !Number.isFinite(spread)) return null;
+    const p = -110;
+    return { priceAmerican: p, label: `${base.replaceAll("_", " ")} (spread ${spread > 0 ? `+${spread}` : spread}) @ -110` };
+  }
+  if (base.startsWith("TOTAL_") || base === "OVER_HIT" || base === "UNDER_HIT") {
+    const total = odds?.totalOver;
+    if (total == null || !Number.isFinite(total)) return null;
+    const p = -110;
+    const side = base.includes("UNDER") ? "Under" : "Over";
+    return { priceAmerican: p, label: `${side} ${total} @ -110` };
+  }
+  return null;
+}
 
 function getCurrentSeason(): number {
   const now = new Date();
@@ -64,22 +124,30 @@ export async function predictGames(args: string[] = []): Promise<void> {
   const patterns = await prisma.gamePattern.findMany({
     orderBy: { confidenceScore: "desc" },
   });
-  const deployedV2Count = await prisma.patternV2.count({
+  const deployedV2 = await prisma.patternV2.findMany({
     where: { status: "deployed" },
-  });
+    select: {
+      id: true,
+      outcomeType: true,
+      conditions: true,
+      posteriorHitRate: true,
+      edge: true,
+      score: true,
+      n: true,
+    },
+    orderBy: { score: "desc" },
+  }) as DeployedPatternV2[];
   const tokenizedTodayCount = await prisma.gameFeatureToken.count({
     where: { gameId: { in: games.map((g) => g.id) } },
   });
-  const discoveryV2ByGame = await getDiscoveryV2MatchesForGameIds(games.map((g) => g.id));
+  const bins = await loadLatestFeatureBins(prisma);
+  const metaModel = await loadMetaModel();
   console.log(`Loaded ${patterns.length} legacy stored patterns`);
-  console.log(`Loaded ${deployedV2Count} deployed PatternV2 rows`);
+  console.log(`Loaded ${deployedV2.length} deployed PatternV2 rows`);
   console.log(`Found ${tokenizedTodayCount}/${games.length} GameFeatureToken rows for target games\n`);
-  if (deployedV2Count > 0 && tokenizedTodayCount === 0) {
+  if (deployedV2.length > 0 && bins.size === 0) {
     console.log(
-      `  Note: deployed v2 patterns exist, but none of today's games are tokenized yet.`,
-    );
-    console.log(
-      `  Run: bun run src/cli/index.ts build:quantized-game-features --from-season ${season} --to-season ${season}\n`,
+      "  Note: no FeatureBin rows found; v2 pregame tokenization is disabled. Run build:feature-bins first.\n",
     );
   }
 
@@ -141,6 +209,18 @@ export async function predictGames(args: string[] = []): Promise<void> {
         : null,
       homeIsB2b: false,
       awayIsB2b: false,
+      homeInjuryOutCount: null,
+      homeInjuryDoubtfulCount: null,
+      homeInjuryQuestionableCount: null,
+      homeInjuryProbableCount: null,
+      awayInjuryOutCount: null,
+      awayInjuryDoubtfulCount: null,
+      awayInjuryQuestionableCount: null,
+      awayInjuryProbableCount: null,
+      homeLineupCertainty: null,
+      awayLineupCertainty: null,
+      homeLateScratchRisk: null,
+      awayLateScratchRisk: null,
       h2hHomeWins: 0,
       h2hAwayWins: 0,
     };
@@ -262,15 +342,116 @@ export async function predictGames(args: string[] = []): Promise<void> {
       console.log("");
     }
 
-    const v2Matches = discoveryV2ByGame.get(game.id) ?? [];
-    if (v2Matches.length > 0) {
-      console.log(`  Discovery v2 deployed matches (${v2Matches.length}):`);
-      for (const m of v2Matches.slice(0, 5)) {
-        console.log(
-          `    ${m.conditions.join(" + ")} -> ${m.outcomeType} | posterior ${(m.posteriorHitRate * 100).toFixed(1)}% | edge ${(m.edge * 100).toFixed(1)}% | n=${m.n}`,
-        );
+    // PatternV2 matching should not depend on post-game context rows.
+    // We tokenize from the pregame virtual context + odds and match in-memory.
+    if (deployedV2.length > 0 && bins.size > 0) {
+      const tokenSet = buildPregameTokenSet({
+        season,
+        context: virtualContext,
+        odds: consensusOdds
+          ? {
+              spreadHome: (consensusOdds as any).spreadHome ?? null,
+              totalOver: (consensusOdds as any).totalOver ?? null,
+              mlHome: (consensusOdds as any).mlHome ?? (consensusOdds as any).moneylineHome ?? null,
+              mlAway: (consensusOdds as any).mlAway ?? (consensusOdds as any).moneylineAway ?? null,
+            }
+          : null,
+        bins,
+      });
+
+      const matches = matchDeployedPatterns(tokenSet, deployedV2, 999);
+      if (matches.length > 0) {
+        console.log(`  Discovery v2 deployed matches (${matches.length}):`);
+        for (const m of matches.slice(0, 5)) {
+          console.log(
+            `    ${(m.conditions ?? []).join(" + ")} -> ${m.outcomeType} | posterior ${(clamp01(m.posteriorHitRate) * 100).toFixed(1)}% | edge ${(m.edge * 100).toFixed(1)}% | n=${m.n}`,
+          );
+        }
+        console.log("");
       }
-      console.log("");
+
+      // Use the existing actionable-bets gate profile for per-game picks.
+      const actionableCandidates: ActionablePick[] = [];
+      for (const m of matches) {
+        const priceInfo = marketPriceForOutcome(
+          m.outcomeType,
+          consensusOdds
+            ? {
+                spreadHome: (consensusOdds as any).spreadHome ?? null,
+                totalOver: (consensusOdds as any).totalOver ?? null,
+                mlHome: (consensusOdds as any).mlHome ?? (consensusOdds as any).moneylineHome ?? null,
+                mlAway: (consensusOdds as any).mlAway ?? (consensusOdds as any).moneylineAway ?? null,
+              }
+            : null,
+        );
+        if (!priceInfo) continue;
+
+        const metaScore = metaModel
+          ? scoreMetaModel(metaModel, {
+              outcomeType: m.outcomeType,
+              conditions: m.conditions ?? [],
+              posteriorHitRate: m.posteriorHitRate,
+              edge: m.edge,
+              score: m.score,
+              n: m.n,
+            })
+          : null;
+        const estProb = clamp01(metaScore ?? m.posteriorHitRate);
+        const implied = impliedProbFromAmerican(priceInfo.priceAmerican);
+        if (implied == null) continue;
+        const modelEdge = estProb - implied;
+        const ev = estProb * payoutFromAmerican(priceInfo.priceAmerican) - (1 - estProb);
+
+        const gateEval = evaluateSuggestedPlayQualityGate({
+          outcomeType: m.outcomeType,
+          posteriorHitRate: m.posteriorHitRate,
+          metaScore,
+          marketPick: {
+            overPrice: priceInfo.priceAmerican,
+            edge: modelEdge,
+            ev,
+          },
+          requireMarketLine: true,
+        });
+        if (!gateEval.pass) continue;
+
+        actionableCandidates.push({
+          outcomeType: m.outcomeType,
+          conditions: m.conditions ?? [],
+          posterior: m.posteriorHitRate,
+          metaScore,
+          edgeModelVsMarket: modelEdge,
+          ev,
+          priceAmerican: priceInfo.priceAmerican,
+          label: priceInfo.label,
+        });
+      }
+
+      const picks = selectDiversifiedBetPicks(
+        actionableCandidates.map((p) => ({
+          ...p,
+          posteriorHitRate: p.posterior,
+          confidence: p.metaScore ?? p.posterior,
+          marketPick: {
+            overPrice: p.priceAmerican,
+            edge: p.edgeModelVsMarket,
+            ev: p.ev,
+          },
+        })),
+        3,
+      );
+
+      if (picks.length > 0) {
+        console.log(`  Actionable picks (${picks.length}):`);
+        for (const p of picks) {
+          console.log(
+            `    ${p.label} <- ${p.outcomeType} | post ${(p.posterior * 100).toFixed(1)}%` +
+              `${p.metaScore != null ? ` | meta ${(p.metaScore * 100).toFixed(1)}%` : ""}` +
+              ` | edge ${(p.edgeModelVsMarket * 100).toFixed(1)}% | EV ${(p.ev * 100).toFixed(1)}%`,
+          );
+        }
+        console.log("");
+      }
     }
   }
 }
@@ -476,6 +657,18 @@ function buildVirtualContext(
     awayRestDays,
     homeIsB2b: homeRestDays === 0,
     awayIsB2b: awayRestDays === 0,
+    homeInjuryOutCount: null,
+    homeInjuryDoubtfulCount: null,
+    homeInjuryQuestionableCount: null,
+    homeInjuryProbableCount: null,
+    awayInjuryOutCount: null,
+    awayInjuryDoubtfulCount: null,
+    awayInjuryQuestionableCount: null,
+    awayInjuryProbableCount: null,
+    homeLineupCertainty: null,
+    awayLineupCertainty: null,
+    homeLateScratchRisk: null,
+    awayLateScratchRisk: null,
     h2hHomeWins: 0,
     h2hAwayWins: 0,
   };

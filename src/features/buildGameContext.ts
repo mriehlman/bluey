@@ -1,4 +1,6 @@
 import { prisma } from "../db/prisma.js";
+import * as fs from "fs";
+import * as path from "path";
 
 const MS_PER_DAY = 86_400_000;
 const MIN_GAMES_FOR_CONTEXT = 10;
@@ -38,6 +40,7 @@ interface PlayerAccum {
   playerId: number;
   teamId: number;
   gamesPlayed: number;
+  starts: number;
   totalPoints: number;
   totalRebounds: number;
   totalAssists: number;
@@ -113,6 +116,7 @@ function makePlayerAccum(playerId: number, teamId: number): PlayerAccum {
     playerId,
     teamId,
     gamesPlayed: 0,
+    starts: 0,
     totalPoints: 0,
     totalRebounds: 0,
     totalAssists: 0,
@@ -123,6 +127,183 @@ function makePlayerAccum(playerId: number, teamId: number): PlayerAccum {
     totalFta: 0,
     last5Points: [],
   };
+}
+
+type InjuryStatus = "out" | "doubtful" | "questionable" | "probable" | "unknown";
+type TeamInjurySummary = {
+  out: number;
+  doubtful: number;
+  questionable: number;
+  probable: number;
+  byPlayerName: Map<string, InjuryStatus>;
+};
+
+function normalizeName(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function injuryNameToCanonical(raw: string): string {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  if (!s.includes(",")) return s;
+  const [last, first] = s.split(",").map((p) => p.trim());
+  return `${first} ${last}`.trim();
+}
+
+function classifyInjuryStatus(raw: unknown): InjuryStatus {
+  const s = String(raw ?? "").toLowerCase().trim();
+  if (!s) return "unknown";
+  if (s.includes("out")) return "out";
+  if (s.includes("doubtful")) return "doubtful";
+  if (s.includes("questionable") || s.includes("game time")) return "questionable";
+  if (s.includes("probable")) return "probable";
+  return "unknown";
+}
+
+function getDataDir(): string {
+  return process.env.DATA_DIR || "./data";
+}
+
+function buildTeamAliasLookup(
+  teams: Array<{ id: number; city: string | null; name: string | null; code: string | null }>,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const t of teams) {
+    const citySafe = String(t.city ?? "").trim();
+    const nameSafe = String(t.name ?? "").trim();
+    const codeSafe = String(t.code ?? "").trim();
+    const full = `${citySafe} ${nameSafe}`.trim();
+    const aliases = [full, nameSafe, codeSafe].filter(Boolean);
+    if (full.toLowerCase() === "los angeles clippers") aliases.push("la clippers");
+    if (full.toLowerCase() === "philadelphia 76ers") aliases.push("sixers");
+    for (const alias of aliases) out.set(normalizeName(alias), t.id);
+  }
+  return out;
+}
+
+function loadEarlyInjuriesForDate(
+  date: string,
+  teamLookup: Map<string, number>,
+  cache: Map<string, Map<number, TeamInjurySummary>>,
+): Map<number, TeamInjurySummary> {
+  const cached = cache.get(date);
+  if (cached) return cached;
+
+  const result = new Map<number, TeamInjurySummary>();
+  const filePath = path.join(getDataDir(), "raw", "injuries", `${date}.early.json`);
+  if (!fs.existsSync(filePath)) {
+    cache.set(date, result);
+    return result;
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as { rows?: unknown };
+    const rows = Array.isArray(parsed.rows) ? parsed.rows : [];
+    for (const row of rows) {
+      if (!row || typeof row !== "object") continue;
+      const rec = row as Record<string, unknown>;
+      const teamRaw = String(rec.Team ?? "").trim();
+      const playerRaw = String(rec["Player Name"] ?? "").trim();
+      if (!teamRaw || !playerRaw) continue;
+      const teamId = teamLookup.get(normalizeName(teamRaw));
+      if (!teamId) continue;
+      const status = classifyInjuryStatus(rec["Current Status"]);
+      const playerKey = normalizeName(injuryNameToCanonical(playerRaw));
+      if (!result.has(teamId)) {
+        result.set(teamId, {
+          out: 0,
+          doubtful: 0,
+          questionable: 0,
+          probable: 0,
+          byPlayerName: new Map<string, InjuryStatus>(),
+        });
+      }
+      const teamSummary = result.get(teamId)!;
+      if (status === "out") teamSummary.out++;
+      else if (status === "doubtful") teamSummary.doubtful++;
+      else if (status === "questionable") teamSummary.questionable++;
+      else if (status === "probable") teamSummary.probable++;
+      if (playerKey) teamSummary.byPlayerName.set(playerKey, status);
+    }
+  } catch {
+    // Best-effort read; keep empty if malformed.
+  }
+
+  cache.set(date, result);
+  return result;
+}
+
+function computeLineupSignals(
+  teamId: number,
+  players: Map<number, PlayerAccum>,
+  injuries: TeamInjurySummary | undefined,
+  priorStarters: string[] | undefined,
+): {
+  certainty: number;
+  lateScratchRisk: number;
+} {
+  const starterNames = (priorStarters ?? [])
+    .map((n) => normalizeName(n))
+    .filter(Boolean)
+    .slice(0, 5);
+  if (starterNames.length > 0) {
+    let outStarters = 0;
+    let doubtfulStarters = 0;
+    let questionableStarters = 0;
+    let probableStarters = 0;
+    for (const name of starterNames) {
+      const status = injuries?.byPlayerName.get(name);
+      if (status === "out") outStarters++;
+      else if (status === "doubtful") doubtfulStarters++;
+      else if (status === "questionable") questionableStarters++;
+      else if (status === "probable") probableStarters++;
+    }
+
+    // Previous-game starters are our baseline lineup. Morning injuries imply replacement pressure.
+    const replacementPressure = outStarters * 1.0 + doubtfulStarters * 0.8 + questionableStarters * 0.45 + probableStarters * 0.15;
+    const certainty = Math.max(0, Math.min(1, 1 - replacementPressure / 5));
+    const lateScratchRisk = Math.max(
+      0,
+      Math.min(1, (questionableStarters * 1.0 + doubtfulStarters * 0.6 + probableStarters * 0.2) / 5),
+    );
+    return { certainty, lateScratchRisk };
+  }
+
+  // Fallback when prior-game starters are unavailable.
+  const candidates = [...players.values()]
+    .filter((p) => p.teamId === teamId && p.gamesPlayed > 0)
+    .map((p) => {
+      const mpg = p.totalMinutesSec / Math.max(1, p.gamesPlayed) / 60;
+      const startRate = p.starts / Math.max(1, p.gamesPlayed);
+      return { p, mpg, startRate };
+    })
+    .sort((a, b) => {
+      if (b.startRate !== a.startRate) return b.startRate - a.startRate;
+      if (b.mpg !== a.mpg) return b.mpg - a.mpg;
+      return b.p.gamesPlayed - a.p.gamesPlayed;
+    })
+    .slice(0, 5);
+
+  if (candidates.length === 0) return { certainty: 0.5, lateScratchRisk: 0.5 };
+
+  const teamOut = injuries?.out ?? 0;
+  const teamDoubtful = injuries?.doubtful ?? 0;
+  const teamQuestionable = injuries?.questionable ?? 0;
+  const teamProbable = injuries?.probable ?? 0;
+
+  // Team-level approximation until we have a reliable pregame lineup API.
+  let penalty = teamOut * 1.0 + teamDoubtful * 0.75 + teamQuestionable * 0.4 + teamProbable * 0.1;
+  let risk = teamOut * 0.4 + teamDoubtful * 0.55 + teamQuestionable * 0.7 + teamProbable * 0.2;
+  penalty = Math.min(penalty, candidates.length);
+  risk = Math.min(risk, candidates.length);
+
+  const certainty = Math.max(0, Math.min(1, 1 - penalty / 5));
+  const lateScratchRisk = Math.max(0, Math.min(1, risk / 5));
+  return { certainty, lateScratchRisk };
 }
 
 function computePace(accum: TeamAccum): number | null {
@@ -299,6 +480,7 @@ export async function computeContextForDate(
         const pAccum = playerAccums.get(s.playerId) ?? makePlayerAccum(s.playerId, s.teamId);
         pAccum.teamId = s.teamId;
         pAccum.gamesPlayed++;
+        if (s.starter) pAccum.starts++;
         pAccum.totalPoints += s.points;
         pAccum.totalRebounds += s.rebounds;
         pAccum.totalAssists += s.assists;
@@ -390,6 +572,18 @@ export async function buildGameContext(args: string[] = []): Promise<void> {
   }
 
   console.log(`Building game context for season(s) ${fromSeason}${toSeason !== fromSeason ? ` to ${toSeason}` : ""}`);
+  const teams = await prisma.team.findMany({
+    select: { id: true, city: true, name: true, code: true },
+  });
+  const players = await prisma.player.findMany({
+    select: { id: true, firstname: true, lastname: true },
+  });
+  const playerNameById = new Map<number, string>();
+  for (const p of players) {
+    playerNameById.set(p.id, normalizeName(`${p.firstname ?? ""} ${p.lastname ?? ""}`));
+  }
+  const teamLookup = buildTeamAliasLookup(teams);
+  const injuryCache = new Map<string, Map<number, TeamInjurySummary>>();
 
   for (let season = fromSeason; season <= toSeason; season++) {
     console.log(`\n=== Building GameContext for season ${season} ===\n`);
@@ -420,6 +614,7 @@ export async function buildGameContext(args: string[] = []): Promise<void> {
 
     const teamAccums = new Map<number, TeamAccum>();
     const playerAccums = new Map<number, PlayerAccum>();
+    const lastStartersByTeam = new Map<number, string[]>();
     let contextCount = 0;
     let playerCtxCount = 0;
 
@@ -455,6 +650,22 @@ export async function buildGameContext(args: string[] = []): Promise<void> {
 
         const h2hKey = [game.homeTeamId, game.awayTeamId].sort((a, b) => a - b).join("-");
         const h2h = h2hMap.get(h2hKey) ?? { homeWins: 0, awayWins: 0 };
+        const gameDateStr = game.date.toISOString().slice(0, 10);
+        const injuriesByTeam = loadEarlyInjuriesForDate(gameDateStr, teamLookup, injuryCache);
+        const homeInj = injuriesByTeam.get(game.homeTeamId);
+        const awayInj = injuriesByTeam.get(game.awayTeamId);
+        const homeLineup = computeLineupSignals(
+          game.homeTeamId,
+          playerAccums,
+          homeInj,
+          lastStartersByTeam.get(game.homeTeamId),
+        );
+        const awayLineup = computeLineupSignals(
+          game.awayTeamId,
+          playerAccums,
+          awayInj,
+          lastStartersByTeam.get(game.awayTeamId),
+        );
 
         await prisma.gameContext.create({
           data: {
@@ -489,6 +700,18 @@ export async function buildGameContext(args: string[] = []): Promise<void> {
             awayRestDays,
             homeIsB2b: homeRestDays === 0,
             awayIsB2b: awayRestDays === 0,
+            homeInjuryOutCount: homeInj?.out ?? 0,
+            homeInjuryDoubtfulCount: homeInj?.doubtful ?? 0,
+            homeInjuryQuestionableCount: homeInj?.questionable ?? 0,
+            homeInjuryProbableCount: homeInj?.probable ?? 0,
+            awayInjuryOutCount: awayInj?.out ?? 0,
+            awayInjuryDoubtfulCount: awayInj?.doubtful ?? 0,
+            awayInjuryQuestionableCount: awayInj?.questionable ?? 0,
+            awayInjuryProbableCount: awayInj?.probable ?? 0,
+            homeLineupCertainty: homeLineup.certainty,
+            awayLineupCertainty: awayLineup.certainty,
+            homeLateScratchRisk: homeLineup.lateScratchRisk,
+            awayLateScratchRisk: awayLineup.lateScratchRisk,
             h2hHomeWins: h2h.homeWins,
             h2hAwayWins: h2h.awayWins,
           },
@@ -597,6 +820,7 @@ export async function buildGameContext(args: string[] = []): Promise<void> {
           const pAccum = playerAccums.get(s.playerId) ?? makePlayerAccum(s.playerId, s.teamId);
           pAccum.teamId = s.teamId;
           pAccum.gamesPlayed++;
+          if (s.starter) pAccum.starts++;
           pAccum.totalPoints += s.points;
           pAccum.totalRebounds += s.rebounds;
           pAccum.totalAssists += s.assists;
@@ -621,6 +845,16 @@ export async function buildGameContext(args: string[] = []): Promise<void> {
         accum.totalFta += gameFta;
         accum.totalTov += gameTov;
         if (missSplits) accum.hasSplits = false;
+
+        // Store this game's actual starters as baseline for next game's proposed lineup.
+        const starterNames = stats
+          .filter((s) => s.starter)
+          .map((s) => playerNameById.get(s.playerId) ?? "")
+          .map((n) => normalizeName(n))
+          .filter(Boolean);
+        if (starterNames.length > 0) {
+          lastStartersByTeam.set(tId, starterNames.slice(0, 5));
+        }
       }
 
       if ((gi + 1) % 100 === 0) {

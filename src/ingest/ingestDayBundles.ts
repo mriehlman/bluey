@@ -87,6 +87,19 @@ type DayBundle = {
   playerProps?: {
     events?: OddsEvent[];
   };
+  injuries?: {
+    source?: string;
+    early?: Record<string, unknown> | null;
+    final?: Record<string, unknown> | null;
+  };
+};
+
+type InjuryStatus = "out" | "doubtful" | "questionable" | "probable" | "unknown";
+type TeamInjurySummary = {
+  out: number;
+  doubtful: number;
+  questionable: number;
+  probable: number;
 };
 
 const NBA_TO_INTERNAL_TEAM: Record<number, number> = {
@@ -256,6 +269,35 @@ const TEAM_CANONICAL: Record<string, string> = {
 
 function normalizeName(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
+}
+
+function injuryNameToCanonical(raw: string): string {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  if (!s.includes(",")) return s;
+  const [last, first] = s.split(",").map((p) => p.trim());
+  return `${first} ${last}`.trim();
+}
+
+function classifyInjuryStatus(raw: unknown): InjuryStatus {
+  const s = String(raw ?? "").toLowerCase().trim();
+  if (!s) return "unknown";
+  if (s.includes("out")) return "out";
+  if (s.includes("doubtful")) return "doubtful";
+  if (s.includes("questionable") || s.includes("game time")) return "questionable";
+  if (s.includes("probable")) return "probable";
+  return "unknown";
+}
+
+function teamAliases(city?: string | null, name?: string | null, code?: string | null): string[] {
+  const citySafe = String(city ?? "").trim();
+  const nameSafe = String(name ?? "").trim();
+  const codeSafe = String(code ?? "").trim();
+  const full = `${citySafe} ${nameSafe}`.trim();
+  const aliases = [nameSafe, full, codeSafe].filter((s) => s.length > 0);
+  if (full.toLowerCase() === "los angeles clippers") aliases.push("la clippers");
+  if (full.toLowerCase() === "philadelphia 76ers") aliases.push("sixers");
+  return aliases;
 }
 
 function canonicalTeamName(name: string): string {
@@ -481,6 +523,59 @@ function resolveGameIdForEvent(
   return gameIdByMatch.get(gameMatchKey(date, awayTeam, homeTeam));
 }
 
+function extractInjuryRowCount(snapshot: Record<string, unknown> | null | undefined): number {
+  if (!snapshot || typeof snapshot !== "object") return 0;
+  const rows = snapshot.rows;
+  return Array.isArray(rows) ? rows.length : 0;
+}
+
+async function buildInjuryTeamLookup(): Promise<Map<string, number>> {
+  const teams = await prisma.team.findMany({
+    select: { id: true, name: true, city: true, code: true },
+  });
+  const map = new Map<string, number>();
+  for (const t of teams) {
+    for (const a of teamAliases(t.city, t.name, t.code)) {
+      map.set(normalizeName(a), t.id);
+    }
+  }
+  return map;
+}
+
+function parseInjurySummaryByTeam(
+  snapshot: Record<string, unknown> | null | undefined,
+  teamLookup: Map<string, number>,
+): Map<number, TeamInjurySummary> {
+  const out = new Map<number, TeamInjurySummary>();
+  if (!snapshot || typeof snapshot !== "object") return out;
+  const rows = snapshot.rows;
+  if (!Array.isArray(rows)) return out;
+
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const rec = row as Record<string, unknown>;
+    const teamRaw = String(rec.Team ?? "").trim();
+    const playerRaw = String(rec["Player Name"] ?? "").trim();
+    if (!teamRaw || !playerRaw) continue;
+    const teamId = teamLookup.get(normalizeName(teamRaw));
+    if (!teamId) continue;
+    const playerKey = normalizeName(injuryNameToCanonical(playerRaw));
+    if (!playerKey) continue;
+    const status = classifyInjuryStatus(rec["Current Status"]);
+
+    if (!out.has(teamId)) {
+      out.set(teamId, { out: 0, doubtful: 0, questionable: 0, probable: 0 });
+    }
+    const team = out.get(teamId)!;
+    if (status === "out") team.out++;
+    else if (status === "doubtful") team.doubtful++;
+    else if (status === "questionable") team.questionable++;
+    else if (status === "probable") team.probable++;
+  }
+
+  return out;
+}
+
 async function ingestDayBundle(filePath: string, force = false): Promise<void> {
   const startedAt = Date.now();
   const raw = await fs.readFile(filePath, "utf-8");
@@ -587,6 +682,8 @@ async function ingestDayBundle(filePath: string, force = false): Promise<void> {
       where: { date: dateStringToUtcMidday(date) },
       select: {
         id: true,
+        homeTeamId: true,
+        awayTeamId: true,
         homeTeam: { select: { name: true, code: true } },
         awayTeam: { select: { name: true, code: true } },
       },
@@ -730,7 +827,38 @@ async function ingestDayBundle(filePath: string, force = false): Promise<void> {
       });
     }
 
+    // Ingest raw injury snapshot summaries into GameContext injury fields.
+    // Prefer early snapshot (pregame), fall back to final when early is missing.
+    let contextInjuryRowsUpdated = 0;
+    let contextInjuryRowsSkippedNoContext = 0;
+    const injurySnapshot = (bundle.injuries?.early ?? bundle.injuries?.final) as Record<string, unknown> | null | undefined;
+    if (injurySnapshot) {
+      const injuryTeamLookup = await buildInjuryTeamLookup();
+      const injuriesByTeam = parseInjurySummaryByTeam(injurySnapshot, injuryTeamLookup);
+      for (const g of dbGames) {
+        const home = injuriesByTeam.get(g.homeTeamId);
+        const away = injuriesByTeam.get(g.awayTeamId);
+        const updated = await prisma.gameContext.updateMany({
+          where: { gameId: g.id },
+          data: {
+            homeInjuryOutCount: home?.out ?? 0,
+            homeInjuryDoubtfulCount: home?.doubtful ?? 0,
+            homeInjuryQuestionableCount: home?.questionable ?? 0,
+            homeInjuryProbableCount: home?.probable ?? 0,
+            awayInjuryOutCount: away?.out ?? 0,
+            awayInjuryDoubtfulCount: away?.doubtful ?? 0,
+            awayInjuryQuestionableCount: away?.questionable ?? 0,
+            awayInjuryProbableCount: away?.probable ?? 0,
+          },
+        });
+        if (updated.count > 0) contextInjuryRowsUpdated += updated.count;
+        else contextInjuryRowsSkippedNoContext++;
+      }
+    }
+
     const durationMs = Date.now() - startedAt;
+    const injuryEarlyRows = extractInjuryRowCount(bundle.injuries?.early ?? null);
+    const injuryFinalRows = extractInjuryRowCount(bundle.injuries?.final ?? null);
     await setIngestDayDone(date, durationMs, {
       gamesInBundle: games.length,
       gamesUpserted: gameIdByMatch.size,
@@ -738,6 +866,13 @@ async function ingestDayBundle(filePath: string, force = false): Promise<void> {
       statsRows: Array.from(statsByGame.values()).reduce((acc, rows) => acc + rows.length, 0),
       gameOddsRows: Array.from(oddsRowsByGame.values()).reduce((acc, rows) => acc + rows.length, 0),
       propOddsRows: Array.from(propRowsByGame.values()).reduce((acc, rows) => acc + rows.length, 0),
+      injuriesSource: bundle.injuries?.source ?? null,
+      injuryEarlyAvailable: bundle.injuries?.early != null,
+      injuryEarlyRows,
+      injuryFinalAvailable: bundle.injuries?.final != null,
+      injuryFinalRows,
+      contextInjuryRowsUpdated,
+      contextInjuryRowsSkippedNoContext,
       sourceFile: path.basename(filePath),
     });
   } catch (err) {
