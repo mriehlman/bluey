@@ -129,8 +129,8 @@ function makePlayerAccum(playerId: number, teamId: number): PlayerAccum {
   };
 }
 
-type InjuryStatus = "out" | "doubtful" | "questionable" | "probable" | "unknown";
-type TeamInjurySummary = {
+export type InjuryStatus = "out" | "doubtful" | "questionable" | "probable" | "unknown";
+export type TeamInjurySummary = {
   out: number;
   doubtful: number;
   questionable: number;
@@ -138,7 +138,7 @@ type TeamInjurySummary = {
   byPlayerName: Map<string, InjuryStatus>;
 };
 
-function normalizeName(s: string): string {
+export function normalizeName(s: string): string {
   return s
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
@@ -168,7 +168,7 @@ function getDataDir(): string {
   return process.env.DATA_DIR || "./data";
 }
 
-function buildTeamAliasLookup(
+export function buildTeamAliasLookup(
   teams: Array<{ id: number; city: string | null; name: string | null; code: string | null }>,
 ): Map<string, number> {
   const out = new Map<string, number>();
@@ -185,7 +185,7 @@ function buildTeamAliasLookup(
   return out;
 }
 
-function loadEarlyInjuriesForDate(
+export function loadEarlyInjuriesForDate(
   date: string,
   teamLookup: Map<string, number>,
   cache: Map<string, Map<number, TeamInjurySummary>>,
@@ -304,6 +304,23 @@ function computeLineupSignals(
   const certainty = Math.max(0, Math.min(1, 1 - penalty / 5));
   const lateScratchRisk = Math.max(0, Math.min(1, risk / 5));
   return { certainty, lateScratchRisk };
+}
+
+/**
+ * Compute lineup certainty and late-scratch risk from team-level injury counts.
+ * Usable for live predictions when prior-starter data isn't available.
+ */
+export function computeLineupSignalsFromCounts(injuries: TeamInjurySummary | undefined): {
+  certainty: number;
+  lateScratchRisk: number;
+} {
+  if (!injuries) return { certainty: 1, lateScratchRisk: 0 };
+  const penalty = injuries.out * 1.0 + injuries.doubtful * 0.75 + injuries.questionable * 0.4 + injuries.probable * 0.1;
+  const risk = injuries.out * 0.4 + injuries.doubtful * 0.55 + injuries.questionable * 0.7 + injuries.probable * 0.2;
+  return {
+    certainty: Math.max(0, Math.min(1, 1 - Math.min(penalty, 5) / 5)),
+    lateScratchRisk: Math.max(0, Math.min(1, Math.min(risk, 5) / 5)),
+  };
 }
 
 function computePace(accum: TeamAccum): number | null {

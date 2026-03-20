@@ -1,5 +1,10 @@
 import { prisma } from "../db/prisma.js";
 import { computeContextForDate } from "./buildGameContext.js";
+import {
+  loadEarlyInjuriesForDate,
+  buildTeamAliasLookup,
+  computeLineupSignalsFromCounts,
+} from "./injuryContext.js";
 import { GAME_EVENT_CATALOG } from "./gameEventCatalog.js";
 import type { GameEventContext } from "./gameEventCatalog.js";
 import type { GameContext, PlayerGameContext } from "@prisma/client";
@@ -134,6 +139,17 @@ export async function predictGames(args: string[] = []): Promise<void> {
   });
   const playerNameMap = new Map(playersForNames.map((p) => [p.id, p]));
 
+  // Load injury data for live predictions
+  const allTeams = await prisma.team.findMany({
+    select: { id: true, city: true, name: true, code: true },
+  });
+  const teamAliasLookup = buildTeamAliasLookup(allTeams);
+  const injuryCache = new Map();
+  const injuriesByTeam = loadEarlyInjuriesForDate(dateStr, teamAliasLookup, injuryCache);
+  if (injuriesByTeam.size > 0) {
+    console.log(`Loaded injury data: ${[...injuriesByTeam.values()].reduce((s, t) => s + t.out + t.doubtful + t.questionable + t.probable, 0)} entries across ${injuriesByTeam.size} teams\n`);
+  }
+
   for (const game of games) {
     const homeSnap = teamSnapshots.get(game.homeTeamId);
     const awaySnap = teamSnapshots.get(game.awayTeamId);
@@ -181,18 +197,18 @@ export async function predictGames(args: string[] = []): Promise<void> {
         : null,
       homeIsB2b: false,
       awayIsB2b: false,
-      homeInjuryOutCount: null,
-      homeInjuryDoubtfulCount: null,
-      homeInjuryQuestionableCount: null,
-      homeInjuryProbableCount: null,
-      awayInjuryOutCount: null,
-      awayInjuryDoubtfulCount: null,
-      awayInjuryQuestionableCount: null,
-      awayInjuryProbableCount: null,
-      homeLineupCertainty: null,
-      awayLineupCertainty: null,
-      homeLateScratchRisk: null,
-      awayLateScratchRisk: null,
+      homeInjuryOutCount: injuriesByTeam.get(game.homeTeamId)?.out ?? null,
+      homeInjuryDoubtfulCount: injuriesByTeam.get(game.homeTeamId)?.doubtful ?? null,
+      homeInjuryQuestionableCount: injuriesByTeam.get(game.homeTeamId)?.questionable ?? null,
+      homeInjuryProbableCount: injuriesByTeam.get(game.homeTeamId)?.probable ?? null,
+      awayInjuryOutCount: injuriesByTeam.get(game.awayTeamId)?.out ?? null,
+      awayInjuryDoubtfulCount: injuriesByTeam.get(game.awayTeamId)?.doubtful ?? null,
+      awayInjuryQuestionableCount: injuriesByTeam.get(game.awayTeamId)?.questionable ?? null,
+      awayInjuryProbableCount: injuriesByTeam.get(game.awayTeamId)?.probable ?? null,
+      homeLineupCertainty: computeLineupSignalsFromCounts(injuriesByTeam.get(game.homeTeamId)).certainty,
+      awayLineupCertainty: computeLineupSignalsFromCounts(injuriesByTeam.get(game.awayTeamId)).certainty,
+      homeLateScratchRisk: computeLineupSignalsFromCounts(injuriesByTeam.get(game.homeTeamId)).lateScratchRisk,
+      awayLateScratchRisk: computeLineupSignalsFromCounts(injuriesByTeam.get(game.awayTeamId)).lateScratchRisk,
       h2hHomeWins: 0,
       h2hAwayWins: 0,
     };
@@ -445,6 +461,11 @@ export async function predictPlayers(args: string[] = []): Promise<void> {
   });
   const playerMap = new Map(players.map((p) => [p.id, p]));
 
+  const pfdTeams = await prisma.team.findMany({ select: { id: true, city: true, name: true, code: true } });
+  const pfdTeamLookup = buildTeamAliasLookup(pfdTeams);
+  const pfdInjuryCache = new Map();
+  const pfdInjuries = loadEarlyInjuriesForDate(dateStr, pfdTeamLookup, pfdInjuryCache);
+
   for (const game of games) {
     const homeSnap = teamSnapshots.get(game.homeTeamId);
     const awaySnap = teamSnapshots.get(game.awayTeamId);
@@ -456,7 +477,7 @@ export async function predictPlayers(args: string[] = []): Promise<void> {
     console.log(`${homeLabel} vs ${awayLabel}`);
 
     // Build virtual context and run condition events (same as predictGames)
-    const virtualContext = buildVirtualContext(game, homeSnap, awaySnap, targetDate);
+    const virtualContext = buildVirtualContext(game, homeSnap, awaySnap, targetDate, pfdInjuries);
     const virtualPlayerContexts = buildVirtualPlayerContexts(game, playerSnapshots, teamSnapshots);
     const consensusOdds = game.odds.find((o) => o.source === "consensus") ?? game.odds[0] ?? null;
 
@@ -546,6 +567,7 @@ function buildVirtualContext(
   homeSnap: { wins: number; losses: number; ppg: number; oppg: number; pace: number | null; rebPg: number | null; astPg: number | null; fg3Pct: number | null; ftPct: number | null; rankOff: number | null; rankDef: number | null; rankPace: number | null; streak: number; lastGameDate: Date | null },
   awaySnap: typeof homeSnap,
   targetDate: Date,
+  injuriesByTeam?: Map<number, import("./injuryContext.js").TeamInjurySummary>,
 ): GameContext {
   const homeRestDays = homeSnap.lastGameDate
     ? Math.floor((targetDate.getTime() - homeSnap.lastGameDate.getTime()) / 86_400_000) - 1
@@ -587,18 +609,18 @@ function buildVirtualContext(
     awayRestDays,
     homeIsB2b: homeRestDays === 0,
     awayIsB2b: awayRestDays === 0,
-    homeInjuryOutCount: null,
-    homeInjuryDoubtfulCount: null,
-    homeInjuryQuestionableCount: null,
-    homeInjuryProbableCount: null,
-    awayInjuryOutCount: null,
-    awayInjuryDoubtfulCount: null,
-    awayInjuryQuestionableCount: null,
-    awayInjuryProbableCount: null,
-    homeLineupCertainty: null,
-    awayLineupCertainty: null,
-    homeLateScratchRisk: null,
-    awayLateScratchRisk: null,
+    homeInjuryOutCount: injuriesByTeam?.get(game.homeTeamId)?.out ?? null,
+    homeInjuryDoubtfulCount: injuriesByTeam?.get(game.homeTeamId)?.doubtful ?? null,
+    homeInjuryQuestionableCount: injuriesByTeam?.get(game.homeTeamId)?.questionable ?? null,
+    homeInjuryProbableCount: injuriesByTeam?.get(game.homeTeamId)?.probable ?? null,
+    awayInjuryOutCount: injuriesByTeam?.get(game.awayTeamId)?.out ?? null,
+    awayInjuryDoubtfulCount: injuriesByTeam?.get(game.awayTeamId)?.doubtful ?? null,
+    awayInjuryQuestionableCount: injuriesByTeam?.get(game.awayTeamId)?.questionable ?? null,
+    awayInjuryProbableCount: injuriesByTeam?.get(game.awayTeamId)?.probable ?? null,
+    homeLineupCertainty: computeLineupSignalsFromCounts(injuriesByTeam?.get(game.homeTeamId)).certainty,
+    awayLineupCertainty: computeLineupSignalsFromCounts(injuriesByTeam?.get(game.awayTeamId)).certainty,
+    homeLateScratchRisk: computeLineupSignalsFromCounts(injuriesByTeam?.get(game.homeTeamId)).lateScratchRisk,
+    awayLateScratchRisk: computeLineupSignalsFromCounts(injuriesByTeam?.get(game.awayTeamId)).lateScratchRisk,
     h2hHomeWins: 0,
     h2hAwayWins: 0,
   };

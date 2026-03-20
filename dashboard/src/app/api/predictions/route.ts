@@ -18,6 +18,11 @@ import {
   type GamePlayerContext,
   type PlayerInfo,
 } from "../../../../../src/features/predictionEngine";
+import {
+  loadEarlyInjuriesForDate,
+  buildTeamAliasLookup,
+  computeLineupSignalsFromCounts,
+} from "../../../../../src/features/injuryContext";
 
 export const dynamic = "force-dynamic";
 
@@ -353,21 +358,28 @@ export async function GET(req: Request) {
     return easternDate === dateStr;
   });
 
-  // Deduplicate by matchup (home/away team codes - handles duplicate team IDs)
+  // Deduplicate by matchup (order-independent to handle reversed home/away from different sources)
   const seenMatchups = new Map<string, (typeof gamesForDate)[0]>();
   for (const g of gamesForDate) {
     const homeCode = g.homeTeam?.code ?? g.homeTeamId.toString();
     const awayCode = g.awayTeam?.code ?? g.awayTeamId.toString();
-    const key = `${awayCode}@${homeCode}`;
+    const key = [homeCode, awayCode].sort().join(":");
     const existing = seenMatchups.get(key);
     if (!existing) {
       seenMatchups.set(key, g);
     } else {
-      // Prefer game with context and odds
+      const gHasScore = (g.homeScore ?? 0) > 0 || (g.awayScore ?? 0) > 0;
+      const existingHasScore = (existing.homeScore ?? 0) > 0 || (existing.awayScore ?? 0) > 0;
+      const gIsFinal = !!g.status?.includes("Final");
+      const existingIsFinal = !!existing.status?.includes("Final");
       const better =
-        (g.context && !existing.context) || (g.odds?.length && !existing.odds?.length)
-          ? g
-          : existing;
+        (gIsFinal && !existingIsFinal) ? g :
+        (existingIsFinal && !gIsFinal) ? existing :
+        (gHasScore && !existingHasScore) ? g :
+        (existingHasScore && !gHasScore) ? existing :
+        (g.context && !existing.context) ? g :
+        (g.odds?.length && !existing.odds?.length) ? g :
+        existing;
       seenMatchups.set(key, better);
     }
   }
@@ -426,6 +438,21 @@ export async function GET(req: Request) {
 
   const teamIds = [...new Set(games.flatMap((g) => [g.homeTeamId, g.awayTeamId]))];
   const teamSnapshots = await computeTeamSnapshots(season, targetDate, teamIds);
+
+  // Load injury data for live context
+  const allTeamsForInjury = await prisma.team.findMany({
+    select: { id: true, city: true, name: true, code: true },
+  });
+  const teamAliasLookup = buildTeamAliasLookup(allTeamsForInjury);
+  const injuryCache = new Map();
+  const repoRoot = process.cwd().endsWith("dashboard") ? process.cwd().replace(/[\\/]dashboard$/, "") : process.cwd();
+  const injuryDataDir = repoRoot + "/data";
+  const injuriesByTeam = loadEarlyInjuriesForDate(dateStr, teamAliasLookup, injuryCache, injuryDataDir);
+  if (injuriesByTeam.size > 0) {
+    let injTotal = 0;
+    for (const t of injuriesByTeam.values()) injTotal += t.out + t.doubtful + t.questionable + t.probable;
+    console.log(`[predictions] Loaded injury data: ${injTotal} entries across ${injuriesByTeam.size} teams`);
+  }
 
   // For completed games, fetch outcome events to show hit/miss status
   const completedGameIds = games
@@ -596,10 +623,30 @@ export async function GET(req: Request) {
           awayRankDef: awaySnap?.rankDef ?? null,
           awayRankPace: awaySnap?.rankPace ?? null,
           awayStreak: awaySnap?.streak ?? 0,
-          homeRestDays: null,
-          awayRestDays: null,
-          homeIsB2b: false,
-          awayIsB2b: false,
+          homeRestDays: homeSnap?.lastGameDate
+            ? Math.max(0, Math.floor((targetDate.getTime() - homeSnap.lastGameDate.getTime()) / 86_400_000) - 1)
+            : null,
+          awayRestDays: awaySnap?.lastGameDate
+            ? Math.max(0, Math.floor((targetDate.getTime() - awaySnap.lastGameDate.getTime()) / 86_400_000) - 1)
+            : null,
+          homeIsB2b: homeSnap?.lastGameDate
+            ? Math.floor((targetDate.getTime() - homeSnap.lastGameDate.getTime()) / 86_400_000) - 1 === 0
+            : false,
+          awayIsB2b: awaySnap?.lastGameDate
+            ? Math.floor((targetDate.getTime() - awaySnap.lastGameDate.getTime()) / 86_400_000) - 1 === 0
+            : false,
+          homeInjuryOutCount: injuriesByTeam.get(game.homeTeamId)?.out ?? null,
+          homeInjuryDoubtfulCount: injuriesByTeam.get(game.homeTeamId)?.doubtful ?? null,
+          homeInjuryQuestionableCount: injuriesByTeam.get(game.homeTeamId)?.questionable ?? null,
+          homeInjuryProbableCount: injuriesByTeam.get(game.homeTeamId)?.probable ?? null,
+          awayInjuryOutCount: injuriesByTeam.get(game.awayTeamId)?.out ?? null,
+          awayInjuryDoubtfulCount: injuriesByTeam.get(game.awayTeamId)?.doubtful ?? null,
+          awayInjuryQuestionableCount: injuriesByTeam.get(game.awayTeamId)?.questionable ?? null,
+          awayInjuryProbableCount: injuriesByTeam.get(game.awayTeamId)?.probable ?? null,
+          homeLineupCertainty: computeLineupSignalsFromCounts(injuriesByTeam.get(game.homeTeamId)).certainty,
+          awayLineupCertainty: computeLineupSignalsFromCounts(injuriesByTeam.get(game.awayTeamId)).certainty,
+          homeLateScratchRisk: computeLineupSignalsFromCounts(injuriesByTeam.get(game.homeTeamId)).lateScratchRisk,
+          awayLateScratchRisk: computeLineupSignalsFromCounts(injuriesByTeam.get(game.awayTeamId)).lateScratchRisk,
           h2hHomeWins: 0,
           h2hAwayWins: 0,
         }) as GameEventContext["context"],
