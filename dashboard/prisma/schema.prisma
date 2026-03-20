@@ -53,6 +53,7 @@ model Game {
   gameEvents           GameEvent[]
   playerContexts       PlayerGameContext[]
   gamePatternHits      GamePatternHit[]
+  suggestedPlayLedger  SuggestedPlayLedger[]
 
   @@index([date])
   @@index([season, date])
@@ -433,4 +434,46 @@ model BacktestResult {
   @@unique([runId, patternKey])
   @@index([grade])
   @@index([pnlROI])
+}
+
+model SuggestedPlayLedger {
+  id               String   @id @default(cuid())
+  date             DateTime @db.Date
+  season           Int
+  gameId           String
+  dedupKey         String
+  outcomeType      String
+  displayLabel     String?
+  targetPlayerId   Int?
+  targetPlayerName String?
+  market           String?
+  line             Float?
+  priceAmerican    Int?
+  impliedProb      Float?
+  betImpliedProb   Float?
+  estimatedProb    Float?
+  modelEdge        Float?
+  ev               Float?
+  closePriceAmerican Int?
+  closeImpliedProb Float?
+  clvDeltaProb     Float?
+  clvDeltaCents    Float?
+  clvStatus        String?
+  posteriorHitRate Float
+  metaScore        Float?
+  confidence       Float
+  votes            Int
+  stake            Float
+  isActionable     Boolean  @default(false)
+  settledResult    String?
+  settledHit       Boolean?
+  payout           Float?
+  profit           Float?
+  capturedAt       DateTime @default(now())
+  updatedAt        DateTime @default(now())
+  game             Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@unique([gameId, dedupKey])
+  @@index([date, season])
+  @@index([settledResult, date])
 }

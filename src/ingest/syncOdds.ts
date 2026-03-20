@@ -139,17 +139,27 @@ async function findTeamId(teamName: string): Promise<number | null> {
   return existing?.id ?? null;
 }
 
-async function findOrCreateGame(event: OddsEvent): Promise<string | null> {
+async function findOrCreateGame(event: OddsEvent): Promise<{ gameId: string; flipped: boolean } | null> {
   const commenceDate = new Date(event.commence_time);
   const easternDateStr = getEasternDateFromUtc(commenceDate);
   const gameDate = dateStringToUtcMidday(easternDateStr);
+
+  const homeCanon = getCanonicalTeam(event.home_team);
+  const awayCanon = getCanonicalTeam(event.away_team);
+
+  const checkFlip = async (gameId: string): Promise<boolean> => {
+    const g = await prisma.game.findUnique({ where: { id: gameId }, include: { homeTeam: true, awayTeam: true } });
+    if (!g) return false;
+    const dbHome = getCanonicalTeam(g.homeTeam?.name ?? g.homeTeamNameSnapshot ?? "");
+    return dbHome !== homeCanon;
+  };
 
   // First check by odds_api external ID (games we've seen from Odds API before)
   const existingByOddsId = await prisma.gameExternalId.findUnique({
     where: { source_sourceId: { source: "odds_api", sourceId: event.id } },
     select: { gameId: true },
   });
-  if (existingByOddsId) return existingByOddsId.gameId;
+  if (existingByOddsId) return { gameId: existingByOddsId.gameId, flipped: await checkFlip(existingByOddsId.gameId) };
 
   // Fallback: check by sourceGameId (legacy for games we created from odds)
   const sourceGameId = -Math.abs(hashString(event.id));
@@ -162,12 +172,8 @@ async function findOrCreateGame(event: OddsEvent): Promise<string | null> {
       update: { sourceId: event.id },
       create: { gameId: existingBySource.id, source: "odds_api", sourceId: event.id },
     });
-    return existingBySource.id;
+    return { gameId: existingBySource.id, flipped: await checkFlip(existingBySource.id) };
   }
-
-  // Get canonical team names for matching
-  const homeCanon = getCanonicalTeam(event.home_team);
-  const awayCanon = getCanonicalTeam(event.away_team);
   
   // Use Eastern date (game day in North America)
   const games = await prisma.game.findMany({
@@ -183,16 +189,21 @@ async function findOrCreateGame(event: OddsEvent): Promise<string | null> {
     const dbHome = getCanonicalTeam(game.homeTeam?.name ?? game.homeTeamNameSnapshot ?? "");
     const dbAway = getCanonicalTeam(game.awayTeam?.name ?? game.awayTeamNameSnapshot ?? "");
 
-    if (
-      (dbHome === homeCanon && dbAway === awayCanon) ||
-      (dbHome === awayCanon && dbAway === homeCanon)
-    ) {
+    if (dbHome === homeCanon && dbAway === awayCanon) {
       await prisma.gameExternalId.upsert({
         where: { gameId_source: { gameId: game.id, source: "odds_api" } },
         update: { sourceId: event.id },
         create: { gameId: game.id, source: "odds_api", sourceId: event.id },
       });
-      return game.id;
+      return { gameId: game.id, flipped: false };
+    }
+    if (dbHome === awayCanon && dbAway === homeCanon) {
+      await prisma.gameExternalId.upsert({
+        where: { gameId_source: { gameId: game.id, source: "odds_api" } },
+        update: { sourceId: event.id },
+        create: { gameId: game.id, source: "odds_api", sourceId: event.id },
+      });
+      return { gameId: game.id, flipped: true };
     }
   }
 
@@ -208,16 +219,21 @@ async function findOrCreateGame(event: OddsEvent): Promise<string | null> {
     const dbHome = getCanonicalTeam(game.homeTeam?.name ?? game.homeTeamNameSnapshot ?? "");
     const dbAway = getCanonicalTeam(game.awayTeam?.name ?? game.awayTeamNameSnapshot ?? "");
 
-    if (
-      (dbHome === homeCanon && dbAway === awayCanon) ||
-      (dbHome === awayCanon && dbAway === homeCanon)
-    ) {
+    if (dbHome === homeCanon && dbAway === awayCanon) {
       await prisma.gameExternalId.upsert({
         where: { gameId_source: { gameId: game.id, source: "odds_api" } },
         update: { sourceId: event.id },
         create: { gameId: game.id, source: "odds_api", sourceId: event.id },
       });
-      return game.id;
+      return { gameId: game.id, flipped: false };
+    }
+    if (dbHome === awayCanon && dbAway === homeCanon) {
+      await prisma.gameExternalId.upsert({
+        where: { gameId_source: { gameId: game.id, source: "odds_api" } },
+        update: { sourceId: event.id },
+        create: { gameId: game.id, source: "odds_api", sourceId: event.id },
+      });
+      return { gameId: game.id, flipped: true };
     }
   }
 
@@ -253,7 +269,7 @@ async function findOrCreateGame(event: OddsEvent): Promise<string | null> {
   });
 
   console.log(`    Created game: ${event.away_team} @ ${event.home_team} (${game.id})`);
-  return game.id;
+  return { gameId: game.id, flipped: false };
 }
 
 function extractOddsFromBookmaker(event: OddsEvent, bookmakerKey: string) {
@@ -296,19 +312,34 @@ function extractOddsFromBookmaker(event: OddsEvent, bookmakerKey: string) {
   return { spreadHome, spreadAway, totalOver, totalUnder, mlHome, mlAway };
 }
 
+function flipOdds(odds: ReturnType<typeof extractOddsFromBookmaker>) {
+  if (!odds) return odds;
+  return {
+    spreadHome: odds.spreadAway,
+    spreadAway: odds.spreadHome,
+    totalOver: odds.totalOver,
+    totalUnder: odds.totalUnder,
+    mlHome: odds.mlAway,
+    mlAway: odds.mlHome,
+  };
+}
+
 async function processOddsEvents(events: OddsEvent[], debug = false): Promise<number> {
   let upserted = 0;
 
   for (const event of events) {
-    const gameId = await findOrCreateGame(event);
-    if (!gameId) {
+    const result = await findOrCreateGame(event);
+    if (!result) {
       if (debug) console.log(`    Could not find/create game for ${event.away_team} @ ${event.home_team}`);
       continue;
     }
+    const { gameId, flipped } = result;
+    if (flipped && debug) console.log(`    Flipped home/away for ${event.away_team} @ ${event.home_team}`);
 
     for (const bookmaker of event.bookmakers) {
-      const odds = extractOddsFromBookmaker(event, bookmaker.key);
+      let odds = extractOddsFromBookmaker(event, bookmaker.key);
       if (!odds) continue;
+      if (flipped) odds = flipOdds(odds)!;
 
       await prisma.gameOdds.upsert({
         where: { gameId_source: { gameId, source: bookmaker.key } },
@@ -319,8 +350,9 @@ async function processOddsEvents(events: OddsEvent[], debug = false): Promise<nu
     }
 
     for (const bookKey of PRIORITY_BOOKS) {
-      const odds = extractOddsFromBookmaker(event, bookKey);
+      let odds = extractOddsFromBookmaker(event, bookKey);
       if (odds && (odds.spreadHome != null || odds.totalOver != null)) {
+        if (flipped) odds = flipOdds(odds)!;
         await prisma.gameOdds.upsert({
           where: { gameId_source: { gameId, source: "consensus" } },
           update: { ...odds, fetchedAt: new Date() },
@@ -386,8 +418,9 @@ export async function syncPlayerPropsForDate(date: string): Promise<number> {
     const payload = JSON.stringify(propsData, null, 2);
     fs.writeFileSync(path.join(propsDir, `${event.id}.json`), payload);
     
-    const gameId = await findOrCreateGame(propsData);
-    if (!gameId) continue;
+    const propsResult = await findOrCreateGame(propsData);
+    if (!propsResult) continue;
+    const gameId = propsResult.gameId;
     
     for (const bookmaker of propsData.bookmakers) {
       for (const market of bookmaker.markets) {

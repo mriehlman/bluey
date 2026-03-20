@@ -10,11 +10,11 @@ export default function Nav() {
 
   return (
     <nav>
-      <Link href="/predictions" className={`brand ${isActive("/predictions") ? "active" : ""}`}>
+      <Link href="/" className="brand">
         Bluey
       </Link>
-      <Link href="/discovery-v2" className={`brand ${isActive("/discovery-v2") ? "active" : ""}`} style={{ marginLeft: "1rem" }}>
-        Discovery v2
+      <Link href="/simulator" className={isActive("/simulator") ? "active" : ""}>
+        Simulator
       </Link>
     </nav>
   );

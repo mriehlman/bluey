@@ -516,11 +516,12 @@ function resolveGameIdForEvent(
   homeTeam: string,
   awayTeam: string,
   gameIdByMatch: Map<string, string>,
-): string | undefined {
+): { gameId: string; flipped: boolean } | undefined {
   const direct = gameIdByMatch.get(gameMatchKey(date, homeTeam, awayTeam));
-  if (direct) return direct;
-  // Some feeds can have home/away orientation flipped relative to game records.
-  return gameIdByMatch.get(gameMatchKey(date, awayTeam, homeTeam));
+  if (direct) return { gameId: direct, flipped: false };
+  const swapped = gameIdByMatch.get(gameMatchKey(date, awayTeam, homeTeam));
+  if (swapped) return { gameId: swapped, flipped: true };
+  return undefined;
 }
 
 function extractInjuryRowCount(snapshot: Record<string, unknown> | null | undefined): number {
@@ -702,8 +703,9 @@ async function ingestDayBundle(filePath: string, force = false): Promise<void> {
     for (const event of dedupOdds.values()) {
       const home = event.home_team ?? "";
       const away = event.away_team ?? "";
-      const gameId = resolveGameIdForEvent(date, home, away, gameIdByMatch);
-      if (!gameId) continue;
+      const resolved = resolveGameIdForEvent(date, home, away, gameIdByMatch);
+      if (!resolved) continue;
+      const { gameId, flipped } = resolved;
 
       for (const book of event.bookmakers ?? []) {
         if (!book.key) continue;
@@ -739,6 +741,11 @@ async function ingestDayBundle(filePath: string, force = false): Promise<void> {
               if (oc === ac) mlAway = o.price ?? null;
             }
           }
+        }
+
+        if (flipped) {
+          [spreadHome, spreadAway] = [spreadAway, spreadHome];
+          [mlHome, mlAway] = [mlAway, mlHome];
         }
 
         if (!oddsRowsByGame.has(gameId)) oddsRowsByGame.set(gameId, []);
@@ -780,8 +787,9 @@ async function ingestDayBundle(filePath: string, force = false): Promise<void> {
     for (const event of bundle.playerProps?.events ?? []) {
       const home = event.home_team ?? "";
       const away = event.away_team ?? "";
-      const gameId = resolveGameIdForEvent(date, home, away, gameIdByMatch);
-      if (!gameId) continue;
+      const resolved2 = resolveGameIdForEvent(date, home, away, gameIdByMatch);
+      if (!resolved2) continue;
+      const { gameId: gameId2 } = resolved2;
 
       for (const book of event.bookmakers ?? []) {
         if (!book.key) continue;
@@ -802,9 +810,9 @@ async function ingestDayBundle(filePath: string, force = false): Promise<void> {
             if (!playerId) continue;
             const line = v.over?.point ?? v.under?.point ?? null;
             if (line == null || !Number.isFinite(line)) continue;
-            if (!propRowsByGame.has(gameId)) propRowsByGame.set(gameId, []);
-            propRowsByGame.get(gameId)!.push({
-              gameId,
+            if (!propRowsByGame.has(gameId2)) propRowsByGame.set(gameId2, []);
+            propRowsByGame.get(gameId2)!.push({
+              gameId: gameId2,
               playerId,
               source: book.key,
               market: market.key,
