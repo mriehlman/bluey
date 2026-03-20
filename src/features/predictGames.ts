@@ -3,76 +3,17 @@ import { computeContextForDate } from "./buildGameContext.js";
 import { GAME_EVENT_CATALOG } from "./gameEventCatalog.js";
 import type { GameEventContext } from "./gameEventCatalog.js";
 import type { GameContext, PlayerGameContext } from "@prisma/client";
-import { loadMetaModel, scoreMetaModel } from "../patterns/metaModelCore.js";
+import { LEDGER_TUNING } from "../config/tuning.js";
 import {
-  buildPregameTokenSet,
+  generateGamePredictions,
   loadLatestFeatureBins,
-  matchDeployedPatterns,
+  loadMetaModel,
   type DeployedPatternV2,
-} from "./v2PregameMatching.js";
-import {
-  evaluateSuggestedPlayQualityGate,
-  impliedProbFromAmerican,
-  payoutFromAmerican,
-  selectDiversifiedBetPicks,
-} from "./productionPickSelection.js";
-
-function clamp01(x: number): number {
-  return Math.max(0, Math.min(1, x));
-}
-
- 
-
-type ActionablePick = {
-  outcomeType: string;
-  conditions: string[];
-  posterior: number;
-  metaScore: number | null;
-  edgeModelVsMarket: number;
-  ev: number;
-  priceAmerican: number;
-  label: string;
-};
-
-function marketPriceForOutcome(
-  outcomeType: string,
-  odds: { spreadHome?: number | null; totalOver?: number | null; mlHome?: number | null; mlAway?: number | null } | null,
-): { priceAmerican: number; label: string } | null {
-  const base = outcomeType.replace(/:.*$/, "");
-  if (base === "HOME_WIN") {
-    const p = odds?.mlHome;
-    if (p == null || !Number.isFinite(p) || p === 0) return null;
-    return { priceAmerican: p, label: `Home ML @ ${p > 0 ? `+${p}` : p}` };
-  }
-  if (base === "AWAY_WIN") {
-    const p = odds?.mlAway;
-    if (p == null || !Number.isFinite(p) || p === 0) return null;
-    return { priceAmerican: p, label: `Away ML @ ${p > 0 ? `+${p}` : p}` };
-  }
-  if (base.includes("COVERED")) {
-    const spread = odds?.spreadHome;
-    if (spread == null || !Number.isFinite(spread)) return null;
-    const p = -110;
-    return { priceAmerican: p, label: `${base.replaceAll("_", " ")} (spread ${spread > 0 ? `+${spread}` : spread}) @ -110` };
-  }
-  if (base.startsWith("TOTAL_") || base === "OVER_HIT" || base === "UNDER_HIT") {
-    const total = odds?.totalOver;
-    if (total == null || !Number.isFinite(total)) return null;
-    const p = -110;
-    const side = base.includes("UNDER") ? "Under" : "Over";
-    return { priceAmerican: p, label: `${side} ${total} @ -110` };
-  }
-  return null;
-}
-
-function getCurrentSeason(): number {
-  const now = new Date();
-  // NBA season starts in October, so Oct-Dec uses current year, Jan-Sep uses previous year
-  return now.getMonth() >= 9 ? now.getFullYear() : now.getFullYear() - 1;
-}
+  type GamePlayerContext,
+  type PlayerPropRow,
+} from "./predictionEngine.js";
 
 function getSeasonForDate(date: Date): number {
-  // NBA season starts in October, so Oct-Dec uses that year, Jan-Sep uses previous year
   return date.getMonth() >= 9 ? date.getFullYear() : date.getFullYear() - 1;
 }
 
@@ -161,6 +102,37 @@ export async function predictGames(args: string[] = []): Promise<void> {
     orderBy: { game: { date: "desc" } },
     distinct: ["playerId"],
   });
+
+  // Load player props and name map for shared engine
+  const gameIds = games.map((g) => g.id);
+  const playerPropsRaw = await prisma.playerPropOdds.findMany({
+    where: { gameId: { in: gameIds } },
+    select: {
+      gameId: true,
+      playerId: true,
+      market: true,
+      line: true,
+      overPrice: true,
+      underPrice: true,
+      player: { select: { firstname: true, lastname: true } },
+    },
+  });
+  const playerPropsByGame = new Map<string, PlayerPropRow[]>();
+  for (const gid of gameIds) playerPropsByGame.set(gid, []);
+  for (const r of playerPropsRaw) {
+    playerPropsByGame.get(r.gameId)?.push(r);
+  }
+
+  const allPlayerIds = [...new Set([
+    ...playerIds,
+    ...playerPropsRaw.map((r) => r.playerId),
+    ...[...playerSnapshots.keys()],
+  ])];
+  const playersForNames = await prisma.player.findMany({
+    where: { id: { in: allPlayerIds } },
+    select: { id: true, firstname: true, lastname: true },
+  });
+  const playerNameMap = new Map(playersForNames.map((p) => [p.id, p]));
 
   for (const game of games) {
     const homeSnap = teamSnapshots.get(game.homeTeamId);
@@ -342,112 +314,70 @@ export async function predictGames(args: string[] = []): Promise<void> {
       console.log("");
     }
 
-    // PatternV2 matching should not depend on post-game context rows.
-    // We tokenize from the pregame virtual context + odds and match in-memory.
+    const propsForGame = playerPropsByGame.get(game.id) ?? [];
+
+    // V2 prediction engine (shared with dashboard)
     if (deployedV2.length > 0 && bins.size > 0) {
-      const tokenSet = buildPregameTokenSet({
+      const homePlayerCtxs = virtualPlayerContexts.filter((c) => c.teamId === game.homeTeamId);
+      const awayPlayerCtxs = virtualPlayerContexts.filter((c) => c.teamId === game.awayTeamId);
+      const getTopPlayer = (list: typeof virtualPlayerContexts, stat: "ppg" | "rpg" | "apg") => {
+        if (list.length === 0) return null;
+        const sorted = [...list].sort((a, b) => b[stat] - a[stat]);
+        const top = sorted[0];
+        const pInfo = playerNameMap.get(top.playerId);
+        const name = pInfo ? `${pInfo.firstname ?? ""} ${pInfo.lastname ?? ""}`.trim() : `Player ${top.playerId}`;
+        return { id: top.playerId, name, stat: top[stat] };
+      };
+      const gamePlayerCtx: GamePlayerContext = {
+        homeTopScorer: getTopPlayer(homePlayerCtxs, "ppg"),
+        homeTopRebounder: getTopPlayer(homePlayerCtxs, "rpg"),
+        homeTopPlaymaker: getTopPlayer(homePlayerCtxs, "apg"),
+        awayTopScorer: getTopPlayer(awayPlayerCtxs, "ppg"),
+        awayTopRebounder: getTopPlayer(awayPlayerCtxs, "rpg"),
+        awayTopPlaymaker: getTopPlayer(awayPlayerCtxs, "apg"),
+      };
+
+      const engineOdds = consensusOdds
+        ? {
+            spreadHome: (consensusOdds as any).spreadHome ?? null,
+            totalOver: (consensusOdds as any).totalOver ?? null,
+            mlHome: (consensusOdds as any).mlHome ?? (consensusOdds as any).moneylineHome ?? null,
+            mlAway: (consensusOdds as any).mlAway ?? (consensusOdds as any).moneylineAway ?? null,
+          }
+        : null;
+
+      const engineOutput = generateGamePredictions({
         season,
-        context: virtualContext,
-        odds: consensusOdds
-          ? {
-              spreadHome: (consensusOdds as any).spreadHome ?? null,
-              totalOver: (consensusOdds as any).totalOver ?? null,
-              mlHome: (consensusOdds as any).mlHome ?? (consensusOdds as any).moneylineHome ?? null,
-              mlAway: (consensusOdds as any).mlAway ?? (consensusOdds as any).moneylineAway ?? null,
-            }
-          : null,
-        bins,
+        gameContext: virtualContext,
+        odds: engineOdds,
+        deployedV2Patterns: deployedV2,
+        featureBins: bins,
+        metaModel,
+        gamePlayerContext: gamePlayerCtx,
+        propsForGame: propsForGame,
+        maxBetPicksPerGame: Math.max(1, LEDGER_TUNING.maxBetPicksPerGame),
+        fallbackAmericanOdds: LEDGER_TUNING.fallbackAmericanOdds,
       });
 
-      const matches = matchDeployedPatterns(tokenSet, deployedV2, 999);
-      if (matches.length > 0) {
-        console.log(`  Discovery v2 deployed matches (${matches.length}):`);
-        for (const m of matches.slice(0, 5)) {
+      if (engineOutput.discoveryV2Matches.length > 0) {
+        console.log(`  Discovery v2 matches (${engineOutput.discoveryV2Matches.length}):`);
+        for (const m of engineOutput.discoveryV2Matches.slice(0, 5)) {
+          const clamp = (x: number) => Math.max(0, Math.min(1, x));
           console.log(
-            `    ${(m.conditions ?? []).join(" + ")} -> ${m.outcomeType} | posterior ${(clamp01(m.posteriorHitRate) * 100).toFixed(1)}% | edge ${(m.edge * 100).toFixed(1)}% | n=${m.n}`,
+            `    ${(m.conditions ?? []).join(" + ")} -> ${m.outcomeType} | posterior ${(clamp(m.posteriorHitRate) * 100).toFixed(1)}% | edge ${(m.edge * 100).toFixed(1)}% | n=${m.n}`,
           );
         }
         console.log("");
       }
 
-      // Use the existing actionable-bets gate profile for per-game picks.
-      const actionableCandidates: ActionablePick[] = [];
-      for (const m of matches) {
-        const priceInfo = marketPriceForOutcome(
-          m.outcomeType,
-          consensusOdds
-            ? {
-                spreadHome: (consensusOdds as any).spreadHome ?? null,
-                totalOver: (consensusOdds as any).totalOver ?? null,
-                mlHome: (consensusOdds as any).mlHome ?? (consensusOdds as any).moneylineHome ?? null,
-                mlAway: (consensusOdds as any).mlAway ?? (consensusOdds as any).moneylineAway ?? null,
-              }
-            : null,
-        );
-        if (!priceInfo) continue;
-
-        const metaScore = metaModel
-          ? scoreMetaModel(metaModel, {
-              outcomeType: m.outcomeType,
-              conditions: m.conditions ?? [],
-              posteriorHitRate: m.posteriorHitRate,
-              edge: m.edge,
-              score: m.score,
-              n: m.n,
-            })
-          : null;
-        const estProb = clamp01(metaScore ?? m.posteriorHitRate);
-        const implied = impliedProbFromAmerican(priceInfo.priceAmerican);
-        if (implied == null) continue;
-        const modelEdge = estProb - implied;
-        const ev = estProb * payoutFromAmerican(priceInfo.priceAmerican) - (1 - estProb);
-
-        const gateEval = evaluateSuggestedPlayQualityGate({
-          outcomeType: m.outcomeType,
-          posteriorHitRate: m.posteriorHitRate,
-          metaScore,
-          marketPick: {
-            overPrice: priceInfo.priceAmerican,
-            edge: modelEdge,
-            ev,
-          },
-          requireMarketLine: true,
-        });
-        if (!gateEval.pass) continue;
-
-        actionableCandidates.push({
-          outcomeType: m.outcomeType,
-          conditions: m.conditions ?? [],
-          posterior: m.posteriorHitRate,
-          metaScore,
-          edgeModelVsMarket: modelEdge,
-          ev,
-          priceAmerican: priceInfo.priceAmerican,
-          label: priceInfo.label,
-        });
-      }
-
-      const picks = selectDiversifiedBetPicks(
-        actionableCandidates.map((p) => ({
-          ...p,
-          posteriorHitRate: p.posterior,
-          confidence: p.metaScore ?? p.posterior,
-          marketPick: {
-            overPrice: p.priceAmerican,
-            edge: p.edgeModelVsMarket,
-            ev: p.ev,
-          },
-        })),
-        3,
-      );
-
-      if (picks.length > 0) {
-        console.log(`  Actionable picks (${picks.length}):`);
-        for (const p of picks) {
+      if (engineOutput.suggestedBetPicks.length > 0) {
+        console.log(`  Suggested bet picks (${engineOutput.suggestedBetPicks.length}):`);
+        for (const p of engineOutput.suggestedBetPicks) {
+          const targetStr = p.playerTarget ? ` [${p.playerTarget.name}]` : "";
           console.log(
-            `    ${p.label} <- ${p.outcomeType} | post ${(p.posterior * 100).toFixed(1)}%` +
+            `    ${p.displayLabel ?? p.outcomeType}${targetStr} | post ${(p.posteriorHitRate * 100).toFixed(1)}%` +
               `${p.metaScore != null ? ` | meta ${(p.metaScore * 100).toFixed(1)}%` : ""}` +
-              ` | edge ${(p.edgeModelVsMarket * 100).toFixed(1)}% | EV ${(p.ev * 100).toFixed(1)}%`,
+              `${p.marketPick ? ` | edge ${(p.marketPick.edge * 100).toFixed(1)}% | EV ${(p.marketPick.ev * 100).toFixed(1)}%` : ""}`,
           );
         }
         console.log("");
