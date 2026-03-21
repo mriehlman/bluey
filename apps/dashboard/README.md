@@ -12,13 +12,29 @@ cp apps/dashboard/.env.example apps/dashboard/.env
 bun run dev                  # starts dashboard on http://localhost:3000
 ```
 
+For auth-enabled local dev, also set:
+
+- `NEXTAUTH_URL`
+- `NEXTAUTH_SECRET`
+- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`
+- `APPLE_ID` / `APPLE_SECRET` (or Apple team/key/private-key variables)
+
+Optional local bypass (non-production only):
+
+- `DEV_AUTH_BYPASS=true`
+
+When enabled, the landing page shows **Continue in Dev Mode**, which creates/uses a local dev user record (`dev.user@bluey.local`) in the DB.
+
 ## Pages
 
 | Route | Description |
 |---|---|
+| `/` | Landing + login home screen |
+| `/predictions` | Main predictions dashboard (requires sign-in) |
 | `/patterns` | Ranked pattern feed with filters (legs, search, top N) |
 | `/patterns/[id]` | Pattern detail: scores, hits, per-season data, watchlist management |
 | `/events/YYYY-MM-DD` | Night summary + stored events for a date |
+| `/settings` | User profile settings (requires sign-in) |
 
 ## API Routes
 
@@ -28,6 +44,7 @@ bun run dev                  # starts dashboard on http://localhost:3000
 | `/api/watchlist/update` | POST | Update watchlist entry (toggle enabled, edit notes) |
 | `/api/watchlist/remove` | POST | Remove pattern from watchlist |
 | `/api/events/explain` | POST | Returns stored events for a date (live explain TODO) |
+| `/api/user-config` | GET/POST | Load and persist signed-in user preferences |
 
 ## Notes
 

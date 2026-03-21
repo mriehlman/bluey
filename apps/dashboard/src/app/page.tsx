@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { getProviders, signIn, useSession } from "next-auth/react";
+import { useRouter } from "next/navigation";
 import { getTeamLogoUrl } from "@/lib/teamLogos";
 
 interface TeamInfo {
@@ -182,7 +184,7 @@ function filterPicks<T extends { outcomeType: string }>(
   return picks.filter((p) => (filter === "player" ? isPlayerPick(p.outcomeType) : !isPlayerPick(p.outcomeType)));
 }
 
-export default function PredictionsPage() {
+export function PredictionsPage() {
   const [date, setDate] = useState(() => getLocalDateString());
   const [data, setData] = useState<PredictionData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1105,5 +1107,91 @@ export default function PredictionsPage() {
       </div>
       </div>
     </>
+  );
+}
+
+export default function LandingPage() {
+  const router = useRouter();
+  const { data: session, status } = useSession();
+  const [providers, setProviders] = useState<Record<string, { id: string; name: string }> | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    getProviders()
+      .then((result) => {
+        if (mounted) {
+          setProviders(result as Record<string, { id: string; name: string }> | null);
+        }
+      })
+      .catch(() => {
+        if (mounted) {
+          setProviders({});
+        }
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (status === "authenticated" && session?.user) {
+      router.replace("/predictions");
+    }
+  }, [router, session, status]);
+
+  const googleAvailable = !!providers?.google;
+  const appleAvailable = !!providers?.apple;
+  const devAvailable = !!providers?.["dev-login"];
+  const hasProvider = googleAvailable || appleAvailable || devAvailable;
+
+  return (
+    <div className="auth-landing">
+      <div className="auth-card">
+        <div className="auth-eyebrow">Bluey Intelligence</div>
+        <h1>NBA prediction workspace</h1>
+        <p>
+          Private dashboard for model-driven picks, simulator workflows, and saved user context.
+        </p>
+
+        {status === "loading" || status === "authenticated" ? (
+          <p className="muted">Checking session...</p>
+        ) : (
+          <div className="auth-actions">
+            {googleAvailable ? (
+              <button
+                type="button"
+                className="auth-primary-btn"
+                onClick={() => signIn("google")}
+              >
+                Continue with Google
+              </button>
+            ) : null}
+            {appleAvailable ? (
+              <button
+                type="button"
+                className="auth-secondary-btn"
+                onClick={() => signIn("apple")}
+              >
+                Continue with Apple
+              </button>
+            ) : null}
+            {devAvailable ? (
+              <button
+                type="button"
+                className="auth-secondary-btn"
+                onClick={() => signIn("dev-login", { callbackUrl: "/predictions" })}
+              >
+                Continue in Dev Mode
+              </button>
+            ) : null}
+            {!hasProvider ? (
+              <p className="muted" style={{ margin: "0.25rem 0 0", fontSize: "0.82rem" }}>
+                No auth provider configured yet. Add OAuth credentials or enable dev auth in `apps/dashboard/.env`.
+              </p>
+            ) : null}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }

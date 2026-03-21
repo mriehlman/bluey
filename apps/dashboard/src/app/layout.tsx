@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import Nav from "./Nav";
+import Providers from "./providers";
+import RouteFrame from "./RouteFrame";
 
 export const metadata: Metadata = {
   title: "Bluey Dashboard",
@@ -15,8 +17,10 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <Nav />
-        <main>{children}</main>
+        <Providers>
+          <Nav />
+          <RouteFrame>{children}</RouteFrame>
+        </Providers>
       </body>
     </html>
   );
