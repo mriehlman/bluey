@@ -61,6 +61,9 @@ export default function Nav() {
             <Link href="/simulator" className={isActive("/simulator") ? "active" : ""}>
               Simulator
             </Link>
+            <Link href="/predictions/governance" className={isActive("/predictions/governance") ? "active" : ""}>
+              Governance
+            </Link>
           </>
         ) : null}
       </div>

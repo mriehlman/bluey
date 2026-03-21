@@ -460,6 +460,52 @@ button.btn-today:hover:not(:disabled) {
   border-color: var(--border);
 }
 
+.version-chip-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.version-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border-glow);
+  border-radius: 999px;
+  padding: 0.15rem 0.45rem;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  white-space: nowrap;
+}
+
+.delta-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.15rem 0.45rem;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.delta-positive {
+  color: #72d192;
+  border-color: rgba(114, 209, 146, 0.45);
+  background: rgba(114, 209, 146, 0.08);
+}
+
+.delta-negative {
+  color: #f08b8b;
+  border-color: rgba(240, 139, 139, 0.45);
+  background: rgba(240, 139, 139, 0.08);
+}
+
+.delta-neutral {
+  color: var(--text-muted);
+  border-color: var(--border);
+  background: var(--bg-elevated);
+}
+
 .mono {
   font-family: "JetBrains Mono", ui-monospace, monospace;
   font-size: 0.8125rem;

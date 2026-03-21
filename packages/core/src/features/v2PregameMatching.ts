@@ -24,6 +24,11 @@ export type OddsLite = {
   mlAway?: number | null;
 };
 
+export type PregamePlayerContext = {
+  homeTopScorer: { stat: number } | null;
+  awayTopScorer: { stat: number } | null;
+};
+
 function bucketValue(value: number, def: FeatureBinDef): string {
   for (let i = 0; i < def.edges.length; i++) {
     if (value <= def.edges[i]) return def.labels[i] ?? `B${i + 1}`;
@@ -55,8 +60,9 @@ export function buildPregameTokenSet(input: {
   context: GameContext;
   odds: OddsLite | null;
   bins: Map<string, FeatureBinDef>;
+  playerContext?: PregamePlayerContext;
 }): Set<string> {
-  const { season, context, odds, bins } = input;
+  const { season, context, odds, bins, playerContext } = input;
   const tokens = new Set<string>();
   tokens.add(`season:${season}`);
 
@@ -91,6 +97,35 @@ export function buildPregameTokenSet(input: {
     tokens.add(`${featureName}:${bucketValue(value, def)}`);
   };
 
+  const computePlaymakingResilience = (ast: number | null | undefined, oppDefRank: number | null | undefined) => {
+    if (ast == null || !Number.isFinite(ast) || ast <= 0) return null;
+    const pressure =
+      oppDefRank != null && Number.isFinite(oppDefRank)
+        ? (31 - oppDefRank) / 30
+        : 0.5;
+    return ast / (1 + pressure * 0.6);
+  };
+
+  // Discovery uses top-scorer share of top-3 scorers, but pregame has only top scorer.
+  // Approximate dependency from top scorer share of team PPG with a scaling factor.
+  const estimateRoleDependency = (
+    topScorerPpg: number | null | undefined,
+    teamPpg: number | null | undefined,
+  ) => {
+    if (
+      topScorerPpg == null ||
+      !Number.isFinite(topScorerPpg) ||
+      topScorerPpg <= 0 ||
+      teamPpg == null ||
+      !Number.isFinite(teamPpg) ||
+      teamPpg <= 0
+    ) {
+      return null;
+    }
+    const share = topScorerPpg / teamPpg;
+    return Math.max(0.2, Math.min(0.75, share * 1.8));
+  };
+
   addQ("home_oppg", context.homeOppg);
   addQ("away_oppg", context.awayOppg);
   addQ("home_ppg", context.homePpg);
@@ -101,6 +136,8 @@ export function buildPregameTokenSet(input: {
   addQ("away_rank_off", context.awayRankOff);
   addQ("home_rest_days", context.homeRestDays);
   addQ("away_rest_days", context.awayRestDays);
+  addQ("home_streak", context.homeStreak);
+  addQ("away_streak", context.awayStreak);
   addQ("home_net_rating", Number.isFinite(context.homePpg) && Number.isFinite(context.homeOppg) ? context.homePpg - context.homeOppg : null);
   addQ("away_net_rating", Number.isFinite(context.awayPpg) && Number.isFinite(context.awayOppg) ? context.awayPpg - context.awayOppg : null);
   addQ("home_injury_out", context.homeInjuryOutCount);
@@ -129,6 +166,22 @@ export function buildPregameTokenSet(input: {
   );
   addQ("home_late_scratch_risk", context.homeLateScratchRisk);
   addQ("away_late_scratch_risk", context.awayLateScratchRisk);
+  addQ(
+    "home_playmaking_resilience",
+    computePlaymakingResilience(context.homeAstPg, context.awayRankDef),
+  );
+  addQ(
+    "away_playmaking_resilience",
+    computePlaymakingResilience(context.awayAstPg, context.homeRankDef),
+  );
+  addQ(
+    "home_role_dependency",
+    estimateRoleDependency(playerContext?.homeTopScorer?.stat, context.homePpg),
+  );
+  addQ(
+    "away_role_dependency",
+    estimateRoleDependency(playerContext?.awayTopScorer?.stat, context.awayPpg),
+  );
   addQ(
     "late_scratch_risk_delta",
     Number.isFinite(context.homeLateScratchRisk ?? null) && Number.isFinite(context.awayLateScratchRisk ?? null)

@@ -17,12 +17,41 @@ export default async function EventDatePage({ params }: Props) {
     return <p>Invalid date format. Use YYYY-MM-DD.</p>;
   }
 
-  const night = await (prisma as any).night?.findUnique({ where: { date: dateVal } }).catch(() => null) ?? null;
+  const dayStart = new Date(dateVal);
+  const dayEnd = new Date(dateVal);
+  dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
 
-  const events = await (prisma as any).nightEvent?.findMany({
-    where: { date: dateVal },
-    orderBy: { eventKey: "asc" },
-  }).catch(() => []) ?? [];
+  const games = await prisma.game.findMany({
+    where: {
+      date: {
+        gte: dayStart,
+        lt: dayEnd,
+      },
+    },
+    select: {
+      id: true,
+      homeTeam: { select: { code: true, name: true } },
+      awayTeam: { select: { code: true, name: true } },
+    },
+  });
+
+  const gameIds = games.map((g) => g.id);
+  const gameLabelById = new Map(
+    games.map((g) => {
+      const home = g.homeTeam.code ?? g.homeTeam.name ?? "HOME";
+      const away = g.awayTeam.code ?? g.awayTeam.name ?? "AWAY";
+      return [g.id, `${away} @ ${home}`];
+    }),
+  );
+
+  const events = gameIds.length
+    ? await prisma.gameEvent.findMany({
+        where: { gameId: { in: gameIds } },
+        orderBy: [{ eventKey: "asc" }, { side: "asc" }],
+      })
+    : [];
+  const outcomeCount = events.filter((e) => e.type === "outcome").length;
+  const conditionCount = events.length - outcomeCount;
 
   const prevDate = new Date(dateVal);
   prevDate.setUTCDate(prevDate.getUTCDate() - 1);
@@ -39,20 +68,15 @@ export default async function EventDatePage({ params }: Props) {
       </div>
 
       <div className="card">
-        <h2>Night Summary</h2>
-        {night ? (
-          <table>
-            <tbody>
-              <tr><td><strong>Games</strong></td><td>{night.gameCount}</td></tr>
-              <tr><td><strong>Stats</strong></td><td>{night.statCount}</td></tr>
-              <tr><td><strong>Event Hits</strong></td><td>{night.eventHitCount}</td></tr>
-              <tr><td><strong>Logic Version</strong></td><td className="mono">{night.eventLogicVersion ?? "—"}</td></tr>
-              <tr><td><strong>Processed At</strong></td><td className="mono">{night.processedAt.toISOString()}</td></tr>
-            </tbody>
-          </table>
-        ) : (
-          <p className="muted">No Night record for this date.</p>
-        )}
+        <h2>Event Summary</h2>
+        <table>
+          <tbody>
+            <tr><td><strong>Games</strong></td><td>{games.length}</td></tr>
+            <tr><td><strong>Total Events</strong></td><td>{events.length}</td></tr>
+            <tr><td><strong>Condition Events</strong></td><td>{conditionCount}</td></tr>
+            <tr><td><strong>Outcome Events</strong></td><td>{outcomeCount}</td></tr>
+          </tbody>
+        </table>
       </div>
 
       <div className="card">
@@ -62,21 +86,21 @@ export default async function EventDatePage({ params }: Props) {
             <thead>
               <tr>
                 <th>Event Key</th>
+                <th>Type</th>
+                <th>Side</th>
                 <th>Season</th>
-                <th>Value</th>
+                <th>Game</th>
                 <th>Meta</th>
               </tr>
             </thead>
             <tbody>
-              {events.map((ev: any) => (
+              {events.map((ev) => (
                 <tr key={ev.id}>
                   <td className="mono">{ev.eventKey}</td>
+                  <td>{ev.type}</td>
+                  <td>{ev.side}</td>
                   <td>{ev.season}</td>
-                  <td>
-                    <span className={`badge ${ev.value ? "badge-green" : "badge-red"}`}>
-                      {ev.value ? "true" : "false"}
-                    </span>
-                  </td>
+                  <td>{gameLabelById.get(ev.gameId) ?? ev.gameId}</td>
                   <td className="mono" style={{ whiteSpace: "pre-wrap", maxWidth: 400 }}>
                     {ev.meta ? jsonPretty(ev.meta) : "—"}
                   </td>

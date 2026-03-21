@@ -127,6 +127,8 @@ model Game {
   featureTokens        GameFeatureToken[]
   patternV2Hits        PatternV2Hit[]
   suggestedPlayLedger  SuggestedPlayLedger[]
+  canonicalPredictions CanonicalPrediction[]
+  predictionRejections CanonicalPredictionRejection[]
 
   @@index([date])
   @@index([season, date])
@@ -597,4 +599,48 @@ model PredictionLog {
   @@index([outcomeType])
   @@index([actualResult])
   @@index([modelVersionName])
+}
+
+model CanonicalPrediction {
+  predictionId               String   @id
+  runId                      String?
+  runStartedAt               DateTime?
+  runContext                 Json?
+  gameId                     String
+  market                     String
+  selection                  String
+  confidenceScore            Float
+  edgeEstimate               Float
+  predictionContractVersion  String
+  rankingPolicyVersion       String
+  aggregationPolicyVersion   String
+  modelBundleVersion         String
+  featureSchemaVersion       String
+  featureSnapshotId          String
+  featureSnapshotPayload     Json
+  supportingPatterns         String[]
+  modelVotes                 Json
+  generatedAt                DateTime
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+  game                       Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@index([gameId, generatedAt])
+  @@index([runId, generatedAt])
+  @@index([predictionContractVersion, rankingPolicyVersion, aggregationPolicyVersion])
+}
+
+model CanonicalPredictionRejection {
+  id         String   @id
+  runId      String?
+  runDate    DateTime @db.Date
+  gameId     String
+  patternId  String
+  reasons    String[]
+  createdAt  DateTime @default(now())
+  game       Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@index([runDate, gameId])
+  @@index([runId])
+  @@index([patternId])
 }

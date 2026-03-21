@@ -14,9 +14,29 @@ import {
   impliedProbFromAmerican,
   payoutFromAmerican,
 } from "./productionPickSelection";
-import { scoreMetaModel, isLowSpecificityConditionToken, isLowSpecificityPattern, type MetaModel, type GameContextSignals } from "../patterns/metaModelCore";
+import { scoreMetaModel, isLowSpecificityPattern, type MetaModel, type GameContextSignals } from "../patterns/metaModelCore";
 import { PREDICTION_TUNING } from "../config/tuning";
 import type { GameContext } from "@prisma/client";
+import {
+  AGGREGATION_POLICY_VERSION,
+  createFeatureSnapshotId,
+  createFeatureSnapshotPayload,
+  createPredictionId,
+  DEFAULT_MODEL_BUNDLE_VERSION,
+  FEATURE_SCHEMA_VERSION,
+  PREDICTION_CONTRACT_VERSION,
+  REQUIRED_MODEL_VOTE_IDS,
+  RANKING_POLICY_VERSION,
+  type ModelVote,
+  type PredictionMarket,
+  type PredictionRecord,
+} from "./predictionContract";
+import {
+  evaluatePatternValidity,
+  extractFeatureKeysFromConditions,
+  inferLeakageRiskFromConditions,
+  inferLeakageRiskFromFeatureMetadata,
+} from "../patterns/patternValidity";
 
 // ── Re-exports for callers ─────────────────────────────────────────────────────
 
@@ -113,6 +133,13 @@ export type PredictionInput = {
   includeDebugPlays?: boolean;
   /** Override excludeFamilies (e.g. [] for backfill to capture all pick types). */
   overrideExcludeFamilies?: readonly string[];
+  predictionGeneratedAtIso?: string;
+  modelBundleVersion?: string;
+  sourceTimestamps?: {
+    oddsTimestampUsed?: string | null;
+    statsSnapshotCutoff?: string | null;
+    injuryLineupCutoff?: string | null;
+  };
 };
 
 export type ModelPick = {
@@ -132,6 +159,9 @@ export type PredictionOutput = {
   suggestedPlays: SuggestedPlay[];
   suggestedBetPicks: SuggestedPlay[];
   modelPicks: ModelPick[];
+  canonicalPredictions: PredictionRecord[];
+  featureSnapshotId: string;
+  rejectedPatternDiagnostics: Array<{ patternId: string; reasons: string[] }>;
   gateDiagnostics?: GateDiagnostics;
 };
 
@@ -614,6 +644,92 @@ function recordGateEval(
   stage.reasons[reason] = (stage.reasons[reason] ?? 0) + 1;
 }
 
+function inferPredictionMarket(outcomeType: string, marketPick: SuggestedMarketPick | null): PredictionMarket {
+  if (marketPick?.market?.startsWith("moneyline")) return "moneyline";
+  if (marketPick?.market?.startsWith("spread")) return "spread";
+  if (marketPick?.market?.startsWith("total")) return "total";
+  if (marketPick?.market?.startsWith("player_")) return "player_prop";
+  const base = outcomeType.replace(/:.*$/, "");
+  if (base.includes("WIN")) return "moneyline";
+  if (base.includes("COVERED")) return "spread";
+  if (base.includes("OVER") || base.includes("UNDER")) return "total";
+  if (base.includes("PLAYER") || base.includes("TOP_")) return "player_prop";
+  return "other";
+}
+
+function clamp01(n: number): number {
+  return Math.max(0, Math.min(1, n));
+}
+
+function buildModelVotes(args: {
+  confidence: number;
+  posteriorHitRate: number;
+  modelProbability: number;
+  metaScore: number | null;
+}): ModelVote[] {
+  const voteById: Record<string, ModelVote> = {
+    pattern_match_model: {
+      model_id: "pattern_match_model",
+      decision: args.posteriorHitRate >= 0.5 ? "yes" : "no",
+      confidence: clamp01(args.posteriorHitRate),
+    },
+    aggregation_model: {
+      model_id: "aggregation_model",
+      decision: args.modelProbability >= 0.5 ? "yes" : "no",
+      confidence: clamp01(args.modelProbability),
+    },
+    meta_model:
+      args.metaScore == null
+        ? {
+            model_id: "meta_model",
+            decision: "abstain",
+            confidence: null,
+          }
+        : {
+            model_id: "meta_model",
+            decision: args.metaScore >= 0.5 ? "yes" : "no",
+            confidence: clamp01(args.metaScore),
+          },
+    confidence_model: {
+      model_id: "confidence_model",
+      decision: args.confidence >= 0.5 ? "yes" : "no",
+      confidence: clamp01(args.confidence),
+    },
+  };
+  const votes: ModelVote[] = REQUIRED_MODEL_VOTE_IDS.map((id) => voteById[id]);
+  return votes;
+}
+
+function aggregateVotes(votes: ModelVote[]): {
+  pass: boolean;
+  confidence: number;
+  reason: string | null;
+} {
+  const activeVotes = votes.filter((vote) => vote.decision !== "abstain");
+  const abstains = votes.length - activeVotes.length;
+  if (activeVotes.length < 2) {
+    return { pass: false, confidence: 0, reason: "insufficient_non_abstain_votes" };
+  }
+  const highConfidenceNo = activeVotes.some(
+    (vote) => vote.decision === "no" && (vote.confidence ?? 0) >= 0.75,
+  );
+  if (highConfidenceNo) {
+    return { pass: false, confidence: 0, reason: "high_confidence_no_veto" };
+  }
+  const yesVotes = activeVotes.filter((vote) => vote.decision === "yes");
+  const yesMean =
+    yesVotes.length > 0
+      ? yesVotes.reduce((sum, vote) => sum + (vote.confidence ?? 0), 0) / yesVotes.length
+      : 0;
+  const abstainPenalty = votes.length > 0 ? (abstains / votes.length) * 0.15 : 0;
+  const confidence = clamp01(yesMean - abstainPenalty);
+  return {
+    pass: confidence >= 0.55,
+    confidence,
+    reason: confidence >= 0.55 ? null : "confidence_below_aggregation_threshold",
+  };
+}
+
 // ── Main engine ─────────────────────────────────────────────────────────────────
 
 export function generateGamePredictions(input: PredictionInput): PredictionOutput {
@@ -630,6 +746,9 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
     fallbackAmericanOdds,
     includeDebugPlays,
     overrideExcludeFamilies,
+    predictionGeneratedAtIso,
+    modelBundleVersion,
+    sourceTimestamps,
   } = input;
 
   const gateDiagnostics = includeDebugPlays ? newGateDiagnostics() : undefined;
@@ -650,7 +769,25 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
     context: gameContext,
     odds,
     bins: featureBins,
+    playerContext: {
+      homeTopScorer: gamePlayerCtx.homeTopScorer,
+      awayTopScorer: gamePlayerCtx.awayTopScorer,
+    },
   });
+  const featureSnapshotId = createFeatureSnapshotId({
+    gameId: gameContext.gameId,
+    season,
+    tokens: pregameTokenSet,
+  });
+  const featureSnapshotPayload = createFeatureSnapshotPayload({
+    gameId: gameContext.gameId,
+    season,
+    tokens: pregameTokenSet,
+    oddsTimestampUsed: sourceTimestamps?.oddsTimestampUsed ?? null,
+    statsSnapshotCutoff: sourceTimestamps?.statsSnapshotCutoff ?? null,
+    injuryLineupCutoff: sourceTimestamps?.injuryLineupCutoff ?? null,
+  });
+  const generatedAt = predictionGeneratedAtIso ?? new Date().toISOString();
 
   const discoveryV2RawMatches = matchDeployedPatterns(
     pregameTokenSet,
@@ -658,9 +795,27 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
     50,
   );
 
-  const discoveryV2Matches = discoveryV2RawMatches.filter(
-    (p) => !isLowSpecificityPattern(p.conditions ?? []),
-  );
+  const rejectedPatternDiagnostics: Array<{ patternId: string; reasons: string[] }> = [];
+  const discoveryV2Matches = discoveryV2RawMatches.filter((p) => {
+    if (isLowSpecificityPattern(p.conditions ?? [])) return false;
+    const conditionLeakageRisk = inferLeakageRiskFromConditions(p.conditions ?? []);
+    const featureLeakageRisk = inferLeakageRiskFromFeatureMetadata(
+      extractFeatureKeysFromConditions(p.conditions ?? []),
+    );
+    const validity = evaluatePatternValidity({
+      sampleSize: p.n,
+      posteriorHitRate: p.posteriorHitRate,
+      hasOutOfSampleEvidence: true,
+      hasLeakageRisk: conditionLeakageRisk || featureLeakageRisk,
+    });
+    if (!validity.pass) {
+      rejectedPatternDiagnostics.push({
+        patternId: p.id,
+        reasons: validity.reasons,
+      });
+    }
+    return validity.pass;
+  });
 
   // Model-only aggregation: ALL matched patterns, no market filter
   const allPlayMap = new Map<
@@ -675,6 +830,7 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
       bestEdge: number;
       bestN: number;
       playerTarget: V2PlayerTarget | null;
+      supportingPatternIds: Set<string>;
     }
   >();
 
@@ -693,6 +849,7 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
         bestEdge: p.edge,
         bestN: p.n,
         playerTarget: target,
+        supportingPatternIds: new Set([p.id]),
       });
     } else {
       existing.scoreSum += p.score;
@@ -704,6 +861,7 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
         existing.outcomeType = p.outcomeType;
         existing.bestConditions = p.conditions ?? [];
       }
+      existing.supportingPatternIds.add(p.id);
     }
   }
 
@@ -747,6 +905,7 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
         modelProbability,
         playerTarget: r.playerTarget,
         marketPick,
+        supportingPatterns: [...r.supportingPatternIds],
       };
     })
     .sort(
@@ -833,11 +992,57 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
       ? selectDiversifiedBetPicks(qualitySuggestedPlays, Math.max(3, maxBetPicksPerGame))
       : [];
 
+  const canonicalPredictions: PredictionRecord[] = allRankedPlays
+    .filter((p) => p.modelProbability >= 0.52)
+    .slice(0, 20)
+    .map((p) => {
+      const market = inferPredictionMarket(p.outcomeType, p.marketPick);
+      const modelVotes = buildModelVotes({
+        confidence: p.confidence,
+        posteriorHitRate: p.posteriorHitRate,
+        modelProbability: p.modelProbability,
+        metaScore: p.metaScore,
+      });
+      const aggregation = aggregateVotes(modelVotes);
+      if (!aggregation.pass) return null;
+      return {
+        prediction_id: createPredictionId({
+          gameId: gameContext.gameId,
+          market,
+          selection: p.outcomeType,
+          predictionContractVersion: PREDICTION_CONTRACT_VERSION,
+          modelBundleVersion: modelBundleVersion ?? DEFAULT_MODEL_BUNDLE_VERSION,
+          rankingPolicyVersion: RANKING_POLICY_VERSION,
+          aggregationPolicyVersion: AGGREGATION_POLICY_VERSION,
+          featureSnapshotId,
+        }),
+        game_id: gameContext.gameId,
+        market,
+        selection: p.outcomeType,
+        model_votes: modelVotes,
+        confidence_score: aggregation.confidence,
+        edge_estimate: p.marketPick?.edge ?? p.edge,
+        supporting_patterns: p.supportingPatterns,
+        prediction_contract_version: PREDICTION_CONTRACT_VERSION,
+        ranking_policy_version: RANKING_POLICY_VERSION,
+        aggregation_policy_version: AGGREGATION_POLICY_VERSION,
+        model_bundle_version: modelBundleVersion ?? DEFAULT_MODEL_BUNDLE_VERSION,
+        feature_schema_version: FEATURE_SCHEMA_VERSION,
+        feature_snapshot_id: featureSnapshotId,
+        feature_snapshot_payload: featureSnapshotPayload,
+        generated_at: generatedAt,
+      };
+    })
+    .filter((record): record is PredictionRecord => record != null);
+
   return {
     discoveryV2Matches: enrichedDiscoveryV2Matches,
     suggestedPlays,
     suggestedBetPicks,
     modelPicks,
+    canonicalPredictions,
+    featureSnapshotId,
+    rejectedPatternDiagnostics,
     ...(gateDiagnostics ? { gateDiagnostics } : {}),
   };
 }

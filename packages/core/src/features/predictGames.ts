@@ -1,4 +1,6 @@
 import { prisma } from "@bluey/db";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { computeContextForDate } from "./buildGameContext";
 import {
   loadEarlyInjuriesForDate,
@@ -17,10 +19,131 @@ import {
   type GamePlayerContext,
   type PlayerPropRow,
 } from "./predictionEngine";
+import { assertPredictionRecord, type PredictionRecord } from "./predictionContract";
 import { loadActiveModelVersion } from "../patterns/modelVersion";
 
 function getSeasonForDate(date: Date): number {
   return date.getMonth() >= 9 ? date.getFullYear() : date.getFullYear() - 1;
+}
+
+function sqlEsc(value: string): string {
+  return value.replaceAll("'", "''");
+}
+
+async function ensureCanonicalPredictionTables(): Promise<void> {
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "CanonicalPrediction" (
+      "predictionId" text PRIMARY KEY,
+      "runId" text,
+      "runStartedAt" timestamptz,
+      "runContext" jsonb,
+      "gameId" text NOT NULL,
+      "market" text NOT NULL,
+      "selection" text NOT NULL,
+      "confidenceScore" double precision NOT NULL,
+      "edgeEstimate" double precision NOT NULL,
+      "predictionContractVersion" text NOT NULL,
+      "rankingPolicyVersion" text NOT NULL,
+      "aggregationPolicyVersion" text NOT NULL,
+      "modelBundleVersion" text NOT NULL,
+      "featureSchemaVersion" text NOT NULL,
+      "featureSnapshotId" text NOT NULL,
+      "featureSnapshotPayload" jsonb NOT NULL,
+      "supportingPatterns" text[] NOT NULL,
+      "modelVotes" jsonb NOT NULL,
+      "generatedAt" timestamptz NOT NULL,
+      "createdAt" timestamptz NOT NULL DEFAULT NOW(),
+      "updatedAt" timestamptz NOT NULL DEFAULT NOW()
+    );
+  `);
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "runId" text`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "runStartedAt" timestamptz`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "runContext" jsonb`,
+  );
+  await prisma.$executeRawUnsafe(
+    `CREATE INDEX IF NOT EXISTS "CanonicalPrediction_runId_generatedAt_idx"
+     ON "CanonicalPrediction" ("runId","generatedAt")`,
+  );
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "CanonicalPredictionRejection" (
+      "id" text PRIMARY KEY,
+      "runId" text,
+      "runDate" date NOT NULL,
+      "gameId" text NOT NULL,
+      "patternId" text NOT NULL,
+      "reasons" text[] NOT NULL,
+      "createdAt" timestamptz NOT NULL DEFAULT NOW()
+    );
+  `);
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPredictionRejection" ADD COLUMN IF NOT EXISTS "runId" text`,
+  );
+  await prisma.$executeRawUnsafe(
+    `CREATE INDEX IF NOT EXISTS "CanonicalPredictionRejection_runId_idx"
+     ON "CanonicalPredictionRejection" ("runId")`,
+  );
+}
+
+async function persistCanonicalPredictions(input: {
+  records: PredictionRecord[];
+  runId: string;
+  runStartedAtIso: string;
+  runContext: Record<string, unknown>;
+}): Promise<void> {
+  for (const record of input.records) {
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "CanonicalPrediction"
+      ("predictionId","runId","runStartedAt","runContext","gameId","market","selection","confidenceScore","edgeEstimate",
+       "predictionContractVersion","rankingPolicyVersion","aggregationPolicyVersion",
+       "modelBundleVersion","featureSchemaVersion","featureSnapshotId","featureSnapshotPayload",
+       "supportingPatterns","modelVotes","generatedAt","updatedAt")
+      VALUES
+      ('${sqlEsc(record.prediction_id)}','${sqlEsc(input.runId)}','${sqlEsc(input.runStartedAtIso)}'::timestamptz,'${sqlEsc(JSON.stringify(input.runContext))}'::jsonb,'${sqlEsc(record.game_id)}','${sqlEsc(record.market)}',
+       '${sqlEsc(record.selection)}',${record.confidence_score},${record.edge_estimate},
+       '${sqlEsc(record.prediction_contract_version)}','${sqlEsc(record.ranking_policy_version)}',
+       '${sqlEsc(record.aggregation_policy_version)}','${sqlEsc(record.model_bundle_version)}',
+       '${sqlEsc(record.feature_schema_version)}','${sqlEsc(record.feature_snapshot_id)}',
+       '${sqlEsc(JSON.stringify(record.feature_snapshot_payload))}'::jsonb,
+       '${sqlEsc(`{${record.supporting_patterns.map((p) => `"${p.replaceAll('"', '\\"')}"`).join(",")}}`)}'::text[],
+       '${sqlEsc(JSON.stringify(record.model_votes))}'::jsonb,
+       '${sqlEsc(record.generated_at)}'::timestamptz,NOW())
+      ON CONFLICT ("predictionId") DO UPDATE SET
+        "runId" = EXCLUDED."runId",
+        "runStartedAt" = EXCLUDED."runStartedAt",
+        "runContext" = EXCLUDED."runContext",
+        "confidenceScore" = EXCLUDED."confidenceScore",
+        "edgeEstimate" = EXCLUDED."edgeEstimate",
+        "featureSnapshotPayload" = EXCLUDED."featureSnapshotPayload",
+        "supportingPatterns" = EXCLUDED."supportingPatterns",
+        "modelVotes" = EXCLUDED."modelVotes",
+        "generatedAt" = EXCLUDED."generatedAt",
+        "updatedAt" = NOW()`,
+    );
+  }
+}
+
+async function persistRejectionDiagnostics(input: {
+  runId: string;
+  runDate: string;
+  gameId: string;
+  rejectedPatternDiagnostics: Array<{ patternId: string; reasons: string[] }>;
+}): Promise<void> {
+  for (const row of input.rejectedPatternDiagnostics) {
+    const id = crypto.randomUUID();
+    const reasonsArrayLiteral = `{${row.reasons.map((r) => `"${r.replaceAll('"', '\\"')}"`).join(",")}}`;
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "CanonicalPredictionRejection"
+       ("id","runId","runDate","gameId","patternId","reasons")
+       VALUES
+       ('${id}','${sqlEsc(input.runId)}','${sqlEsc(input.runDate)}'::date,'${sqlEsc(input.gameId)}','${sqlEsc(row.patternId)}',
+        '${sqlEsc(reasonsArrayLiteral)}'::text[])`,
+    );
+  }
 }
 
 export async function predictGames(args: string[] = []): Promise<void> {
@@ -40,6 +163,21 @@ export async function predictGames(args: string[] = []): Promise<void> {
 
   const targetDate = new Date(dateStr + "T00:00:00Z");
   const season = Number(flags.season) || getSeasonForDate(targetDate);
+  const runId = crypto.randomUUID();
+  const runStartedAtIso = new Date().toISOString();
+  const runContext: Record<string, unknown> = {
+    date: dateStr,
+    season,
+    flags,
+  };
+  const canonicalRecords: PredictionRecord[] = [];
+  const rejectionArtifact: Array<{
+    runId: string;
+    gameId: string;
+    patternId: string;
+    reasons: string[];
+  }> = [];
+  await ensureCanonicalPredictionTables();
 
   console.log(`\n=== Predictions for ${dateStr} (season ${season}) ===\n`);
 
@@ -82,6 +220,7 @@ export async function predictGames(args: string[] = []): Promise<void> {
     deployedV2 = activeVersion.deployedPatterns;
     bins = new Map(Object.entries(activeVersion.featureBins));
     metaModel = activeVersion.metaModel;
+    runContext.modelVersionName = (activeVersion as { name?: string }).name ?? null;
   } else {
     deployedV2 = await prisma.patternV2.findMany({
       where: { status: "deployed" },
@@ -98,6 +237,7 @@ export async function predictGames(args: string[] = []): Promise<void> {
     }) as DeployedPatternV2[];
     bins = await loadLatestFeatureBins(prisma);
     metaModel = await loadMetaModel();
+    runContext.modelVersionName = null;
   }
 
   const tokenizedTodayCount = await prisma.gameFeatureToken.count({
@@ -376,6 +516,7 @@ export async function predictGames(args: string[] = []): Promise<void> {
             mlAway: (consensusOdds as any).mlAway ?? (consensusOdds as any).moneylineAway ?? null,
           }
         : null;
+      const modelVersionName = activeVersion ? (activeVersion as any).name ?? null : null;
 
       const engineOutput = generateGamePredictions({
         season,
@@ -388,7 +529,51 @@ export async function predictGames(args: string[] = []): Promise<void> {
         propsForGame: propsForGame,
         maxBetPicksPerGame: Math.max(1, LEDGER_TUNING.maxBetPicksPerGame),
         fallbackAmericanOdds: LEDGER_TUNING.fallbackAmericanOdds,
+        modelBundleVersion: modelVersionName ?? undefined,
+        sourceTimestamps: {
+          oddsTimestampUsed: consensusOdds?.fetchedAt?.toISOString?.() ?? null,
+          statsSnapshotCutoff: targetDate.toISOString(),
+          injuryLineupCutoff: targetDate.toISOString(),
+        },
       });
+      for (const record of engineOutput.canonicalPredictions) {
+        assertPredictionRecord(record);
+        canonicalRecords.push(record);
+      }
+      console.log(
+        `  Feature snapshot: ${engineOutput.featureSnapshotId} | canonical predictions: ${engineOutput.canonicalPredictions.length}`,
+      );
+      if (engineOutput.rejectedPatternDiagnostics.length > 0) {
+        for (const row of engineOutput.rejectedPatternDiagnostics) {
+          rejectionArtifact.push({
+            runId,
+            gameId: game.id,
+            patternId: row.patternId,
+            reasons: row.reasons,
+          });
+        }
+        await persistRejectionDiagnostics({
+          runId,
+          runDate: dateStr,
+          gameId: game.id,
+          rejectedPatternDiagnostics: engineOutput.rejectedPatternDiagnostics,
+        });
+        const reasonCounts = new Map<string, number>();
+        for (const row of engineOutput.rejectedPatternDiagnostics) {
+          for (const reason of row.reasons) {
+            reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + 1);
+          }
+        }
+        const topReasons = [...reasonCounts.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 4)
+          .map(([reason, n]) => `${reason}:${n}`)
+          .join(", ");
+        console.log(
+          `  Rejected patterns: ${engineOutput.rejectedPatternDiagnostics.length}` +
+            `${topReasons ? ` (${topReasons})` : ""}`,
+        );
+      }
 
       if (engineOutput.discoveryV2Matches.length > 0) {
         console.log(`  Discovery v2 matches (${engineOutput.discoveryV2Matches.length}):`);
@@ -429,7 +614,6 @@ export async function predictGames(args: string[] = []): Promise<void> {
       }
 
       // Log model picks for accuracy tracking
-      const modelVersionName = activeVersion ? (activeVersion as any).name ?? null : null;
       const logEntries = engineOutput.modelPicks.map((mp) => ({
         gameId: game.id,
         gameDate: targetDate,
@@ -449,6 +633,53 @@ export async function predictGames(args: string[] = []): Promise<void> {
         });
       }
     }
+  }
+
+  if (canonicalRecords.length > 0) {
+    await persistCanonicalPredictions({
+      records: canonicalRecords,
+      runId,
+      runStartedAtIso,
+      runContext,
+    });
+    const outDir = path.join(process.cwd(), "data", "predictions", "canonical");
+    await mkdir(outDir, { recursive: true });
+    const outFile = path.join(outDir, `${dateStr}.json`);
+    await writeFile(
+      outFile,
+      JSON.stringify(
+        {
+          runId,
+          runStartedAt: runStartedAtIso,
+          runContext,
+          predictions: canonicalRecords,
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+    console.log(`Saved canonical prediction artifacts: ${outFile} (${canonicalRecords.length} records)`);
+  }
+  if (rejectionArtifact.length > 0) {
+    const outDir = path.join(process.cwd(), "data", "predictions", "canonical");
+    await mkdir(outDir, { recursive: true });
+    const outFile = path.join(outDir, `${dateStr}.rejections.json`);
+    await writeFile(
+      outFile,
+      JSON.stringify(
+        {
+          runId,
+          runStartedAt: runStartedAtIso,
+          runContext,
+          rejections: rejectionArtifact,
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+    console.log(`Saved rejection diagnostics: ${outFile} (${rejectionArtifact.length} rows)`);
   }
 }
 

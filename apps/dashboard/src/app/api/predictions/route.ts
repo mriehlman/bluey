@@ -29,6 +29,143 @@ import { syncLineups } from "@bluey/core/ingest/syncLineups";
 import * as path from "path";
 export const dynamic = "force-dynamic";
 
+type CanonicalPredictionRow = {
+  predictionId: string;
+  runId: string | null;
+  runStartedAt: Date | string | null;
+  gameId: string;
+  market: string;
+  selection: string;
+  confidenceScore: number;
+  edgeEstimate: number;
+  generatedAt: Date | string;
+  predictionContractVersion: string;
+  modelBundleVersion: string;
+  featureSchemaVersion: string;
+  rankingPolicyVersion: string;
+  aggregationPolicyVersion: string;
+  featureSnapshotId: string;
+  supportingPatterns: string[] | null;
+  supportingPatternCount: number;
+  featureSnapshotPayloadSummary: unknown;
+  oddsTimestampUsed: string | null;
+  statsSnapshotCutoff: string | null;
+  injuryLineupCutoff: string | null;
+};
+
+async function canonicalPredictionTableExists(): Promise<boolean> {
+  const rows = await prisma.$queryRawUnsafe<Array<{ exists: boolean }>>(
+    `SELECT to_regclass('public."CanonicalPrediction"') IS NOT NULL as "exists"`,
+  );
+  return Boolean(rows[0]?.exists);
+}
+
+async function handleCanonicalPredictionList(url: URL) {
+  const exists = await canonicalPredictionTableExists();
+  if (!exists) {
+    return NextResponse.json({
+      count: 0,
+      predictions: [],
+      message: "CanonicalPrediction table not found yet.",
+    });
+  }
+  const dateStr = url.searchParams.get("date");
+  const runId = url.searchParams.get("runId");
+  const gameId = url.searchParams.get("gameId");
+  const market = url.searchParams.get("market");
+  const requestedLimit = Number.parseInt(url.searchParams.get("limit") ?? "200", 10);
+  const limit = Number.isFinite(requestedLimit) && requestedLimit > 0
+    ? Math.min(1000, requestedLimit)
+    : 200;
+
+  const where: string[] = ["1=1"];
+  if (dateStr) where.push(`cp."generatedAt"::date = '${sqlEsc(dateStr)}'::date`);
+  if (runId) where.push(`cp."runId" = '${sqlEsc(runId)}'`);
+  if (gameId) where.push(`cp."gameId" = '${sqlEsc(gameId)}'`);
+  if (market) where.push(`cp."market" = '${sqlEsc(market)}'`);
+
+  try {
+    const rows = await prisma.$queryRawUnsafe<CanonicalPredictionRow[]>(
+      `SELECT
+      cp."predictionId",
+      cp."runId",
+      cp."runStartedAt",
+      cp."gameId",
+      cp."market",
+      cp."selection",
+      cp."confidenceScore",
+      cp."edgeEstimate",
+      cp."generatedAt",
+      cp."predictionContractVersion",
+      cp."modelBundleVersion",
+      cp."featureSchemaVersion",
+      cp."rankingPolicyVersion",
+      cp."aggregationPolicyVersion",
+      cp."featureSnapshotId",
+      cp."supportingPatterns",
+      COALESCE(array_length(cp."supportingPatterns", 1), 0)::int as "supportingPatternCount",
+      jsonb_build_object(
+        'feature_schema_version', cp."featureSnapshotPayload"->>'feature_schema_version',
+        'token_count', COALESCE(jsonb_array_length(cp."featureSnapshotPayload"->'tokens'), 0),
+        'generated_from', cp."featureSnapshotPayload"->>'generated_from'
+      ) as "featureSnapshotPayloadSummary",
+      cp."featureSnapshotPayload"->>'odds_timestamp_used' as "oddsTimestampUsed",
+      cp."featureSnapshotPayload"->>'stats_snapshot_cutoff' as "statsSnapshotCutoff",
+      cp."featureSnapshotPayload"->>'injury_lineup_cutoff' as "injuryLineupCutoff"
+     FROM "CanonicalPrediction" cp
+     WHERE ${where.join(" AND ")}
+     ORDER BY cp."generatedAt" DESC, cp."gameId" ASC
+     LIMIT ${limit}`,
+    );
+
+    return NextResponse.json({
+      date: dateStr,
+      runId,
+      gameId,
+      market,
+      count: rows.length,
+      predictions: rows.map((row) => ({
+        predictionId: row.predictionId,
+        runId: row.runId,
+        runStartedAt: row.runStartedAt,
+        gameId: row.gameId,
+        market: row.market,
+        selection: row.selection,
+        confidenceScore: row.confidenceScore,
+        edgeEstimate: row.edgeEstimate,
+        generatedAt: row.generatedAt,
+        predictionContractVersion: row.predictionContractVersion,
+        modelBundleVersion: row.modelBundleVersion,
+        featureSchemaVersion: row.featureSchemaVersion,
+        rankingPolicyVersion: row.rankingPolicyVersion,
+        aggregationPolicyVersion: row.aggregationPolicyVersion,
+        featureSnapshotId: row.featureSnapshotId,
+        supportingPatternCount: row.supportingPatternCount,
+        supportingPatterns: row.supportingPatterns ?? [],
+        featureSnapshotPayloadSummary: row.featureSnapshotPayloadSummary,
+        sourceTimeMetadata: {
+          oddsTimestampUsed: row.oddsTimestampUsed,
+          statsSnapshotCutoff: row.statsSnapshotCutoff,
+          injuryLineupCutoff: row.injuryLineupCutoff,
+        },
+      })),
+    });
+  } catch (error) {
+    return NextResponse.json({
+      date: dateStr,
+      runId,
+      gameId,
+      market,
+      count: 0,
+      predictions: [],
+      message:
+        error instanceof Error
+          ? `Governance list unavailable: ${error.message}`
+          : "Governance list unavailable.",
+    });
+  }
+}
+
 async function loadActiveModelVersionFromDb() {
   try {
     const active = await prisma.modelVersion.findFirst({
@@ -423,6 +560,9 @@ async function queryGamesForDate(targetDate: Date, dateStr: string) {
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
+  if (url.searchParams.get("governance") === "1") {
+    return handleCanonicalPredictionList(url);
+  }
   const dateStr = url.searchParams.get("date");
   const refreshLedger = url.searchParams.get("refreshLedger") === "1";
   const includeDebugPlays = url.searchParams.get("debugPlays") === "1";

@@ -67,6 +67,18 @@ docs/           -> technical notes and migration docs
 4. File-system paths used by shared code must be repo-root aware (avoid raw `process.cwd()` assumptions).
 5. CLI remains the source for repeatable batch workflows.
 
+## Prediction Governance (Critical)
+
+Bluey prediction outputs follow a mandatory governance contract:
+
+- Reproducible pipeline: raw data -> normalized DB -> feature snapshot -> pattern evaluation -> prediction.
+- Canonical prediction shape is shared across producers/consumers.
+- Pattern validity requires minimum samples, threshold hit-rate, out-of-sample checks, and leakage guards.
+- Feature snapshots must be traceable from each generated prediction.
+- Dashboard is a consumer/view layer; CLI remains workflow authority.
+
+Detailed specification: `docs/prediction-governance.md`.
+
 ## Agent Update Protocol (Mandatory)
 
 When an agent makes meaningful changes, it must update this file in the same task if any of the following changed:
@@ -89,6 +101,12 @@ Minimum update checklist:
 - 2026-03-21: Split dashboard landing (`/`) from gated predictions (`/predictions`) and added NextAuth middleware for page-level access control.
 - 2026-03-21: Stabilized dashboard dev workflow by reverting to webpack dev (`next dev`) with disabled dev cache, and made auth providers conditional on configured env credentials.
 - 2026-03-21: Added non-production dev auth bypass (`DEV_AUTH_BYPASS`) with a seeded DB-backed dev user and landing-page "Continue in Dev Mode" sign-in.
+- 2026-03-21: Improved live pattern matching parity by extending pregame token generation with additional discovery-aligned features (streak, playmaking resilience, and role-dependency approximation).
+- 2026-03-21: Added formal prediction governance contract doc and mirrored critical governance rules in rolling agent context.
+- 2026-03-21: Hardened governance with contract/version metadata, snapshot payload replay linkage, stricter model vote semantics, leakage metadata checks, replay test, and rejected-pattern reason diagnostics.
+- 2026-03-21: Promoted canonical predictions to DB system-of-record with deterministic prediction IDs, ranking/aggregation policy versions, persisted rejection diagnostics, and source-time snapshot metadata.
+- 2026-03-21: Added dashboard governance lineage read path (API + UI) for canonical predictions and rejections, including per-prediction version/snapshot inspection with read-only constraints.
+- 2026-03-21: Extended governance lineage with run grouping, compare/diff support, export actions, prominent version chips, and summary-vs-detail payload separation for dashboard performance.
 
 ## Quick Start Commands (Current)
 
