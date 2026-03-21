@@ -1,5 +1,6 @@
 import { prisma } from "../db/prisma.js";
 import { DISCOVERY_DEFAULTS, VALIDATION_DEFAULTS } from "../config/tuning.js";
+import { outcomeFamily, matchesConditions, isLowSpecificityConditionToken } from "./metaModelCore.js";
 
 type FeatureBinDef = {
   kind: "quantile" | "fixed";
@@ -23,7 +24,7 @@ type SplitStats = {
 type CandidatePattern = {
   outcomeType: string;
   conditions: string[];
-  discoverySource: "tree" | "fpgrowth";
+  discoverySource: "tree" | "apriori" | "fpgrowth";
 };
 
 type TokenizedGame = {
@@ -134,6 +135,7 @@ async function loadGamesForFeatures(fromSeason: number, toSeason: number) {
           teamId: true,
           ppg: true,
           apg: true,
+          last5Ppg: true,
         },
       },
     },
@@ -249,6 +251,52 @@ function featureExtractors(): Record<string, FeatureExtractor> {
       if (denom <= 0) return null;
       return players[0] / denom;
     },
+    season_progress: (r) => {
+      const homeGp = (r.context?.homeWins ?? 0) + (r.context?.homeLosses ?? 0);
+      const awayGp = (r.context?.awayWins ?? 0) + (r.context?.awayLosses ?? 0);
+      const avgGp = (homeGp + awayGp) / 2;
+      if (avgGp <= 20) return 0;
+      if (avgGp <= 60) return 1;
+      return 2;
+    },
+    pace_interaction: (r) => {
+      const hp = r.context?.homePace;
+      const ap = r.context?.awayPace;
+      if (hp == null || ap == null) return null;
+      return (hp + ap) / 2;
+    },
+    rest_advantage_delta: (r) => {
+      const hr = r.context?.homeRestDays;
+      const ar = r.context?.awayRestDays;
+      if (hr == null || ar == null) return null;
+      return hr - ar;
+    },
+    streak_delta: (r) => {
+      const hs = r.context?.homeStreak;
+      const as_ = r.context?.awayStreak;
+      if (hs == null || as_ == null) return null;
+      return hs - as_;
+    },
+    home_top3_last5ppg: (r) => {
+      const vals = r.playerContexts
+        .filter((pc) => pc.teamId === r.homeTeamId && pc.last5Ppg != null && Number.isFinite(pc.last5Ppg))
+        .map((pc) => pc.last5Ppg!)
+        .sort((a, b) => b - a)
+        .slice(0, 3);
+      if (vals.length === 0) return null;
+      return vals.reduce((s, v) => s + v, 0) / vals.length;
+    },
+    away_top3_last5ppg: (r) => {
+      const vals = r.playerContexts
+        .filter((pc) => pc.teamId === r.awayTeamId && pc.last5Ppg != null && Number.isFinite(pc.last5Ppg))
+        .map((pc) => pc.last5Ppg!)
+        .sort((a, b) => b - a)
+        .slice(0, 3);
+      if (vals.length === 0) return null;
+      return vals.reduce((s, v) => s + v, 0) / vals.length;
+    },
+    home_fg3_rate: (r) => r.context?.homeFg3Pct ?? null,
+    away_fg3_rate: (r) => r.context?.awayFg3Pct ?? null,
   };
 }
 
@@ -273,6 +321,9 @@ export async function buildFeatureBins(args: string[] = []): Promise<void> {
     total_line: fixedBinDef(["LT_210", "RANGE_210_220", "RANGE_220_230", "RANGE_230_240", "GE_240"], [210, 220, 230, 240]),
     home_role_dependency: fixedBinDef(["LOW", "MODERATE", "HIGH", "EXTREME"], [0.33, 0.4, 0.5]),
     away_role_dependency: fixedBinDef(["LOW", "MODERATE", "HIGH", "EXTREME"], [0.33, 0.4, 0.5]),
+    season_progress: fixedBinDef(["EARLY", "MID", "LATE"], [0, 1]),
+    rest_advantage_delta: fixedBinDef(["OPP_RESTED", "EVEN", "HOME_RESTED"], [-1, 1]),
+    streak_delta: fixedBinDef(["LOSING_SIDE", "EVEN", "WINNING_SIDE"], [-3, 3]),
   };
 
   const bins: Array<{ featureName: string; def: FeatureBinDef; method: string }> = [];
@@ -372,27 +423,6 @@ export async function buildQuantizedGameFeatures(args: string[] = []): Promise<v
   console.log(`Upserted ${upserts} game token rows.`);
 }
 
-function matchesConditions(tokens: Set<string>, conditions: string[]): boolean {
-  for (const c of conditions) {
-    if (c.startsWith("!")) {
-      if (tokens.has(c.slice(1))) return false;
-    } else if (!tokens.has(c)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function isLowSpecificityConditionToken(token: string): boolean {
-  return (
-    token.startsWith("home_rest_days:") ||
-    token.startsWith("away_rest_days:") ||
-    token.startsWith("season:") ||
-    token === "home_is_b2b:true" ||
-    token === "away_is_b2b:true"
-  );
-}
-
 function conditionOverlap(a: string[], b: string[]): number {
   const aSet = new Set(a);
   const bSet = new Set(b);
@@ -418,15 +448,6 @@ function distinctConditionFeatureCount(conditions: string[]): number {
     if (key) keys.add(key);
   }
   return keys.size;
-}
-
-function outcomeFamily(outcomeType: string): string {
-  const base = outcomeType.replace(/:.*$/, "");
-  if (base.startsWith("PLAYER_")) return "PLAYER";
-  if (base.endsWith("_WIN") || base === "HOME_WIN" || base === "AWAY_WIN") return "MONEYLINE";
-  if (base.includes("COVERED")) return "SPREAD";
-  if (base.startsWith("TOTAL_") || base.startsWith("OVER_") || base.startsWith("UNDER_")) return "TOTAL";
-  return base.split("_").slice(0, 2).join("_");
 }
 
 function outcomeFamilyBucket(outcomeType: string): FamilyBucket {
@@ -533,6 +554,73 @@ function permutationPValueFromStats(
   return (extreme + 1) / (iterations + 1);
 }
 
+function fisherCombinedPValue(p1: number, p2: number): number {
+  const clamp = (v: number) => Math.max(1e-300, Math.min(1 - 1e-15, v));
+  const stat = -2 * (Math.log(clamp(p1)) + Math.log(clamp(p2)));
+  const df = 4;
+  const combined = 1 - chi2cdf(stat, df);
+  return Math.max(0, Math.min(1, combined));
+}
+
+function chi2cdf(x: number, df: number): number {
+  if (x <= 0) return 0;
+  return lowerIncompleteGamma(df / 2, x / 2) / gamma(df / 2);
+}
+
+function gamma(z: number): number {
+  if (z <= 0.5) {
+    return Math.PI / (Math.sin(Math.PI * z) * gamma(1 - z));
+  }
+  z -= 1;
+  const g = 7;
+  const c = [
+    0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+    771.32342877765313, -176.61502916214059, 12.507343278686905,
+    -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7,
+  ];
+  let x = c[0];
+  for (let i = 1; i < g + 2; i++) {
+    x += c[i] / (z + i);
+  }
+  const t = z + g + 0.5;
+  return Math.sqrt(2 * Math.PI) * Math.pow(t, z + 0.5) * Math.exp(-t) * x;
+}
+
+function lowerIncompleteGamma(a: number, x: number): number {
+  if (x <= 0) return 0;
+  if (x < a + 1) {
+    let sum = 1 / a;
+    let term = 1 / a;
+    for (let n = 1; n < 200; n++) {
+      term *= x / (a + n);
+      sum += term;
+      if (Math.abs(term) < sum * 1e-15) break;
+    }
+    return sum * Math.exp(-x + a * Math.log(x));
+  }
+  return gamma(a) - upperIncompleteGamma(a, x);
+}
+
+function upperIncompleteGamma(a: number, x: number): number {
+  let f = 1e-30;
+  let c = 1e-30;
+  let d = 1 / (x + 1 - a);
+  let result = d;
+  for (let i = 1; i < 200; i++) {
+    const an = -i * (i - a);
+    const bn = x + 2 * i + 1 - a;
+    d = bn + an * d;
+    if (Math.abs(d) < 1e-30) d = 1e-30;
+    c = bn + an / c;
+    if (Math.abs(c) < 1e-30) c = 1e-30;
+    d = 1 / d;
+    const delta = d * c;
+    result *= delta;
+    if (Math.abs(delta - 1) < 1e-15) break;
+  }
+  return Math.exp(-x + a * Math.log(x)) * result;
+}
+
 function bhPassSet(items: Array<{ id: string; pValue: number }>, alpha: number): Set<string> {
   if (items.length === 0 || alpha <= 0) return new Set();
   if (alpha >= 1) return new Set(items.map((i) => i.id));
@@ -563,6 +651,12 @@ function makeSeasonWeightFn(
   };
 }
 
+function adaptivePriorStrength(basePrior: number, baselineRate: number): number {
+  const dist = Math.abs(baselineRate - 0.5);
+  const scale = 1 + dist * 3;
+  return basePrior * scale;
+}
+
 function computeStats(
   rows: TokenizedGame[],
   outcomeType: string,
@@ -581,8 +675,9 @@ function computeStats(
   }
   const rawHitRate = n > 0 ? wins / n : 0;
   const priorBase = clampProb(baselineRate);
-  const alpha = priorBase * priorStrength;
-  const beta = (1 - priorBase) * priorStrength;
+  const effectivePrior = adaptivePriorStrength(priorStrength, baselineRate);
+  const alpha = priorBase * effectivePrior;
+  const beta = (1 - priorBase) * effectivePrior;
   const posteriorHitRate = (wins + alpha) / (n + alpha + beta);
   const edge = posteriorHitRate - priorBase;
   const lift = baselineRate > 0 ? rawHitRate / baselineRate : 0;
@@ -614,8 +709,9 @@ function computeWeightedStats(
   }
   const rawHitRate = n > 0 ? wins / n : 0;
   const priorBase = clampProb(baselineRate);
-  const alpha = priorBase * priorStrength;
-  const beta = (1 - priorBase) * priorStrength;
+  const effectivePrior = adaptivePriorStrength(priorStrength, baselineRate);
+  const alpha = priorBase * effectivePrior;
+  const beta = (1 - priorBase) * effectivePrior;
   const posteriorHitRate = (wins + alpha) / (n + alpha + beta);
   const edge = posteriorHitRate - priorBase;
   const lift = baselineRate > 0 ? rawHitRate / baselineRate : 0;
@@ -650,6 +746,24 @@ function splitRowsBySeasonLOSO(
     valRows: losoRows.filter((r) => r.season === season),
   }));
   return { mode: "loso", train: losoRows, losoFolds, forward };
+}
+
+function binaryEntropy(hits: number, total: number): number {
+  if (total <= 0) return 0;
+  const p = hits / total;
+  if (p <= 0 || p >= 1) return 0;
+  return -(p * Math.log2(p) + (1 - p) * Math.log2(1 - p));
+}
+
+function informationGain(
+  totalN: number, totalHits: number,
+  leftN: number, leftHits: number,
+  rightN: number, rightHits: number,
+): number {
+  const parentEntropy = binaryEntropy(totalHits, totalN);
+  const leftEntropy = binaryEntropy(leftHits, leftN);
+  const rightEntropy = binaryEntropy(rightHits, rightN);
+  return parentEntropy - (leftN / totalN) * leftEntropy - (rightN / totalN) * rightEntropy;
 }
 
 function treeCandidatesForOutcome(
@@ -700,9 +814,13 @@ function treeCandidatesForOutcome(
       }
       if (present.length < minLeaf || absent.length < minLeaf) continue;
 
-      const pHit = present.filter((r) => r.outcomes.has(outcomeType)).length / present.length;
-      const aHit = absent.filter((r) => r.outcomes.has(outcomeType)).length / absent.length;
-      const score = Math.abs(pHit - aHit) * Math.log(rows.length);
+      const pHits = present.filter((r) => r.outcomes.has(outcomeType)).length;
+      const aHits = absent.filter((r) => r.outcomes.has(outcomeType)).length;
+      const score = informationGain(
+        rows.length, pHits + aHits,
+        present.length, pHits,
+        absent.length, aHits,
+      );
       if (score > bestScore) {
         bestScore = score;
         bestToken = token;
@@ -732,7 +850,7 @@ function treeCandidatesForOutcome(
   return candidates;
 }
 
-function aprioriFrequentItemsets(trainRows: TokenizedGame[], maxSize: number, minSupport: number): string[][] {
+function aprioriFrequentItemsets(trainRows: TokenizedGame[], maxSize: number, minSupport: number, maxSingletons: number = 80): string[][] {
   const tokenCounts = new Map<string, number>();
   for (const row of trainRows) {
     for (const t of row.tokens) tokenCounts.set(t, (tokenCounts.get(t) ?? 0) + 1);
@@ -741,7 +859,7 @@ function aprioriFrequentItemsets(trainRows: TokenizedGame[], maxSize: number, mi
   let frequent: string[][] = [...tokenCounts.entries()]
     .filter(([, c]) => c >= minSupport)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 48)
+    .slice(0, maxSingletons)
     .map(([t]) => [t]);
 
   const all: string[][] = [...frequent];
@@ -882,6 +1000,7 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
     0.1,
     Math.min(1, Number(flags["season-weight-min"] ?? DISCOVERY_DEFAULTS.seasonWeightMin)),
   );
+  const maxSingletons = Math.max(10, Number(flags["max-singletons"] ?? DISCOVERY_DEFAULTS.maxSingletons));
 
   console.log("\n=== Discover Patterns v2 ===\n");
   const games = await loadTokenizedGames();
@@ -961,13 +1080,13 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
     );
   }
 
-  const itemsets = aprioriFrequentItemsets(splits.train, maxItemset, minSupport);
+  const itemsets = aprioriFrequentItemsets(splits.train, maxItemset, minSupport, maxSingletons);
   for (const outcomeType of outcomeTypes) {
     for (const itemset of itemsets) {
       rawCandidates.push({
         outcomeType,
         conditions: itemset,
-        discoverySource: "fpgrowth",
+        discoverySource: "apriori",
       });
     }
   }
@@ -1020,7 +1139,7 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
       c.conditions,
       forwardBase,
       priorStrength,
-      seasonWeight,
+      undefined,
     );
     if (forward.n < minForwardSamples) continue;
     if (useHitRateObjective) {
@@ -1347,6 +1466,7 @@ export async function validatePatternsV2(args: string[] = []): Promise<void> {
   const evalRows: Array<{
     id: string;
     status: string;
+    family: string;
     trainOk: boolean;
     valOk: boolean;
     forwardOk: boolean;
@@ -1392,17 +1512,27 @@ export async function validatePatternsV2(args: string[] = []): Promise<void> {
     evalRows.push({
       id: p.id,
       status: p.status,
+      family: outcomeFamily(p.outcomeType),
       trainOk,
       valOk,
       forwardOk,
-      pValue: Math.max(pVal, pForward),
+      pValue: fisherCombinedPValue(pVal, pForward),
     });
   }
 
-  const fdrEligible = evalRows
-    .filter((r) => r.trainOk && r.valOk && r.forwardOk)
-    .map((r) => ({ id: r.id, pValue: r.pValue }));
-  const fdrPass = bhPassSet(fdrEligible, fdrAlpha);
+  const fdrEligible = evalRows.filter((r) => r.trainOk && r.valOk && r.forwardOk);
+  const familyGroups = new Map<string, Array<{ id: string; pValue: number }>>();
+  for (const r of fdrEligible) {
+    const group = familyGroups.get(r.family) ?? [];
+    group.push({ id: r.id, pValue: r.pValue });
+    familyGroups.set(r.family, group);
+  }
+  const fdrPass = new Set<string>();
+  for (const [, group] of familyGroups) {
+    for (const id of bhPassSet(group, fdrAlpha)) {
+      fdrPass.add(id);
+    }
+  }
   const familyEligible = new Map<string, number>();
   const familyPassed = new Map<string, number>();
 
@@ -1460,7 +1590,7 @@ export async function validatePatternsV2(args: string[] = []): Promise<void> {
     );
   }
   console.log(
-    `FDR gate: method=${fdrMethod}, alpha=${fdrAlpha.toFixed(3)} | eligible=${fdrEligible.length} | passed=${fdrPass.size}` +
+    `FDR gate: method=${fdrMethod} (stratified by family, Fisher combined p-values), alpha=${fdrAlpha.toFixed(3)} | eligible=${fdrEligible.length} | passed=${fdrPass.size}` +
       (fdrMethod === "perm-bh" ? ` | permutations=${fdrPermutations}, seed=${fdrSeed}` : ""),
   );
   const familyRows = [...new Set([...familyEligible.keys(), ...familyPassed.keys()])].sort();
@@ -1494,7 +1624,7 @@ export async function monitorPatternDecay(args: string[] = []): Promise<void> {
   const clvWindowDays = Math.max(7, Number(flags["clv-window-days"] ?? 60));
   const clvMinSamples = Math.max(10, Number(flags["clv-min-samples"] ?? 40));
   const clvMinEdge = Number(flags["clv-min-edge"] ?? -0.005);
-  const windowDays = [30, 60, 90];
+  const windowDays = [60, 90, 120];
 
   console.log("\n=== Monitor Pattern Decay ===\n");
   const deployedPatterns = await prisma.$queryRawUnsafe<
@@ -1579,7 +1709,7 @@ export async function monitorPatternDecay(args: string[] = []): Promise<void> {
   for (const { id: patternId, outcomeType } of deployedPatterns) {
     processed++;
     const hits = byPattern.get(patternId) ?? [];
-    const windows = [30, 60, 90].map((days) => {
+    const windows = windowDays.map((days) => {
       const minDate = new Date(now.getTime() - days * 86_400_000);
       const slice = hits.filter((h) => h.date >= minDate);
       const n = slice.length;

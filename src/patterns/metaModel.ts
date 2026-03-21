@@ -60,6 +60,20 @@ function mean(values: number[]): number {
   return values.reduce((a, b) => a + b, 0) / values.length;
 }
 
+function shuffleArray<T>(arr: T[]): void {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = arr[i];
+    arr[i] = arr[j];
+    arr[j] = tmp;
+  }
+}
+
+function cosineDecayLr(baseLr: number, epoch: number, totalEpochs: number, minLr: number = 0.001): number {
+  const progress = epoch / Math.max(1, totalEpochs - 1);
+  return minLr + (baseLr - minLr) * 0.5 * (1 + Math.cos(Math.PI * progress));
+}
+
 function safeFeature(raw: number, fallback: number): number {
   return Number.isFinite(raw) ? raw : fallback;
 }
@@ -170,11 +184,14 @@ function fitLinearModel(
 
   let bias = 0;
   const weights = Array.from({ length: dims }, () => 0);
+  const shuffled = [...train];
 
   for (let epoch = 0; epoch < epochs; epoch++) {
+    shuffleArray(shuffled);
+    const epochLr = cosineDecayLr(lr, epoch, epochs);
     let gBias = 0;
     const gW = Array.from({ length: dims }, () => 0);
-    for (const row of train) {
+    for (const row of shuffled) {
       const x = row.x.map((v, i) => (v - (means[i] ?? 0)) / (stds[i] ?? 1));
       const z =
         bias +
@@ -186,10 +203,10 @@ function fitLinearModel(
         gW[i] += err * (x[i] ?? 0);
       }
     }
-    const invN = 1 / train.length;
-    bias -= lr * invN * gBias;
+    const invN = 1 / shuffled.length;
+    bias -= epochLr * invN * gBias;
     for (let i = 0; i < dims; i++) {
-      weights[i] -= lr * (invN * gW[i] + l2 * weights[i]);
+      weights[i] -= epochLr * (invN * gW[i] + l2 * weights[i]);
     }
   }
   return { means, stds, bias, weights };
@@ -461,13 +478,17 @@ export async function trainMetaModel(args: string[] = []): Promise<void> {
   samples.sort((a, b) => a.date.getTime() - b.date.getTime());
   const maxDate = samples[samples.length - 1]?.date;
   const cutoff = maxDate ? new Date(maxDate.getTime() - valDays * 86_400_000) : new Date();
+  const calDays = Math.floor(valDays / 2);
+  const calCutoff = maxDate ? new Date(maxDate.getTime() - calDays * 86_400_000) : new Date();
   const train = samples.filter((s) => s.date < cutoff);
-  const validation = samples.filter((s) => s.date >= cutoff);
-  if (train.length < 300 || validation.length < 100) {
+  const validation = samples.filter((s) => s.date >= cutoff && s.date < calCutoff);
+  const calibration = samples.filter((s) => s.date >= calCutoff);
+  if (train.length < 300 || validation.length < 50 || calibration.length < 50) {
     throw new Error(
-      `Insufficient split: train=${train.length}, validation=${validation.length}. Adjust --val-days.`,
+      `Insufficient 3-way split: train=${train.length}, val=${validation.length}, cal=${calibration.length}. Adjust --val-days.`,
     );
   }
+  console.log(`3-way split: train=${train.length}, val=${validation.length}, cal=${calibration.length}`);
 
   const dims = train[0]?.x.length ?? 0;
   const means = Array.from({ length: dims }, (_, i) => mean(train.map((s) => s.x[i] ?? 0)));
@@ -476,13 +497,16 @@ export async function trainMetaModel(args: string[] = []): Promise<void> {
   let bias = 0;
   const weights = Array.from({ length: dims }, () => 0);
   const familyWeights: Record<string, number> = {};
+  const shuffled = [...train];
 
   for (let epoch = 0; epoch < epochs; epoch++) {
+    shuffleArray(shuffled);
+    const epochLr = cosineDecayLr(lr, epoch, epochs);
     let gBias = 0;
     const gW = Array.from({ length: dims }, () => 0);
     const gF: Record<string, number> = {};
 
-    for (const row of train) {
+    for (const row of shuffled) {
       const x = row.x.map((v, i) => (v - (means[i] ?? 0)) / (stds[i] ?? 1));
       const fWeight = familyWeights[row.family] ?? 0;
       const z =
@@ -498,13 +522,13 @@ export async function trainMetaModel(args: string[] = []): Promise<void> {
       gF[row.family] = (gF[row.family] ?? 0) + err;
     }
 
-    const invN = 1 / train.length;
-    bias -= lr * invN * gBias;
+    const invN = 1 / shuffled.length;
+    bias -= epochLr * invN * gBias;
     for (let i = 0; i < dims; i++) {
-      weights[i] -= lr * (invN * gW[i] + l2 * weights[i]);
+      weights[i] -= epochLr * (invN * gW[i] + l2 * weights[i]);
     }
     for (const [family, grad] of Object.entries(gF)) {
-      familyWeights[family] = (familyWeights[family] ?? 0) - lr * (invN * grad + l2 * (familyWeights[family] ?? 0));
+      familyWeights[family] = (familyWeights[family] ?? 0) - epochLr * (invN * grad + l2 * (familyWeights[family] ?? 0));
     }
   }
 
@@ -566,8 +590,7 @@ export async function trainMetaModel(args: string[] = []): Promise<void> {
     model.familyModels = familyModels;
   }
 
-  // Calibrate probabilities on validation slice (Platt scaling), globally and per family.
-  const valPreds = validation.map((s) =>
+  const calPreds = calibration.map((s) =>
     scoreMetaModel(model, {
       outcomeType: s.outcomeType,
       posteriorHitRate: s.x[0] ?? 0.5,
@@ -581,17 +604,17 @@ export async function trainMetaModel(args: string[] = []): Promise<void> {
   );
   const globalCalibration = selectBestCalibrator(
     calibrationMethod,
-    valPreds,
-    validation.map((s) => s.y),
+    calPreds,
+    calibration.map((s) => s.y),
   );
   model.calibrators = {
     global: globalCalibration.calibrator,
     family: {},
   };
-  console.log(`Calibration global: method=${globalCalibration.methodUsed}, n=${validation.length}`);
-  for (const family of [...new Set(validation.map((s) => s.family))]) {
-    const famRows = validation.filter((s) => s.family === family);
-    if (famRows.length < 80) continue;
+  console.log(`Calibration global: method=${globalCalibration.methodUsed}, n=${calibration.length} (separate holdout)`);
+  for (const family of [...new Set(calibration.map((s) => s.family))]) {
+    const famRows = calibration.filter((s) => s.family === family);
+    if (famRows.length < 40) continue;
     const famPreds = famRows.map((s) =>
       scoreMetaModel(model, {
         outcomeType: s.outcomeType,
@@ -614,7 +637,7 @@ export async function trainMetaModel(args: string[] = []): Promise<void> {
   }
 
   const outPath = await saveMetaModel(model, modelPath);
-  console.log(`Rows: total=${samples.length}, train=${train.length}, validation=${validation.length}`);
+  console.log(`Rows: total=${samples.length}, train=${train.length}, val=${validation.length}, cal=${calibration.length}`);
   console.log(
     `Validation: logloss=${model.metrics.validation.logLoss.toFixed(4)}, brier=${model.metrics.validation.brier.toFixed(4)}, accuracy=${(model.metrics.validation.accuracy * 100).toFixed(1)}%`,
   );

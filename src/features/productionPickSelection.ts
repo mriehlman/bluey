@@ -1,6 +1,5 @@
 import { PREDICTION_TUNING } from "../config/tuning";
-
-export type BetFamily = "PLAYER" | "TOTAL" | "SPREAD" | "MONEYLINE" | "OTHER";
+import { betFamilyForOutcome, type BetFamily } from "../patterns/metaModelCore";
 
 export type SuggestedMarketPickLike = {
   overPrice: number;
@@ -125,16 +124,7 @@ export function outcomeDedupFamily(outcomeType: string): string {
   return base;
 }
 
-export function betFamilyForOutcome(outcomeType: string): BetFamily {
-  const base = outcomeType.replace(/:.*$/, "");
-  if (base.startsWith("PLAYER_") || base.startsWith("HOME_TOP_") || base.startsWith("AWAY_TOP_")) {
-    return "PLAYER";
-  }
-  if (base.startsWith("TOTAL_") || base === "OVER_HIT" || base === "UNDER_HIT") return "TOTAL";
-  if (base.includes("COVERED")) return "SPREAD";
-  if (base === "HOME_WIN" || base === "AWAY_WIN") return "MONEYLINE";
-  return "OTHER";
-}
+export { betFamilyForOutcome, type BetFamily } from "../patterns/metaModelCore";
 
 export function gateThresholdsForFamily(family: BetFamily): {
   minPosterior: number;

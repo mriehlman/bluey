@@ -78,8 +78,42 @@ export function outcomeFamily(outcomeType: string): string {
   if (base.endsWith("_WIN") || base === "HOME_WIN" || base === "AWAY_WIN") return "MONEYLINE";
   if (base.includes("COVERED")) return "SPREAD";
   if (base.startsWith("TOTAL_") || base.startsWith("OVER_") || base.startsWith("UNDER_")) return "TOTAL";
-  if (base.includes("MARGIN") || base.includes("BLOWOUT")) return "MARGIN";
   return "OTHER";
+}
+
+export type BetFamily = "PLAYER" | "TOTAL" | "SPREAD" | "MONEYLINE" | "OTHER";
+
+export function betFamilyForOutcome(outcomeType: string): BetFamily {
+  return outcomeFamily(outcomeType) as BetFamily;
+}
+
+export function matchesConditions(tokens: Set<string>, conditions: string[]): boolean {
+  for (const c of conditions) {
+    if (!c) continue;
+    if (c.startsWith("!")) {
+      if (tokens.has(c.slice(1))) return false;
+    } else if (!tokens.has(c)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function isLowSpecificityConditionToken(token: string): boolean {
+  return (
+    token.startsWith("home_rest_days:") ||
+    token.startsWith("away_rest_days:") ||
+    token.startsWith("season:") ||
+    token === "home_is_b2b:true" ||
+    token === "away_is_b2b:true"
+  );
+}
+
+export function isLowSpecificityPattern(conditions: string[]): boolean {
+  if (conditions.length !== 1) return false;
+  const c = conditions[0];
+  if (!c || c.startsWith("!")) return false;
+  return isLowSpecificityConditionToken(c);
 }
 
 export function sigmoid(x: number): number {

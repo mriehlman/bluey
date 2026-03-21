@@ -1,4 +1,5 @@
 import type { GameContext } from "@prisma/client";
+import { matchesConditions } from "../patterns/metaModelCore";
 
 export type FeatureBinDef = {
   kind: "quantile" | "fixed";
@@ -28,18 +29,6 @@ function bucketValue(value: number, def: FeatureBinDef): string {
     if (value <= def.edges[i]) return def.labels[i] ?? `B${i + 1}`;
   }
   return def.labels[def.labels.length - 1] ?? `B${def.edges.length + 1}`;
-}
-
-function matchesConditions(tokens: Set<string>, conditions: string[]): boolean {
-  for (const c of conditions ?? []) {
-    if (!c) continue;
-    if (c.startsWith("!")) {
-      if (tokens.has(c.slice(1))) return false;
-    } else if (!tokens.has(c)) {
-      return false;
-    }
-  }
-  return true;
 }
 
 export async function loadLatestFeatureBins(
@@ -150,6 +139,26 @@ export function buildPregameTokenSet(input: {
   addQ("away_is_b2b", context.awayIsB2b ? 1 : 0);
   tokens.add(`home_is_b2b:${context.homeIsB2b ? "true" : "false"}`);
   tokens.add(`away_is_b2b:${context.awayIsB2b ? "true" : "false"}`);
+
+  const homeGp = (context.homeWins ?? 0) + (context.homeLosses ?? 0);
+  const awayGp = (context.awayWins ?? 0) + (context.awayLosses ?? 0);
+  const avgGp = (homeGp + awayGp) / 2;
+  addQ("season_progress", avgGp <= 20 ? 0 : avgGp <= 60 ? 1 : 2);
+
+  if (context.homePace != null && context.awayPace != null) {
+    addQ("pace_interaction", (context.homePace + context.awayPace) / 2);
+  }
+
+  if (context.homeRestDays != null && context.awayRestDays != null) {
+    addQ("rest_advantage_delta", context.homeRestDays - context.awayRestDays);
+  }
+
+  if (context.homeStreak != null && context.awayStreak != null) {
+    addQ("streak_delta", context.homeStreak - context.awayStreak);
+  }
+
+  addQ("home_fg3_rate", context.homeFg3Pct);
+  addQ("away_fg3_rate", context.awayFg3Pct);
 
   return tokens;
 }

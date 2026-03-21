@@ -1,6 +1,7 @@
 import * as fs from "fs/promises";
 import { prisma } from "../db/prisma.js";
 import { DISCOVERY_DEFAULTS, VALIDATION_DEFAULTS } from "../config/tuning.js";
+import { matchesConditions } from "./metaModelCore.js";
 
 type TokenizedGame = {
   gameId: string;
@@ -57,17 +58,6 @@ function parseFlags(args: string[]): Record<string, string> {
     }
   }
   return flags;
-}
-
-function matchesConditions(tokens: Set<string>, conditions: string[]): boolean {
-  for (const c of conditions) {
-    if (c.startsWith("!")) {
-      if (tokens.has(c.slice(1))) return false;
-    } else if (!tokens.has(c)) {
-      return false;
-    }
-  }
-  return true;
 }
 
 function hasOutcome(outcomes: Set<string>, outcomeType: string): boolean {

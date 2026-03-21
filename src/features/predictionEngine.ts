@@ -14,7 +14,7 @@ import {
   impliedProbFromAmerican,
   payoutFromAmerican,
 } from "./productionPickSelection";
-import { scoreMetaModel, type MetaModel } from "../patterns/metaModelCore";
+import { scoreMetaModel, isLowSpecificityConditionToken, isLowSpecificityPattern, type MetaModel } from "../patterns/metaModelCore";
 import { PREDICTION_TUNING } from "../config/tuning";
 import type { GameContext } from "@prisma/client";
 
@@ -65,6 +65,7 @@ export type SuggestedMarketPick = {
   overPrice: number;
   impliedProb: number;
   estimatedProb: number;
+  modelEstimatedProb?: number;
   edge: number;
   ev: number;
   label: string;
@@ -122,23 +123,6 @@ export type PredictionOutput = {
 };
 
 // ── Suppression / curation helpers ──────────────────────────────────────────────
-
-function isLowSpecificityConditionToken(token: string): boolean {
-  return (
-    token.startsWith("home_rest_days:") ||
-    token.startsWith("away_rest_days:") ||
-    token.startsWith("season:") ||
-    token === "home_is_b2b:true" ||
-    token === "away_is_b2b:true"
-  );
-}
-
-function isLowSpecificityPattern(conditions: string[]): boolean {
-  if (conditions.length !== 1) return false;
-  const c = conditions[0];
-  if (!c || c.startsWith("!")) return false;
-  return isLowSpecificityConditionToken(c);
-}
 
 function isGenericPlayerOutcome(outcomeType: string): boolean {
   const base = outcomeType.replace(/:.*$/, "");
@@ -555,13 +539,10 @@ function selectBestMarketBackedPick(args: {
             ? (target.statValue - offeredThreshold) * 0.03
             : 0;
     const estModel = Math.max(0.05, Math.min(0.95, baseProb + lineDelta * slope + statBonus));
-    const blendWeightModel = Math.max(
-      0.35,
-      Math.min(0.85, 0.45 + Math.log(support) / 10 + confidence * 0.15),
-    );
+    const maxDeviation = 0.25;
     const est = Math.max(
       0.05,
-      Math.min(0.95, blendWeightModel * estModel + (1 - blendWeightModel) * implied),
+      Math.min(0.95, Math.max(implied - maxDeviation, Math.min(implied + maxDeviation, estModel))),
     );
     const ev = est * payoutFromAmerican(overPrice) - (1 - est);
     if (ev > bestEv) {
@@ -574,6 +555,7 @@ function selectBestMarketBackedPick(args: {
         overPrice: c.overPrice ?? 0,
         impliedProb: implied,
         estimatedProb: est,
+        modelEstimatedProb: estModel,
         edge: est - implied,
         ev,
         label: labelForMarketPick(

@@ -45,6 +45,7 @@ export const DISCOVERY_DEFAULTS = {
   forwardStabilityWeight: 12,
   seasonWeightEnabled: true,
   seasonWeightMin: 0.4,
+  maxSingletons: 80,
 } as const;
 
 export const VALIDATION_DEFAULTS = {
@@ -65,7 +66,7 @@ export const VALIDATION_DEFAULTS = {
   fdrPermutations: 3000,
   fdrSeed: 1337,
   runDecay: true,
-  decayMinWindowSamples: 25,
+  decayMinWindowSamples: 15,
   decayCollapseEdge: -0.005,
   progressEvery: 50,
 } as const;
@@ -74,8 +75,8 @@ const defaultFamilyGates: Record<"PLAYER" | "TOTAL" | "SPREAD" | "MONEYLINE" | "
   // Bootstrap profile: intentionally permissive to restore actionable coverage.
   // Tighten later after baseline rows/hit-rate are established.
   PLAYER: { minPosterior: 0.53, minMeta: 0.52, minEv: 0.00 },
-  TOTAL: { minPosterior: 0.51, minMeta: 0.49, minEv: -0.005 },
-  SPREAD: { minPosterior: 0.51, minMeta: 0.49, minEv: -0.005 },
+  TOTAL: { minPosterior: 0.51, minMeta: 0.49, minEv: 0 },
+  SPREAD: { minPosterior: 0.51, minMeta: 0.49, minEv: 0 },
   MONEYLINE: { minPosterior: 0.55, minMeta: 0.52, minEv: 0.01 },
   OTHER: { minPosterior: 0.52, minMeta: 0.50, minEv: 0.00 },
 };

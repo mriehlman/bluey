@@ -926,32 +926,42 @@ export default function PredictionsPage() {
 
       {/* Parlay builder */}
       <div className="card" style={{ padding: "1rem", flex: 1 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem", gap: "0.4rem" }}>
           <h3 style={{ margin: 0, fontSize: "1rem" }}>Parlay Builder</h3>
-          {data && (
+          <div style={{ display: "flex", gap: "0.3rem" }}>
+            {data && (
+              <button
+                className="btn-today"
+                style={{ fontSize: "0.7rem", padding: "0.2rem 0.5rem" }}
+                onClick={() => {
+                  const legs: typeof parlayLegs = [];
+                  for (const game of data.games) {
+                    const hl = game.homeTeam.code ?? game.homeTeam.name ?? `Team ${game.homeTeam.id}`;
+                    const al = game.awayTeam.code ?? game.awayTeam.name ?? `Team ${game.awayTeam.id}`;
+                    const ml = `${al} @ ${hl}`;
+                    for (const [i, play] of (game.suggestedBetPicks ?? []).entries()) {
+                      const key = `${game.id}|${play.outcomeType}|${i}`;
+                      const label = resolveLabel(play.displayLabel, play.outcomeType, hl, al);
+                      const american = play.marketPick?.overPrice ?? -110;
+                      const decimal = american > 0 ? 1 + american / 100 : 1 + 100 / Math.abs(american);
+                      legs.push({ key, gameLabel: ml, pickLabel: label, odds: decimal });
+                    }
+                  }
+                  setParlayLegs(legs);
+                }}
+              >
+                Add All
+              </button>
+            )}
             <button
               className="btn-today"
               style={{ fontSize: "0.7rem", padding: "0.2rem 0.5rem" }}
-              onClick={() => {
-                const legs: typeof parlayLegs = [];
-                for (const game of data.games) {
-                  const hl = game.homeTeam.code ?? game.homeTeam.name ?? `Team ${game.homeTeam.id}`;
-                  const al = game.awayTeam.code ?? game.awayTeam.name ?? `Team ${game.awayTeam.id}`;
-                  const ml = `${al} @ ${hl}`;
-                  for (const [i, play] of (game.suggestedBetPicks ?? []).entries()) {
-                    const key = `${game.id}|${play.outcomeType}|${i}`;
-                    const label = resolveLabel(play.displayLabel, play.outcomeType, hl, al);
-                    const american = play.marketPick?.overPrice ?? -110;
-                    const decimal = american > 0 ? 1 + american / 100 : 1 + 100 / Math.abs(american);
-                    legs.push({ key, gameLabel: ml, pickLabel: label, odds: decimal });
-                  }
-                }
-                setParlayLegs(legs);
-              }}
+              onClick={() => setParlayLegs([])}
+              disabled={parlayLegs.length === 0}
             >
-              Add All
+              Clear All
             </button>
-          )}
+          </div>
         </div>
         {parlayLegs.length === 0 ? (
           <p className="muted" style={{ fontSize: "0.82rem", margin: 0 }}>Click picks to add legs</p>
@@ -1007,13 +1017,6 @@ export default function PredictionsPage() {
               </div>
             </div>
 
-            <button
-              className="btn-today"
-              style={{ width: "100%", marginTop: "0.6rem", fontSize: "0.8rem" }}
-              onClick={() => setParlayLegs([])}
-            >
-              Clear
-            </button>
           </>
         )}
       </div>
