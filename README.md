@@ -31,24 +31,30 @@ Place your data files in `./data/` (or set `DATA_DIR` in `.env`):
 
 ## Commands
 
+Use the CLI command router for engine tasks:
+
+```bash
+bun run cli <command> -- <flags>
+```
+
 Run the ingest pipeline in order:
 
 ```bash
 # Build daily bundles from raw source files
-bun run build:day-bundles
+bun run cli build:day-bundles
 
 # Ingest day bundles into Postgres
-bun run ingest:day-bundles
+bun run cli ingest:day-bundles
 ```
 
 ### Stats queries
 
 ```bash
 # Player totals (with optional filters)
-bun run stats:player -- --playerId 236 --season 2024
+bun run cli stats:player -- --playerId 236 --season 2024
 
 # Team totals (with optional filters)
-bun run stats:team -- --teamId 1 --season 2024 --homeAway home
+bun run cli stats:team -- --teamId 1 --season 2024 --homeAway home
 ```
 
 ## Pattern Discovery & Prediction Workflow (v2)
@@ -58,12 +64,12 @@ Use this pipeline when you want fresh patterns, validation, and picks.
 ### Full rebuild (recommended after data/model changes)
 
 ```bash
-bun run build:game-context -- --from-season 2023 --to-season 2026
-bun run build:game-events -- --from-season 2023 --to-season 2026
-bun run build:feature-bins -- --from-season 2023 --to-season 2026
-bun run build:quantized-game-features -- --from-season 2023 --to-season 2026
-bun run search:discover-patterns-v2 -- --cv loso --forward-from 2025
-bun run validate:patterns-v2
+bun run cli build:game-context -- --from-season 2023 --to-season 2026
+bun run cli build:game-events -- --from-season 2023 --to-season 2026
+bun run cli build:feature-bins -- --from-season 2023 --to-season 2026
+bun run cli build:quantized-game-features -- --from-season 2023 --to-season 2026
+bun run cli search:discover-patterns-v2 -- --cv loso --forward-from 2025
+bun run cli validate:patterns-v2
 ```
 
 ### What each step does
@@ -93,9 +99,9 @@ bun run validate:patterns-v2
 If your feature definitions and historical context are already built:
 
 ```bash
-bun run search:discover-patterns-v2 -- --cv loso --forward-from 2025
-bun run validate:patterns-v2
-bun run predict:today
+bun run cli search:discover-patterns-v2 -- --cv loso --forward-from 2025
+bun run cli validate:patterns-v2
+bun run cli predict:today
 ```
 
 ### Evaluate known pattern ideas (hypothesis testing)
@@ -103,7 +109,7 @@ bun run predict:today
 You can test human-written hypotheses (not just auto-discovered patterns):
 
 ```bash
-bun run evaluate:pattern-ideas
+bun run cli evaluate:pattern-ideas
 ```
 
 By default it reads `config/pattern-ideas.json`, evaluates enabled ideas with LOSO + forward holdout, and prints PASS/FAIL with train/val/forward stats.
@@ -112,13 +118,13 @@ Useful flags:
 
 ```bash
 # Use a custom ideas file
-bun run evaluate:pattern-ideas -- --file config/my-ideas.json
+bun run cli evaluate:pattern-ideas -- --file config/my-ideas.json
 
 # Override split settings
-bun run evaluate:pattern-ideas -- --cv loso --forward-from 2025 --min-loso-folds-pass 2
+bun run cli evaluate:pattern-ideas -- --cv loso --forward-from 2025 --min-loso-folds-pass 2
 
 # Tighten thresholds
-bun run evaluate:pattern-ideas -- --min-forward-edge 0.008 --min-forward-posterior 0.52
+bun run cli evaluate:pattern-ideas -- --min-forward-edge 0.008 --min-forward-posterior 0.52
 ```
 
 ### Dashboard/API picks
@@ -158,26 +164,14 @@ bun run db:down     # Stop Postgres container
 ## Architecture
 
 ```
-src/
-  cli/index.ts            # CLI entry point and command router
-  db/prisma.ts            # PrismaClient singleton
-  ingest/
-    buildDailyDataBundles.ts  # Builds one JSON bundle per date
-    ingestDayBundles.ts       # High-throughput day-bundle ingestion
-    syncNbaStats.ts           # nba_api-based stat/game sync
-    syncOdds.ts               # Odds API sync
-    syncPlayerProps.ts        # Player props sync
-    utils.ts                  # Shared date/time helpers
-  stats/
-    filters.ts            # RollupFilters type + Prisma where builders
-    playerRollup.ts       # Player aggregate stats
-    teamRollup.ts         # Team aggregate stats
-  features/
-    eventCatalog.ts       # Nightly event definitions (11 events)
-    buildNightEvents.ts   # Runs catalog over all game dates
-  patterns/
-    scoring.ts            # Pattern stability scoring
-    searchPatterns.ts     # Combo generation + pattern discovery
+apps/
+  cli/src/index.ts            # CLI entry point and command router
+  dashboard/                  # Next.js app + API routes
+packages/
+  core/src/                   # Engine features/ingest/pattern logic
+  db/
+    prisma/schema.prisma      # Single shared Prisma schema
+    src/index.ts              # PrismaClient singleton + exports
 ```
 
 ## Event Catalog

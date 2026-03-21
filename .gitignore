@@ -1,7 +1,7 @@
 node_modules/
 .env
 data/
-prisma/migrations/*/migration_lock.toml
+**/prisma/migrations/*/migration_lock.toml
 *.db
 *.db-journal
 dist/
