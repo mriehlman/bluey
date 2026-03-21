@@ -72,13 +72,11 @@ export const VALIDATION_DEFAULTS = {
 } as const;
 
 const defaultFamilyGates: Record<"PLAYER" | "TOTAL" | "SPREAD" | "MONEYLINE" | "OTHER", FamilyGate> = {
-  // Bootstrap profile: intentionally permissive to restore actionable coverage.
-  // Tighten later after baseline rows/hit-rate are established.
-  PLAYER: { minPosterior: 0.53, minMeta: 0.52, minEv: 0.00 },
-  TOTAL: { minPosterior: 0.51, minMeta: 0.49, minEv: 0 },
-  SPREAD: { minPosterior: 0.51, minMeta: 0.49, minEv: 0 },
-  MONEYLINE: { minPosterior: 0.55, minMeta: 0.52, minEv: 0.01 },
-  OTHER: { minPosterior: 0.52, minMeta: 0.50, minEv: 0.00 },
+  PLAYER: { minPosterior: 0.55, minMeta: 0.53, minEv: -0.01 },
+  TOTAL: { minPosterior: 0.53, minMeta: 0.51, minEv: -0.01 },
+  SPREAD: { minPosterior: 0.53, minMeta: 0.51, minEv: -0.01 },
+  MONEYLINE: { minPosterior: 0.56, minMeta: 0.53, minEv: 0.00 },
+  OTHER: { minPosterior: 0.54, minMeta: 0.52, minEv: -0.01 },
 };
 
 export const PREDICTION_TUNING = {

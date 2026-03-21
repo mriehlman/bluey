@@ -4,6 +4,8 @@ import { getEasternDateFromUtc } from "@/lib/format";
 import { GAME_EVENT_CATALOG } from "../../../../../src/features/gameEventCatalog";
 import type { GameEventContext } from "../../../../../src/features/gameEventCatalog";
 import { LEDGER_TUNING } from "../../../../../src/config/tuning";
+import * as path from "path";
+import { spawn } from "child_process";
 import {
   generateGamePredictions,
   parsePlayerOutcomeRequirement,
@@ -322,31 +324,61 @@ async function loadFeatureBinsSafe() {
   }
 }
 
-export async function GET(req: Request) {
-  const url = new URL(req.url);
-  const dateStr = url.searchParams.get("date");
-  const refreshLedger = url.searchParams.get("refreshLedger") === "1";
-  const includeDebugPlays = url.searchParams.get("debugPlays") === "1";
+function getRepoRoot(): string {
+  const cwd = process.cwd();
+  if (cwd.endsWith("dashboard")) return path.join(cwd, "..");
+  return cwd;
+}
 
-  if (!dateStr) {
-    const today = new Date().toISOString().slice(0, 10);
-    return NextResponse.redirect(new URL(`/api/predictions?date=${today}`, req.url));
-  }
+function runCliCommand(
+  repoRoot: string,
+  npmScript: string,
+  args: string[],
+): Promise<{ ok: boolean; stderr: string }> {
+  return new Promise((resolve) => {
+    const proc = spawn("npm", ["run", npmScript, "--", ...args], {
+      cwd: repoRoot,
+      shell: true,
+      env: {
+        ...process.env,
+        DATA_DIR: path.join(repoRoot, "data"),
+        REPO_ROOT: repoRoot,
+        CWD: repoRoot,
+      },
+    });
+    let stderr = "";
+    proc.stderr?.on("data", (d) => { stderr += d.toString(); });
+    proc.on("close", (code) => resolve({ ok: code === 0, stderr }));
+  });
+}
 
-  const targetDate = new Date(dateStr + "T00:00:00Z");
-  const season = getSeasonForDate(targetDate);
-  const metaModel = await loadMetaModel();
-  const defaultStake = LEDGER_TUNING.stake;
-  const bankrollStart = LEDGER_TUNING.bankrollStart;
-  const maxBetPicksPerGame = Math.max(1, LEDGER_TUNING.maxBetPicksPerGame);
-  const allowFallbackOddsForLedger = LEDGER_TUNING.allowFallbackOddsForLedger;
-  const fallbackAmericanOdds = LEDGER_TUNING.fallbackAmericanOdds;
-  const seasonBetSummary = await getSeasonBetHitSummary(dateStr, season);
-  const seasonV2Hits = seasonBetSummary.hits;
-  const seasonV2Total = seasonBetSummary.total;
-  let gateDiagnostics: GateDiagnostics | null = null;
+async function autoSyncForDate(dateStr: string): Promise<boolean> {
+  const repoRoot = getRepoRoot();
+  console.log(`[predictions] Auto-syncing data for ${dateStr}...`);
 
-  // Query ±1 day to catch games mis-dated during ingestion (e.g. March 2 games stored as March 1)
+  const statsResult = await runCliCommand(repoRoot, "sync:stats", ["--date", dateStr]);
+  if (!statsResult.ok) console.warn("[predictions] Stats sync warning:", statsResult.stderr.slice(0, 200));
+
+  const gamesResult = await runCliCommand(repoRoot, "sync:upcoming", ["--date", dateStr, "--skip-existing", "true"]);
+  if (!gamesResult.ok) console.warn("[predictions] Games sync warning:", gamesResult.stderr.slice(0, 200));
+
+  const injuriesResult = await runCliCommand(repoRoot, "sync:injuries", ["--date", dateStr, "--skip-existing", "true"]);
+  if (!injuriesResult.ok) console.warn("[predictions] Injuries sync warning:", injuriesResult.stderr.slice(0, 200));
+
+  const lineupsResult = await runCliCommand(repoRoot, "sync:lineups", ["--date", dateStr, "--skip-existing", "true"]);
+  if (!lineupsResult.ok) console.warn("[predictions] Lineups sync warning:", lineupsResult.stderr.slice(0, 200));
+
+  console.log(`[predictions] Auto-sync complete for ${dateStr}`);
+  return gamesResult.ok;
+}
+
+function isDateTodayOrFuture(dateStr: string): boolean {
+  const today = new Date();
+  const todayStr = today.toISOString().slice(0, 10);
+  return dateStr >= todayStr;
+}
+
+async function queryGamesForDate(targetDate: Date, dateStr: string) {
   const dayMs = 86400000;
   const rangeStart = new Date(targetDate.getTime() - dayMs);
   const rangeEnd = new Date(targetDate.getTime() + dayMs);
@@ -363,10 +395,8 @@ export async function GET(req: Request) {
     orderBy: { tipoffTimeUtc: "asc" },
   });
 
-  // Filter to games whose Eastern tipoff date matches requested date (source of truth for game day)
   const gamesForDate = gamesRaw.filter((g) => {
     if (!g.tipoffTimeUtc) {
-      // No tipoff time: trust stored date
       const storedDate = g.date instanceof Date ? g.date.toISOString().slice(0, 10) : String(g.date).slice(0, 10);
       return storedDate === dateStr;
     }
@@ -374,7 +404,6 @@ export async function GET(req: Request) {
     return easternDate === dateStr;
   });
 
-  // Deduplicate by matchup (order-independent to handle reversed home/away from different sources)
   const seenMatchups = new Map<string, (typeof gamesForDate)[0]>();
   for (const g of gamesForDate) {
     const homeCode = g.homeTeam?.code ?? g.homeTeamId.toString();
@@ -399,9 +428,46 @@ export async function GET(req: Request) {
       seenMatchups.set(key, better);
     }
   }
-  const games = [...seenMatchups.values()].sort(
+
+  return [...seenMatchups.values()].sort(
     (a, b) => (a.tipoffTimeUtc?.getTime() ?? 0) - (b.tipoffTimeUtc?.getTime() ?? 0),
   );
+}
+
+export async function GET(req: Request) {
+  const url = new URL(req.url);
+  const dateStr = url.searchParams.get("date");
+  const refreshLedger = url.searchParams.get("refreshLedger") === "1";
+  const includeDebugPlays = url.searchParams.get("debugPlays") === "1";
+
+  if (!dateStr) {
+    const today = new Date().toISOString().slice(0, 10);
+    return NextResponse.redirect(new URL(`/api/predictions?date=${today}`, req.url));
+  }
+
+  const targetDate = new Date(dateStr + "T00:00:00Z");
+  const season = getSeasonForDate(targetDate);
+  const metaModel = await loadMetaModel();
+  const defaultStake = LEDGER_TUNING.stake;
+  const bankrollStart = LEDGER_TUNING.bankrollStart;
+  const maxBetPicksPerGame = Math.max(1, LEDGER_TUNING.maxBetPicksPerGame);
+  const allowFallbackOddsForLedger = LEDGER_TUNING.allowFallbackOddsForLedger;
+  const fallbackAmericanOdds = LEDGER_TUNING.fallbackAmericanOdds;
+  const seasonBetSummary = await getSeasonBetHitSummary(dateStr, season);
+  const seasonV2Hits = seasonBetSummary.hits;
+  const seasonV2Total = seasonBetSummary.total;
+  let gateDiagnostics: GateDiagnostics | null = null;
+
+  let games = await queryGamesForDate(targetDate, dateStr);
+  let didAutoSync = false;
+
+  // Auto-sync when no games found and date is today or future
+  if (games.length === 0 && isDateTodayOrFuture(dateStr)) {
+    console.log(`[predictions] No games found for ${dateStr}, triggering auto-sync...`);
+    await autoSyncForDate(dateStr);
+    games = await queryGamesForDate(targetDate, dateStr);
+    didAutoSync = true;
+  }
 
   let wagerTracking = await getWagerTrackingSummary({
     dateStr,
@@ -806,6 +872,10 @@ export async function GET(req: Request) {
       ...p,
       result: evaluateOutcome(p.outcomeType, p.playerTarget),
     }));
+    const modelPicks = engineOutput.modelPicks.map((p) => ({
+      ...p,
+      result: evaluateOutcome(p.outcomeType, p.playerTarget),
+    }));
 
     return {
       id: game.id,
@@ -820,6 +890,7 @@ export async function GET(req: Request) {
       discoveryV2Matches: enrichedDiscoveryV2Matches,
       suggestedPlays,
       suggestedBetPicks,
+      modelPicks,
     };
   });
 
@@ -873,6 +944,7 @@ export async function GET(req: Request) {
     modelVersion: activeModelVersionInfo?.name ?? "live",
     dayBetSummary,
     ...(includeDebugPlays ? { gateDiagnostics } : {}),
+    ...(didAutoSync ? { autoSynced: true } : {}),
     seasonToDate: {
       throughDate: dateStr,
       v2: {

@@ -53,6 +53,28 @@ interface SuggestedPick {
   result?: PredictionResult | null;
 }
 
+interface ModelPick {
+  outcomeType: string;
+  displayLabel: string;
+  modelProbability: number;
+  posteriorHitRate: number;
+  metaScore: number | null;
+  confidence: number;
+  agreementCount: number;
+  playerTarget?: PlayerTarget | null;
+  marketPick?: {
+    market: string;
+    line: number;
+    overPrice: number;
+    impliedProb: number;
+    estimatedProb: number;
+    edge: number;
+    ev: number;
+    label: string;
+  } | null;
+  result?: PredictionResult | null;
+}
+
 interface GamePrediction {
   id: string;
   homeTeam: TeamInfo;
@@ -84,6 +106,7 @@ interface GamePrediction {
   }[];
   suggestedPlays?: SuggestedPick[];
   suggestedBetPicks?: SuggestedPick[];
+  modelPicks?: ModelPick[];
 }
 
 interface PredictionData {
@@ -124,6 +147,7 @@ interface PredictionData {
     };
   } | null;
   games: GamePrediction[];
+  autoSynced?: boolean;
   message?: string;
 }
 
@@ -498,9 +522,14 @@ export default function PredictionsPage() {
         </div>
       )}
 
+      {!loading && data?.autoSynced && (data?.games?.length ?? 0) > 0 && (
+        <div style={{ background: "var(--bg-elevated)", border: "1px solid var(--accent-cyan)", borderRadius: "8px", padding: "0.5rem 1rem", marginBottom: "1rem", fontSize: "0.82rem", color: "var(--accent-cyan)" }}>
+          Data was auto-synced for {date}
+        </div>
+      )}
       {!loading && data?.games.length === 0 && (
         <div className="card">
-          <p>No games found for {date}. Try syncing upcoming games or selecting a different date.</p>
+          <p>No games found for {date}{data?.autoSynced ? " (auto-sync was attempted)" : ""}. Try syncing upcoming games or selecting a different date.</p>
         </div>
       )}
 
@@ -719,6 +748,58 @@ export default function PredictionsPage() {
                                   {play.result.explanation && (
                                     <span style={{ marginLeft: "0.5rem", color: "var(--text-secondary)" }}>
                                       {play.result.explanation}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {(game.modelPicks?.length ?? 0) > 0 && (
+                      <div style={{ marginBottom: "1rem" }}>
+                        <h4 style={{ marginTop: 0, marginBottom: "0.5rem" }}>Model Picks <span className="muted" style={{ fontWeight: 400, fontSize: "0.75rem" }}>(accuracy-focused, no market requirement)</span></h4>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+                          {game.modelPicks!.map((mp) => (
+                            <div
+                              key={mp.outcomeType}
+                              style={{
+                                background: "var(--bg-elevated)",
+                                border: "1px solid var(--border)",
+                                borderLeft: `4px solid ${mp.result ? (mp.result.hit ? "var(--success)" : "var(--error)") : "var(--accent-purple, #a78bfa)"}`,
+                                borderRadius: "8px",
+                                padding: "0.5rem 0.6rem",
+                                fontSize: "0.82rem",
+                              }}
+                            >
+                              <div>
+                                <strong>{resolveLabel(mp.displayLabel, mp.outcomeType, homeLabel, awayLabel)}</strong> | prob {(mp.modelProbability * 100).toFixed(1)}% | {mp.agreementCount} patterns agree
+                                {mp.metaScore != null ? ` | meta ${(mp.metaScore * 100).toFixed(1)}%` : ""}
+                                {mp.marketPick ? " | has market" : ""}
+                              </div>
+                              {mp.playerTarget && (
+                                <div className="muted" style={{ marginTop: "0.25rem" }}>
+                                  Target: <strong style={{ color: "var(--accent-cyan)" }}>{mp.playerTarget.name}</strong>{" "}
+                                  ({mp.playerTarget.statValue.toFixed(1)} {mp.playerTarget.stat})
+                                </div>
+                              )}
+                              {mp.result && (
+                                <div style={{ marginTop: "0.3rem" }}>
+                                  <span
+                                    className="badge"
+                                    style={{
+                                      background: mp.result.hit ? "var(--success)" : "var(--error)",
+                                      color: "white",
+                                      border: "none",
+                                    }}
+                                  >
+                                    {mp.result.hit ? "HIT" : "MISS"}
+                                  </span>
+                                  {mp.result.explanation && (
+                                    <span style={{ marginLeft: "0.5rem", color: "var(--text-secondary)" }}>
+                                      {mp.result.explanation}
                                     </span>
                                   )}
                                 </div>

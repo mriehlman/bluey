@@ -32,6 +32,7 @@ import { teamProfile } from "../profiles/teamProfile.js";
 import { buildGameContext } from "../features/buildGameContext.js";
 import { buildGameEvents } from "../features/buildGameEvents.js";
 import { predictGames, predictPlayers } from "../features/predictGames.js";
+import { resolvePredictionLogs, reportPredictionAccuracy } from "../features/predictionAccuracy.js";
 import { dailyPicks } from "../features/dailyPicks.js";
 import { runBacktest, backtestExisting, analyzePattern, quickValidate } from "../backtest/backtest.js";
 import { analyzeSuggestedPlayLedger } from "../backtest/suggestedPlayLedger.js";
@@ -768,6 +769,14 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
   "delete:model-version": async (args) => {
     await deleteModelVersion(args);
+  },
+
+  "resolve:predictions": async (args) => {
+    await resolvePredictionLogs(args);
+  },
+
+  "report:accuracy": async (args) => {
+    await reportPredictionAccuracy(args);
   },
 
 };

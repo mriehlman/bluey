@@ -14,7 +14,7 @@ import {
   impliedProbFromAmerican,
   payoutFromAmerican,
 } from "./productionPickSelection";
-import { scoreMetaModel, isLowSpecificityConditionToken, isLowSpecificityPattern, type MetaModel } from "../patterns/metaModelCore";
+import { scoreMetaModel, isLowSpecificityConditionToken, isLowSpecificityPattern, type MetaModel, type GameContextSignals } from "../patterns/metaModelCore";
 import { PREDICTION_TUNING } from "../config/tuning";
 import type { GameContext } from "@prisma/client";
 
@@ -115,10 +115,23 @@ export type PredictionInput = {
   overrideExcludeFamilies?: readonly string[];
 };
 
+export type ModelPick = {
+  outcomeType: string;
+  displayLabel: string;
+  modelProbability: number;
+  posteriorHitRate: number;
+  metaScore: number | null;
+  confidence: number;
+  agreementCount: number;
+  playerTarget: V2PlayerTarget | null;
+  marketPick: SuggestedMarketPick | null;
+};
+
 export type PredictionOutput = {
   discoveryV2Matches: DiscoveryMatch[];
   suggestedPlays: SuggestedPlay[];
   suggestedBetPicks: SuggestedPlay[];
+  modelPicks: ModelPick[];
   gateDiagnostics?: GateDiagnostics;
 };
 
@@ -402,6 +415,8 @@ function selectBestMarketBackedPick(args: {
   defaultMarketPrice?: number;
 }): SuggestedMarketPick | null {
   const { outcomeType, target, propsForGame, baseProb } = args;
+  const confidence = Math.max(0, Math.min(1, args.confidence ?? 0));
+  const support = Math.max(1, args.supportN ?? 1);
   const baseOutcome = outcomeType.replace(/:.*$/, "");
 
   if (baseOutcome === "HOME_WIN" || baseOutcome === "AWAY_WIN") {
@@ -417,7 +432,8 @@ function selectBestMarketBackedPick(args: {
     if (price < PREDICTION_TUNING.maxNegativeAmericanOdds) return null;
     const implied = impliedProbFromAmerican(price);
     if (implied == null) return null;
-    const est = Math.max(0.05, Math.min(0.95, baseProb));
+    const mwMl = Math.min(0.85, 0.5 + confidence * 0.25);
+    const est = Math.max(0.05, Math.min(0.95, mwMl * baseProb + (1 - mwMl) * implied));
     const ev = est * payoutFromAmerican(price) - (1 - est);
     const market = baseOutcome === "HOME_WIN" ? "moneyline_home" : "moneyline_away";
     return {
@@ -428,6 +444,7 @@ function selectBestMarketBackedPick(args: {
       overPrice: price,
       impliedProb: implied,
       estimatedProb: est,
+      modelEstimatedProb: baseProb,
       edge: est - implied,
       ev,
       label: labelForMarketPick(baseOutcome === "HOME_WIN" ? "Home" : "Away", market, 0, price),
@@ -446,7 +463,8 @@ function selectBestMarketBackedPick(args: {
     if (price < PREDICTION_TUNING.maxNegativeAmericanOdds) return null;
     const implied = impliedProbFromAmerican(price);
     if (implied == null) return null;
-    const est = Math.max(0.05, Math.min(0.95, baseProb));
+    const mw = Math.min(0.85, 0.5 + confidence * 0.25);
+    const est = Math.max(0.05, Math.min(0.95, mw * baseProb + (1 - mw) * implied));
     const ev = est * payoutFromAmerican(price) - (1 - est);
     const market =
       baseOutcome === "HOME_COVERED"
@@ -464,6 +482,7 @@ function selectBestMarketBackedPick(args: {
       overPrice: price,
       impliedProb: implied,
       estimatedProb: est,
+      modelEstimatedProb: baseProb,
       edge: est - implied,
       ev,
       label: `${baseOutcome.replaceAll("_", " ")} @ ${price > 0 ? `+${price}` : `${price}`}`,
@@ -482,7 +501,8 @@ function selectBestMarketBackedPick(args: {
     if (price < PREDICTION_TUNING.maxNegativeAmericanOdds) return null;
     const implied = impliedProbFromAmerican(price);
     if (implied == null) return null;
-    const est = Math.max(0.05, Math.min(0.95, baseProb));
+    const mwTotal = Math.min(0.85, 0.5 + confidence * 0.25);
+    const est = Math.max(0.05, Math.min(0.95, mwTotal * baseProb + (1 - mwTotal) * implied));
     const ev = est * payoutFromAmerican(price) - (1 - est);
     const market = baseOutcome.includes("UNDER") ? "total_under" : "total_over";
     return {
@@ -493,6 +513,7 @@ function selectBestMarketBackedPick(args: {
       overPrice: price,
       impliedProb: implied,
       estimatedProb: est,
+      modelEstimatedProb: baseProb,
       edge: est - implied,
       ev,
       label: `${market === "total_under" ? "Under" : "Over"} ${total} @ ${price > 0 ? `+${price}` : `${price}`}`,
@@ -520,8 +541,6 @@ function selectBestMarketBackedPick(args: {
         : 0.04;
   let best: SuggestedMarketPick | null = null;
   let bestEv = -Infinity;
-  const support = Math.max(1, args.supportN ?? 1);
-  const confidence = Math.max(0, Math.min(1, args.confidence ?? 0));
 
   for (const c of candidates) {
     const overPrice = c.overPrice ?? 0;
@@ -539,10 +558,10 @@ function selectBestMarketBackedPick(args: {
             ? (target.statValue - offeredThreshold) * 0.03
             : 0;
     const estModel = Math.max(0.05, Math.min(0.95, baseProb + lineDelta * slope + statBonus));
-    const maxDeviation = 0.25;
+    const modelWeight = Math.min(0.85, 0.5 + confidence * 0.25 + Math.min(0.1, (support - 1) * 0.02));
     const est = Math.max(
       0.05,
-      Math.min(0.95, Math.max(implied - maxDeviation, Math.min(implied + maxDeviation, estModel))),
+      Math.min(0.95, modelWeight * estModel + (1 - modelWeight) * implied),
     );
     const ev = est * payoutFromAmerican(overPrice) - (1 - est);
     if (ev > bestEv) {
@@ -615,6 +634,17 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
 
   const gateDiagnostics = includeDebugPlays ? newGateDiagnostics() : undefined;
 
+  const gameCtxSignals: GameContextSignals = {
+    restAdvantage: (gameContext.homeRestDays ?? 1) - (gameContext.awayRestDays ?? 1),
+    rankDiffOff: (gameContext.awayRankOff ?? 15) - (gameContext.homeRankOff ?? 15),
+    rankDiffDef: (gameContext.homeRankDef ?? 15) - (gameContext.awayRankDef ?? 15),
+    paceDelta: (gameContext.homePace ?? 100) - (gameContext.awayPace ?? 100),
+    injuryImpact: Math.max(
+      (gameContext.homeInjuryOutCount ?? 0) + (gameContext.homeInjuryDoubtfulCount ?? 0) * 0.5,
+      (gameContext.awayInjuryOutCount ?? 0) + (gameContext.awayInjuryDoubtfulCount ?? 0) * 0.5,
+    ),
+  };
+
   const pregameTokenSet = buildPregameTokenSet({
     season,
     context: gameContext,
@@ -625,36 +655,15 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
   const discoveryV2RawMatches = matchDeployedPatterns(
     pregameTokenSet,
     deployedV2Patterns,
-    8,
+    50,
   );
 
   const discoveryV2Matches = discoveryV2RawMatches.filter(
     (p) => !isLowSpecificityPattern(p.conditions ?? []),
   );
 
-  const actionableDiscoveryV2Matches = discoveryV2Matches.filter((p) =>
-    isOutcomeActionableForMarket(p.outcomeType, odds as { spreadHome: number | null; totalOver: number | null } | null, p.posteriorHitRate),
-  );
-
-  const actionableNonGenericV2Matches = actionableDiscoveryV2Matches.filter(
-    (p) => !isGenericPlayerOutcome(p.outcomeType),
-  );
-  const actionableGenericV2Matches = actionableDiscoveryV2Matches.filter((p) =>
-    isGenericPlayerOutcome(p.outcomeType),
-  );
-
-  const curatedDiscoveryV2Matches =
-    actionableNonGenericV2Matches.length > 0
-      ? [...actionableNonGenericV2Matches, ...actionableGenericV2Matches.slice(0, 1)].slice(0, 8)
-      : actionableGenericV2Matches.slice(0, 1);
-
-  const enrichedDiscoveryV2Matches: DiscoveryMatch[] = curatedDiscoveryV2Matches.map((p) => ({
-    ...p,
-    playerTarget: pickV2PlayerTarget(p.outcomeType, gamePlayerCtx, propsForGame),
-  }));
-
-  // Dedup and aggregate across curated matches
-  const suggestedPlayMap = new Map<
+  // Model-only aggregation: ALL matched patterns, no market filter
+  const allPlayMap = new Map<
     string,
     {
       dedupKey: string;
@@ -669,12 +678,12 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
     }
   >();
 
-  for (const p of curatedDiscoveryV2Matches) {
+  for (const p of discoveryV2Matches) {
     const target = pickV2PlayerTarget(p.outcomeType, gamePlayerCtx, propsForGame);
     const dedupKey = `${outcomeDedupFamily(p.outcomeType)}|${target?.id ?? "none"}`;
-    const existing = suggestedPlayMap.get(dedupKey);
+    const existing = allPlayMap.get(dedupKey);
     if (!existing) {
-      suggestedPlayMap.set(dedupKey, {
+      allPlayMap.set(dedupKey, {
         dedupKey,
         outcomeType: p.outcomeType,
         bestConditions: p.conditions ?? [],
@@ -698,9 +707,10 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
     }
   }
 
-  const rankedSuggestedPlays = [...suggestedPlayMap.values()]
+  const allRankedPlays = [...allPlayMap.values()]
     .map((r) => {
       const confidence = r.scoreSum / r.count;
+      const agreementBonus = Math.min(0.3, (r.count - 1) * 0.05);
       const metaScore = metaModel
         ? scoreMetaModel(metaModel, {
             outcomeType: r.outcomeType,
@@ -709,37 +719,84 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
             edge: r.bestEdge,
             score: confidence,
             n: r.bestN,
+            gameContext: gameCtxSignals,
           })
         : null;
-      const baseProb = metaScore ?? r.bestPosterior;
+      const modelProbability = Math.min(0.95, (metaScore ?? r.bestPosterior) + agreementBonus);
       const marketPick = selectBestMarketBackedPick({
         outcomeType: r.outcomeType,
         target: r.playerTarget,
         propsForGame,
-        baseProb,
+        baseProb: modelProbability,
         confidence,
         supportN: r.bestN,
         gameOdds: odds,
         defaultMarketPrice: fallbackAmericanOdds,
       });
+      const outcomeLabel = r.outcomeType.replace(/:.*$/, "").replaceAll("_", " ");
+      const targetLabel = r.playerTarget ? ` (${r.playerTarget.name})` : "";
       return {
         outcomeType: r.outcomeType,
-        displayLabel: marketPick?.label ?? null,
+        displayLabel: marketPick?.label ?? `${outcomeLabel}${targetLabel}`,
         confidence,
         posteriorHitRate: r.bestPosterior,
         edge: r.bestEdge,
         metaScore,
         votes: r.count,
+        agreementCount: r.count,
+        modelProbability,
         playerTarget: r.playerTarget,
         marketPick,
       };
     })
     .sort(
       (a, b) =>
-        (b.metaScore ?? -1) - (a.metaScore ?? -1) ||
-        b.confidence - a.confidence ||
-        b.posteriorHitRate - a.posteriorHitRate,
+        b.modelProbability - a.modelProbability ||
+        b.agreementCount - a.agreementCount ||
+        (b.metaScore ?? -1) - (a.metaScore ?? -1),
     );
+
+  // Model picks: top picks by pure model confidence, no market requirement
+  const modelPicks: ModelPick[] = allRankedPlays
+    .filter((p) => p.modelProbability >= 0.52)
+    .slice(0, 15)
+    .map((p) => ({
+      outcomeType: p.outcomeType,
+      displayLabel: p.displayLabel,
+      modelProbability: p.modelProbability,
+      posteriorHitRate: p.posteriorHitRate,
+      metaScore: p.metaScore,
+      confidence: p.confidence,
+      agreementCount: p.agreementCount,
+      playerTarget: p.playerTarget,
+      marketPick: p.marketPick,
+    }));
+
+  // Bettable path: filter to actionable outcomes for market-based picks
+  const actionableDiscoveryV2Matches = discoveryV2Matches.filter((p) =>
+    isOutcomeActionableForMarket(p.outcomeType, odds as { spreadHome: number | null; totalOver: number | null } | null, p.posteriorHitRate),
+  );
+
+  const actionableNonGenericV2Matches = actionableDiscoveryV2Matches.filter(
+    (p) => !isGenericPlayerOutcome(p.outcomeType),
+  );
+  const actionableGenericV2Matches = actionableDiscoveryV2Matches.filter((p) =>
+    isGenericPlayerOutcome(p.outcomeType),
+  );
+
+  const curatedDiscoveryV2Matches =
+    actionableNonGenericV2Matches.length > 0
+      ? [...actionableNonGenericV2Matches, ...actionableGenericV2Matches.slice(0, 1)].slice(0, 12)
+      : actionableGenericV2Matches.slice(0, 2);
+
+  const enrichedDiscoveryV2Matches: DiscoveryMatch[] = curatedDiscoveryV2Matches.map((p) => ({
+    ...p,
+    playerTarget: pickV2PlayerTarget(p.outcomeType, gamePlayerCtx, propsForGame),
+  }));
+
+  const rankedSuggestedPlays = allRankedPlays.filter((p) =>
+    isOutcomeActionableForMarket(p.outcomeType, odds as { spreadHome: number | null; totalOver: number | null } | null, p.posteriorHitRate),
+  );
 
   const excludeFamilies = overrideExcludeFamilies ?? PREDICTION_TUNING.excludeFamilies ?? [];
   const excludedFamilies = new Set(excludeFamilies);
@@ -780,6 +837,7 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
     discoveryV2Matches: enrichedDiscoveryV2Matches,
     suggestedPlays,
     suggestedBetPicks,
+    modelPicks,
     ...(gateDiagnostics ? { gateDiagnostics } : {}),
   };
 }

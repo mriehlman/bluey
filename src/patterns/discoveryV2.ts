@@ -1002,15 +1002,31 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
     Math.min(1, Number(flags["season-weight-min"] ?? DISCOVERY_DEFAULTS.seasonWeightMin)),
   );
   const maxSingletons = Math.max(10, Number(flags["max-singletons"] ?? DISCOVERY_DEFAULTS.maxSingletons));
+  const noOdds = flags["no-odds"] === "true";
 
   console.log("\n=== Discover Patterns v2 ===\n");
+  if (noOdds) {
+    console.log("Mode: odds-free discovery (excluding spread_home, spread_abs, total_line, ml_home, ml_away features)\n");
+  }
 
   const skipSnapshot = flags["skip-snapshot"] === "true";
   if (!skipSnapshot) {
     await autoSnapshotBeforeDiscovery();
   }
 
-  const games = await loadTokenizedGames();
+  const ODDS_FEATURE_PREFIXES = ["spread_home:", "spread_abs:", "total_line:", "ml_home:", "ml_away:"];
+  const rawGames = await loadTokenizedGames();
+  const games = noOdds
+    ? rawGames.map((g) => {
+        const filtered = new Set<string>();
+        for (const t of g.tokens) {
+          if (!ODDS_FEATURE_PREFIXES.some((p) => t.startsWith(p))) {
+            filtered.add(t);
+          }
+        }
+        return { ...g, tokens: filtered };
+      })
+    : rawGames;
   const splits: SeasonSplit =
     cvMode === "loso"
       ? splitRowsBySeasonLOSO(games, forwardFrom)

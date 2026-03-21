@@ -7,6 +7,14 @@ export const DEFAULT_META_MODEL_RELATIVE_PATH = path.join(
   "meta-model-v2.json",
 );
 
+export interface GameContextSignals {
+  restAdvantage?: number;
+  rankDiffOff?: number;
+  rankDiffDef?: number;
+  paceDelta?: number;
+  injuryImpact?: number;
+}
+
 export interface MetaModelFeatureInput {
   outcomeType: string;
   conditions?: string[];
@@ -17,6 +25,7 @@ export interface MetaModelFeatureInput {
   portabilityScore?: number;
   dependencyRisk?: number;
   recentAtoT?: number;
+  gameContext?: GameContextSignals;
 }
 
 export interface MetaModel {
@@ -260,6 +269,41 @@ export function deriveMetaContextFeatures(input: {
   return { portabilityScore, dependencyRisk, recentAtoT };
 }
 
+function applyGameContextAdjustment(
+  baseScore: number,
+  ctx?: GameContextSignals,
+  family?: string,
+): number {
+  if (!ctx) return baseScore;
+  let adj = 0;
+
+  if (ctx.restAdvantage != null && Number.isFinite(ctx.restAdvantage)) {
+    adj += ctx.restAdvantage * 0.008;
+  }
+
+  if (ctx.rankDiffOff != null && Number.isFinite(ctx.rankDiffOff)) {
+    const offWeight = family === "TOTAL" || family === "PLAYER" ? 0.003 : 0.002;
+    adj += Math.max(-0.04, Math.min(0.04, ctx.rankDiffOff * offWeight));
+  }
+
+  if (ctx.rankDiffDef != null && Number.isFinite(ctx.rankDiffDef)) {
+    const defWeight = family === "SPREAD" || family === "MONEYLINE" ? 0.003 : 0.002;
+    adj += Math.max(-0.04, Math.min(0.04, ctx.rankDiffDef * defWeight));
+  }
+
+  if (ctx.paceDelta != null && Number.isFinite(ctx.paceDelta)) {
+    if (family === "TOTAL" || family === "PLAYER") {
+      adj += Math.max(-0.03, Math.min(0.03, ctx.paceDelta * 0.005));
+    }
+  }
+
+  if (ctx.injuryImpact != null && Number.isFinite(ctx.injuryImpact)) {
+    adj -= Math.max(0, Math.min(0.05, ctx.injuryImpact * 0.01));
+  }
+
+  return Math.max(0.02, Math.min(0.98, baseScore + adj));
+}
+
 export function scoreMetaModel(
   model: MetaModel,
   input: MetaModelFeatureInput,
@@ -296,7 +340,8 @@ export function scoreMetaModel(
     const linear =
       familyModel.bias +
       familyModel.weights.reduce((sum, w, idx) => sum + w * (norm[idx] ?? 0), 0);
-    return applyCalibration(sigmoid(linear));
+    const familyBaseScore = applyCalibration(sigmoid(linear));
+    return applyGameContextAdjustment(familyBaseScore, input.gameContext, family);
   }
   const norm = raw.map((value, idx) => {
     const sd = model.stds[idx] ?? 1;
@@ -308,7 +353,8 @@ export function scoreMetaModel(
     model.bias +
     model.weights.reduce((sum, w, idx) => sum + w * (norm[idx] ?? 0), 0) +
     familyBias;
-  return applyCalibration(sigmoid(linear));
+  const baseScore = applyCalibration(sigmoid(linear));
+  return applyGameContextAdjustment(baseScore, input.gameContext, family);
 }
 
 function modelPathCandidates(relativePath: string): string[] {

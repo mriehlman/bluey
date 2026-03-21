@@ -401,6 +401,20 @@ export async function predictGames(args: string[] = []): Promise<void> {
         console.log("");
       }
 
+      if (engineOutput.modelPicks.length > 0) {
+        console.log(`  Model picks (${engineOutput.modelPicks.length}):`);
+        for (const mp of engineOutput.modelPicks.slice(0, 8)) {
+          const targetStr = mp.playerTarget ? ` [${mp.playerTarget.name}]` : "";
+          const marketStr = mp.marketPick ? " (has market)" : " (model-only)";
+          console.log(
+            `    ${mp.displayLabel}${targetStr} | prob ${(mp.modelProbability * 100).toFixed(1)}%` +
+              `${mp.metaScore != null ? ` | meta ${(mp.metaScore * 100).toFixed(1)}%` : ""}` +
+              ` | agree ${mp.agreementCount}${marketStr}`,
+          );
+        }
+        console.log("");
+      }
+
       if (engineOutput.suggestedBetPicks.length > 0) {
         console.log(`  Suggested bet picks (${engineOutput.suggestedBetPicks.length}):`);
         for (const p of engineOutput.suggestedBetPicks) {
@@ -412,6 +426,27 @@ export async function predictGames(args: string[] = []): Promise<void> {
           );
         }
         console.log("");
+      }
+
+      // Log model picks for accuracy tracking
+      const modelVersionName = activeVersion ? (activeVersion as any).name ?? null : null;
+      const logEntries = engineOutput.modelPicks.map((mp) => ({
+        gameId: game.id,
+        gameDate: targetDate,
+        outcomeType: mp.outcomeType,
+        modelProb: mp.modelProbability,
+        agreementCount: mp.agreementCount,
+        metaScore: mp.metaScore,
+        posteriorHitRate: mp.posteriorHitRate,
+        confidence: mp.confidence,
+        hadMarketPick: mp.marketPick != null,
+        modelVersionName,
+      }));
+      if (logEntries.length > 0) {
+        await prisma.predictionLog.createMany({
+          data: logEntries,
+          skipDuplicates: true,
+        });
       }
     }
   }

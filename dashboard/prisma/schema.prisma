@@ -493,3 +493,26 @@ model ModelVersion {
   @@index([isActive])
   @@index([createdAt])
 }
+
+model PredictionLog {
+  id              String   @id @default(cuid())
+  gameId          String
+  gameDate        DateTime
+  outcomeType     String
+  modelProb       Float
+  agreementCount  Int      @default(1)
+  metaScore       Float?
+  posteriorHitRate Float
+  confidence      Float
+  hadMarketPick   Boolean  @default(false)
+  actualResult    Boolean?
+  resolvedAt      DateTime?
+  modelVersionName String?
+  createdAt       DateTime @default(now())
+
+  @@index([gameId])
+  @@index([gameDate])
+  @@index([outcomeType])
+  @@index([actualResult])
+  @@index([modelVersionName])
+}
