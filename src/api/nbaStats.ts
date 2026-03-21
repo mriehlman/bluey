@@ -1,7 +1,11 @@
 import { spawn } from "child_process";
 import { join } from "path";
 
-const SCRIPT_PATH = join(process.cwd(), "scripts", "nba_fetch.py");
+const SCRIPT_PATH = join(
+  process.env.REPO_ROOT || process.env.CWD || process.cwd(),
+  "scripts",
+  "nba_fetch.py",
+);
 
 interface PlayerStatRow {
   playerId: number;

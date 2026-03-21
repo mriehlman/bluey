@@ -143,6 +143,20 @@ function parseDateInput(value: string): Date {
   return new Date(year, month - 1, day);
 }
 
+function isPlayerPick(outcomeType: string): boolean {
+  const base = outcomeType.replace(/:.*$/, "");
+  return base.startsWith("PLAYER_") || base.startsWith("HOME_TOP_") || base.startsWith("AWAY_TOP_");
+}
+
+function filterPicks<T extends { outcomeType: string }>(
+  picks: T[] | undefined,
+  filter: "game" | "player" | "all"
+): T[] {
+  if (!picks) return [];
+  if (filter === "all") return picks;
+  return picks.filter((p) => (filter === "player" ? isPlayerPick(p.outcomeType) : !isPlayerPick(p.outcomeType)));
+}
+
 export default function PredictionsPage() {
   const [date, setDate] = useState(() => getLocalDateString());
   const [data, setData] = useState<PredictionData | null>(null);
@@ -151,6 +165,14 @@ export default function PredictionsPage() {
   const [evidenceOpenByGame, setEvidenceOpenByGame] = useState<Record<string, boolean>>({});
   const [parlayLegs, setParlayLegs] = useState<{ key: string; gameLabel: string; pickLabel: string; odds: number }[]>([]);
   const [parlayStake, setParlayStake] = useState("10");
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<{ ok: boolean; message: string; steps?: { step: string; ok: boolean; message?: string }[] } | null>(null);
+  const [pickType, setPickType] = useState<"game" | "player" | "all">("game");
+  const [calendarMonth, setCalendarMonth] = useState(() => {
+    const d = new Date();
+    return { year: d.getFullYear(), month: d.getMonth() };
+  });
+  const [perfectDates, setPerfectDates] = useState<Set<string>>(new Set());
 
   const toggleParlayLeg = (key: string, gameLabel: string, pickLabel: string, americanOdds: number) => {
     setParlayLegs((prev) => {
@@ -164,10 +186,11 @@ export default function PredictionsPage() {
   const stakeNum = parseFloat(parlayStake) || 0;
   const parlayPayout = stakeNum * parlayDecimalOdds;
 
-  const fetchPredictions = useCallback(async (targetDate: string) => {
+  const fetchPredictions = useCallback(async (targetDate: string, refreshLedger?: boolean) => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/predictions?date=${targetDate}`);
+      const qs = refreshLedger ? `&refreshLedger=1` : "";
+      const res = await fetch(`/api/predictions?date=${targetDate}${qs}`);
       const text = await res.text();
       let json: PredictionData | null = null;
       try {
@@ -195,7 +218,54 @@ export default function PredictionsPage() {
   useEffect(() => {
     fetchPredictions(date);
     setParlayLegs([]);
+    setSyncResult(null);
   }, [date, fetchPredictions]);
+
+  useEffect(() => {
+    const d = parseDateInput(date);
+    setCalendarMonth((m) => {
+      if (m.year === d.getFullYear() && m.month === d.getMonth()) return m;
+      return { year: d.getFullYear(), month: d.getMonth() };
+    });
+  }, [date]);
+
+  useEffect(() => {
+    const monthStr = `${calendarMonth.year}-${String(calendarMonth.month + 1).padStart(2, "0")}`;
+    fetch(`/api/perfect-dates?month=${monthStr}&filter=${pickType}`)
+      .then((r) => r.json())
+      .then((json: { dates?: string[] }) => {
+        setPerfectDates(new Set(json.dates ?? []));
+      })
+      .catch(() => setPerfectDates(new Set()));
+  }, [calendarMonth.year, calendarMonth.month, pickType]);
+
+  const runSync = useCallback(async () => {
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      const res = await fetch(`/api/sync?date=${date}`, { method: "POST" });
+      const json = await res.json();
+      setSyncResult({
+        ok: json.ok,
+        message: json.message ?? (res.ok ? "Sync complete" : "Sync failed"),
+        steps: json.steps,
+      });
+      if (json.ok) {
+        // Refresh with ledger update so picks get graded (hit/miss) and simulator stays in sync
+        fetchPredictions(date, true);
+        // Refresh perfect dates so calendar shows updated badges
+        const monthStr = `${calendarMonth.year}-${String(calendarMonth.month + 1).padStart(2, "0")}`;
+        fetch(`/api/perfect-dates?month=${monthStr}&filter=${pickType}`)
+          .then((r) => r.json())
+          .then((j: { dates?: string[] }) => setPerfectDates(new Set(j.dates ?? [])))
+          .catch(() => {});
+      }
+    } catch (err) {
+      setSyncResult({ ok: false, message: err instanceof Error ? err.message : "Sync failed" });
+    } finally {
+      setSyncing(false);
+    }
+  }, [date, fetchPredictions, calendarMonth.year, calendarMonth.month, pickType]);
 
   const changeDate = (delta: number) => {
     setDate((prev) => {
@@ -227,7 +297,6 @@ export default function PredictionsPage() {
     return { hits, total };
   };
 
-  const dayHitSummary = data?.dayBetSummary ?? { hits: 0, total: 0, hitRate: null };
 
   const resolveLabel = (displayLabel: string | undefined, outcomeType: string, homeTeam: string, awayTeam: string) => {
     if (displayLabel) {
@@ -367,46 +436,54 @@ export default function PredictionsPage() {
     return label;
   };
 
-  const totalPicks = data?.games.reduce((sum, g) => sum + (g.suggestedBetPicks?.length ?? 0), 0) ?? 0;
+  const filteredGames = data?.games.map((g) => ({
+    ...g,
+    suggestedBetPicks: filterPicks(g.suggestedBetPicks, pickType),
+    suggestedPlays: filterPicks(g.suggestedPlays, pickType),
+    discoveryV2Matches: filterPicks(g.discoveryV2Matches, pickType),
+  })) ?? [];
+  const totalPicks = filteredGames.reduce((sum, g) => sum + (g.suggestedBetPicks?.length ?? 0), 0);
+
+  const dayHitSummary = (() => {
+    let hits = 0;
+    let total = 0;
+    for (const game of filteredGames) {
+      for (const pick of game.suggestedBetPicks ?? []) {
+        if (pick.result != null) {
+          total++;
+          if (pick.result.hit) hits++;
+        }
+      }
+    }
+    return { hits, total, hitRate: total > 0 ? hits / total : null };
+  })();
 
   return (
     <>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: "0.5rem", marginBottom: "1rem" }}>
-        <div>
-          {!loading && data ? (
-            <h1 style={{ margin: 0, fontSize: "1.4rem", fontWeight: 800 }}>
-              {data.games.length} Games, {totalPicks} Picks
-              {dayHitSummary.total > 0 && (
-                <span style={{
-                  color: dayHitSummary.hits === dayHitSummary.total ? "#a855f7" : (dayHitSummary.hitRate ?? 0) >= 0.5 ? "var(--success)" : "var(--error)",
-                  marginLeft: "0.5rem",
-                  fontSize: "1.1rem",
-                }}>
-                  {dayHitSummary.hits}/{dayHitSummary.total} ({((dayHitSummary.hitRate ?? 0) * 100).toFixed(0)}%)
-                  {dayHitSummary.hits === dayHitSummary.total && " PERFECT"}
-                </span>
-              )}
-              {data.seasonToDate && data.seasonToDate.v2.total > 0 && (
-                <span className="muted" style={{ marginLeft: "0.5rem", fontSize: "0.85rem", fontWeight: 400 }}>
-                  Season {data.seasonToDate.v2.hits}/{data.seasonToDate.v2.total} ({((data.seasonToDate.v2.hitRate ?? 0) * 100).toFixed(1)}%)
-                </span>
-              )}
-            </h1>
-          ) : (
-            <h1 style={{ margin: 0, fontSize: "1.4rem", fontWeight: 800, opacity: 0.4 }}>&nbsp;</h1>
-          )}
-        </div>
-        <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
-          <button type="button" onClick={() => changeDate(-1)} className="btn-today">&larr;</button>
-          <input
-            type="date"
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
-            style={{ padding: "0.45rem 0.6rem", fontSize: "0.95rem" }}
-          />
-          <button type="button" onClick={() => changeDate(1)} className="btn-today">&rarr;</button>
-          <button type="button" onClick={() => setDate(getLocalDateString())} className="btn-today" style={{ marginLeft: "0.25rem" }}>Today</button>
-        </div>
+      <div style={{ marginBottom: "1rem" }}>
+        {!loading && data ? (
+          <h1 style={{ margin: 0, fontSize: "1.4rem", fontWeight: 800 }}>
+            {data.games.length} Games, {totalPicks} Picks
+            {pickType !== "all" && <span className="muted" style={{ fontSize: "0.9rem", fontWeight: 400 }}> ({pickType})</span>}
+            {dayHitSummary.total > 0 && (
+              <span style={{
+                color: dayHitSummary.hits === dayHitSummary.total ? "#a855f7" : (dayHitSummary.hitRate ?? 0) >= 0.5 ? "var(--success)" : "var(--error)",
+                marginLeft: "0.5rem",
+                fontSize: "1.1rem",
+              }}>
+                {dayHitSummary.hits}/{dayHitSummary.total} ({((dayHitSummary.hitRate ?? 0) * 100).toFixed(0)}%)
+                {dayHitSummary.hits === dayHitSummary.total && " PERFECT"}
+              </span>
+            )}
+            {data.seasonToDate && data.seasonToDate.v2.total > 0 && (
+              <span className="muted" style={{ marginLeft: "0.5rem", fontSize: "0.85rem", fontWeight: 400 }}>
+                Season {data.seasonToDate.v2.hits}/{data.seasonToDate.v2.total} ({((data.seasonToDate.v2.hitRate ?? 0) * 100).toFixed(1)}%)
+              </span>
+            )}
+          </h1>
+        ) : (
+          <h1 style={{ margin: 0, fontSize: "1.4rem", fontWeight: 800, opacity: 0.4 }}>&nbsp;</h1>
+        )}
       </div>
 
       <div style={{ display: "flex", gap: "1rem", alignItems: "flex-start" }}>
@@ -427,9 +504,9 @@ export default function PredictionsPage() {
         </div>
       )}
 
-      {!loading && data && data.games.length > 0 && (
+      {!loading && data && filteredGames.length > 0 && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: "0.75rem", alignItems: "start" }}>
-          {[...data.games].sort((a, b) => (b.suggestedBetPicks?.length ?? 0) - (a.suggestedBetPicks?.length ?? 0)).map((game) => {
+          {[...filteredGames].sort((a, b) => (b.suggestedBetPicks?.length ?? 0) - (a.suggestedBetPicks?.length ?? 0)).map((game) => {
             const homeLabel = game.homeTeam.code ?? game.homeTeam.name ?? `Team ${game.homeTeam.id}`;
             const awayLabel = game.awayTeam.code ?? game.awayTeam.name ?? `Team ${game.awayTeam.id}`;
             const isExpanded = expandedGame === game.id;
@@ -728,8 +805,127 @@ export default function PredictionsPage() {
       )}
       </div>
 
+      {/* Sidebar: Date + Parlay */}
+      <div style={{ width: 300, flexShrink: 0, display: "flex", flexDirection: "column", gap: "1rem", alignSelf: "flex-start", position: "sticky", top: "1rem" }}>
+      {/* Date picker + Sync card */}
+      <div className="card" style={{ padding: "1rem" }}>
+        <h3 style={{ margin: "0 0 0.75rem", fontSize: "0.95rem" }}>Date & Sync</h3>
+        {/* Calendar */}
+        <div style={{ marginBottom: "0.75rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+            <button
+              type="button"
+              onClick={() => setCalendarMonth((m) => {
+                const d = new Date(m.year, m.month - 1);
+                return { year: d.getFullYear(), month: d.getMonth() };
+              })}
+              className="btn-today"
+              style={{ padding: "0.25rem 0.5rem", fontSize: "0.8rem" }}
+            >
+              &larr;
+            </button>
+            <span style={{ fontSize: "0.9rem", fontWeight: 600 }}>
+              {new Date(calendarMonth.year, calendarMonth.month).toLocaleString("default", { month: "long", year: "numeric" })}
+            </span>
+            <button
+              type="button"
+              onClick={() => setCalendarMonth((m) => {
+                const d = new Date(m.year, m.month + 1);
+                return { year: d.getFullYear(), month: d.getMonth() };
+              })}
+              className="btn-today"
+              style={{ padding: "0.25rem 0.5rem", fontSize: "0.8rem" }}
+            >
+              &rarr;
+            </button>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 2, fontSize: "0.7rem", textAlign: "center" }}>
+            {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => (
+              <div key={i} className="muted" style={{ fontWeight: 600 }}>{d}</div>
+            ))}
+            {(() => {
+              const first = new Date(calendarMonth.year, calendarMonth.month, 1);
+              const last = new Date(calendarMonth.year, calendarMonth.month + 1, 0);
+              const startPad = first.getDay();
+              const days: (number | null)[] = Array(startPad).fill(null);
+              for (let d = 1; d <= last.getDate(); d++) days.push(d);
+              const today = new Date();
+              const todayStr = getLocalDateString(today);
+              return days.map((d, i) => {
+                if (d === null) return <div key={i} />;
+                const dateStr = `${calendarMonth.year}-${String(calendarMonth.month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+                const isSelected = dateStr === date;
+                const isToday = dateStr === todayStr;
+                const isPerfect = perfectDates.has(dateStr);
+                return (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => setDate(dateStr)}
+                    title={isPerfect ? "Perfect – all picks hit" : undefined}
+                    style={{
+                      padding: "0.35rem",
+                      border: "1px solid",
+                      borderColor: isPerfect ? "#a855f7" : isSelected ? "var(--accent)" : "var(--border)",
+                      borderRadius: 4,
+                      background: isPerfect ? "rgba(168, 85, 247, 0.12)" : isSelected ? "var(--accent-muted)" : isToday ? "var(--bg-elevated)" : "transparent",
+                      color: isPerfect ? "#a855f7" : isSelected ? "var(--accent)" : "inherit",
+                      fontWeight: isToday ? 700 : isPerfect ? 600 : 400,
+                      cursor: "pointer",
+                      fontSize: "0.75rem",
+                    }}
+                  >
+                    {d}
+                  </button>
+                );
+              });
+            })()}
+          </div>
+        </div>
+        <button type="button" onClick={() => setDate(getLocalDateString())} className="btn-today" style={{ width: "100%", marginBottom: "0.5rem", fontSize: "0.8rem" }}>
+          Today
+        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.5rem" }}>
+          <span className="muted" style={{ fontSize: "0.8rem" }}>Picks:</span>
+          {(["game", "player", "all"] as const).map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setPickType(t)}
+              style={{
+                flex: 1,
+                padding: "0.3rem 0.4rem",
+                fontSize: "0.75rem",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                background: pickType === t ? "var(--accent-muted)" : "transparent",
+                cursor: "pointer",
+              }}
+            >
+              {t === "game" ? "Game" : t === "player" ? "Player" : "All"}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={runSync}
+          disabled={syncing}
+          className="btn-today"
+          style={{ width: "100%", minHeight: "2rem" }}
+          title="Sync games, odds, injuries, and lineups for this date"
+        >
+          {syncing ? "…" : "Sync"}
+        </button>
+        {syncResult && (
+          <div title={syncResult.steps?.map((s) => `${s.step}: ${s.ok ? "ok" : s.message ?? "fail"}`).join("\n")} style={{ fontSize: "0.75rem", color: syncResult.ok ? "var(--success)" : "var(--error)", marginTop: "0.5rem" }}>
+            {syncResult.message}
+            {syncResult.steps && ` (${syncResult.steps.filter((s) => s.ok).length}/${syncResult.steps.length})`}
+          </div>
+        )}
+      </div>
+
       {/* Parlay builder */}
-      <div className="card" style={{ width: 300, flexShrink: 0, position: "sticky", top: "1rem", padding: "1rem", alignSelf: "flex-start" }}>
+      <div className="card" style={{ padding: "1rem", flex: 1 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
           <h3 style={{ margin: 0, fontSize: "1rem" }}>Parlay Builder</h3>
           {data && (
@@ -820,6 +1016,7 @@ export default function PredictionsPage() {
             </button>
           </>
         )}
+      </div>
       </div>
       </div>
     </>

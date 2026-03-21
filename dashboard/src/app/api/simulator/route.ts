@@ -43,6 +43,7 @@ export async function GET() {
     picks: dayPicks.map((p) => ({
       gameLabel: `${p.awayCode ?? "?"} @ ${p.homeCode ?? "?"}`,
       label: p.displayLabel ?? p.outcomeType,
+      outcomeType: p.outcomeType,
       odds: p.priceAmerican ?? -110,
       hit: p.settledHit,
       meta: p.metaScore,

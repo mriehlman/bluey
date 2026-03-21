@@ -42,9 +42,14 @@ type LinearModel = {
 function parseFlags(args: string[]): Record<string, string> {
   const flags: Record<string, string> = {};
   for (let i = 0; i < args.length; i++) {
-    if (args[i].startsWith("--") && i + 1 < args.length) {
-      flags[args[i].slice(2)] = args[i + 1];
-      i++;
+    const arg = args[i];
+    if (arg === "--") continue;
+    if (arg.startsWith("--") && i + 1 < args.length) {
+      const value = args[i + 1];
+      if (!value.startsWith("--")) {
+        flags[arg.slice(2)] = value;
+        i++;
+      }
     }
   }
   return flags;

@@ -83,6 +83,8 @@ const defaultFamilyGates: Record<"PLAYER" | "TOTAL" | "SPREAD" | "MONEYLINE" | "
 export const PREDICTION_TUNING = {
   maxNegativeAmericanOdds: -200,
   familyGates: defaultFamilyGates,
+  /** Exclude these bet families from suggested picks. Empty = include all; filter in UI. */
+  excludeFamilies: [] as const,
 } as const;
 
 export const LEDGER_TUNING = {

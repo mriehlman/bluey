@@ -6,6 +6,7 @@ import {
   type OddsLite,
 } from "./v2PregameMatching";
 import {
+  betFamilyForOutcome,
   evaluateSuggestedPlayQualityGate,
   isOutcomeActionableForMarket,
   outcomeDedupFamily,
@@ -109,6 +110,8 @@ export type PredictionInput = {
   maxBetPicksPerGame: number;
   fallbackAmericanOdds?: number;
   includeDebugPlays?: boolean;
+  /** Override excludeFamilies (e.g. [] for backfill to capture all pick types). */
+  overrideExcludeFamilies?: readonly string[];
 };
 
 export type PredictionOutput = {
@@ -625,6 +628,7 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
     maxBetPicksPerGame,
     fallbackAmericanOdds,
     includeDebugPlays,
+    overrideExcludeFamilies,
   } = input;
 
   const gateDiagnostics = includeDebugPlays ? newGateDiagnostics() : undefined;
@@ -755,7 +759,14 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
         b.posteriorHitRate - a.posteriorHitRate,
     );
 
-  const qualitySuggestedPlays = rankedSuggestedPlays.filter((p) => {
+  const excludeFamilies = overrideExcludeFamilies ?? PREDICTION_TUNING.excludeFamilies ?? [];
+  const excludedFamilies = new Set(excludeFamilies);
+  const familyFilteredPlays =
+    excludedFamilies.size > 0
+      ? rankedSuggestedPlays.filter((p) => !excludedFamilies.has(betFamilyForOutcome(p.outcomeType)))
+      : rankedSuggestedPlays;
+
+  const qualitySuggestedPlays = familyFilteredPlays.filter((p) => {
     const evalResult = evaluateSuggestedPlayQualityGate({
       ...p,
       requireMarketLine: false,

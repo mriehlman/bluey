@@ -5,10 +5,24 @@ import { useEffect, useState } from "react";
 interface Pick {
   gameLabel: string;
   label: string;
+  outcomeType?: string;
   odds: number;
   hit: boolean;
   meta: number | null;
   posterior: number;
+}
+
+function isPlayerPick(outcomeType: string): boolean {
+  const base = (outcomeType ?? "").replace(/:.*$/, "");
+  return base.startsWith("PLAYER_") || base.startsWith("HOME_TOP_") || base.startsWith("AWAY_TOP_");
+}
+
+function filterPicksByType<T extends { outcomeType?: string }>(picks: T[], pickType: "game" | "player" | "all"): T[] {
+  if (pickType === "all") return picks;
+  return picks.filter((p) => {
+    const ot = p.outcomeType ?? "";
+    return pickType === "player" ? isPlayerPick(ot) : !isPlayerPick(ot);
+  });
 }
 
 interface Day {
@@ -21,6 +35,11 @@ function americanToDecimal(american: number): number {
   return american > 0 ? 1 + american / 100 : 1 + 100 / Math.abs(american);
 }
 
+function getCurrentSeason(): number {
+  const d = new Date();
+  return d.getMonth() >= 9 ? d.getFullYear() : d.getFullYear() - 1;
+}
+
 function flatBetPayout(odds: number, stake: number, hit: boolean): number {
   if (!hit) return -stake;
   const decimal = americanToDecimal(odds);
@@ -31,12 +50,24 @@ export default function SimulatorPage() {
   const [data, setData] = useState<{ days: Day[]; seasons: number[] } | null>(null);
   const [loading, setLoading] = useState(true);
   const [stake, setStake] = useState("10");
-  const [selectedSeason, setSelectedSeason] = useState<string>("all");
+  const [selectedSeason, setSelectedSeason] = useState<string>(() => String(getCurrentSeason()));
+  const [parlaySort, setParlaySort] = useState<{ col: string; asc: boolean }>({ col: "date", asc: true });
+  const [pickType, setPickType] = useState<"game" | "player" | "all">("game");
 
   useEffect(() => {
     fetch("/api/simulator")
       .then((r) => r.json())
-      .then((d) => { setData(d); setLoading(false); })
+      .then((d) => {
+        setData(d);
+        setSelectedSeason((prev) => {
+          const seasons = d?.seasons ?? [];
+          const current = getCurrentSeason();
+          if (seasons.includes(current)) return String(current);
+          if (seasons.length > 0 && !seasons.includes(Number(prev))) return String(seasons.at(-1));
+          return prev;
+        });
+        setLoading(false);
+      })
       .catch(() => setLoading(false));
   }, []);
 
@@ -58,9 +89,14 @@ export default function SimulatorPage() {
     return <div className="card"><p>No graded pick data found.</p></div>;
   }
 
-  const filteredDays = selectedSeason === "all"
+  const seasonFilteredDays = selectedSeason === "all"
     ? data.days
     : data.days.filter((d) => d.season === parseInt(selectedSeason));
+
+  const filteredDays = seasonFilteredDays.map((d) => ({
+    ...d,
+    picks: filterPicksByType(d.picks, pickType),
+  }));
 
   const allPicks = filteredDays.flatMap((d) => d.picks);
   const totalPicks = allPicks.length;
@@ -98,6 +134,30 @@ export default function SimulatorPage() {
   const parlayTotalPnl = parlayRunning;
   const parlayRoi = parlayStaked > 0 ? (parlayTotalPnl / parlayStaked) * 100 : 0;
 
+  const parlayRows = parlayByDay.filter((d) => d.legs > 0);
+  const sortedParlayRows = [...parlayRows].sort((a, b) => {
+    const mul = parlaySort.asc ? 1 : -1;
+    switch (parlaySort.col) {
+      case "date":
+        return mul * (a.date.localeCompare(b.date));
+      case "legs":
+        return mul * (a.legs - b.legs);
+      case "odds":
+        return mul * (a.odds - b.odds);
+      case "result":
+        return mul * (a.pnl - b.pnl);
+      default:
+        return 0;
+    }
+  });
+
+  const sortParlay = (col: string) => {
+    setParlaySort((prev) => ({ col, asc: prev.col === col ? !prev.asc : true }));
+  };
+
+  const SortIcon = ({ col }: { col: string }) =>
+    parlaySort.col === col ? (parlaySort.asc ? " ▲" : " ▼") : "";
+
   return (
     <>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem", flexWrap: "wrap", gap: "0.5rem" }}>
@@ -127,12 +187,33 @@ export default function SimulatorPage() {
               step="5"
             />
           </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+            <span className="muted" style={{ fontSize: "0.85rem" }}>Picks:</span>
+            {(["game", "player", "all"] as const).map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setPickType(t)}
+                style={{
+                  padding: "0.35rem 0.5rem",
+                  fontSize: "0.85rem",
+                  border: "1px solid var(--border)",
+                  borderRadius: 4,
+                  background: pickType === t ? "var(--accent-muted)" : "transparent",
+                  cursor: "pointer",
+                }}
+              >
+                {t === "game" ? "Game" : t === "player" ? "Player" : "All"}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
       <div className="muted" style={{ marginBottom: "1rem", fontSize: "0.85rem" }}>
         {filteredDays.length} days, {totalPicks} graded picks, {totalHits} hits ({totalPicks > 0 ? (totalHits / totalPicks * 100).toFixed(1) : "0.0"}%)
         {selectedSeason !== "all" && <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>(out of {data.days.length} total days)</span>}
+        {pickType !== "all" && <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>• {pickType} picks only</span>}
       </div>
 
       {/* Summary cards */}
@@ -230,15 +311,14 @@ export default function SimulatorPage() {
             <table>
               <thead>
                 <tr>
-                  <th>Date</th>
-                  <th>Legs</th>
-                  <th>Odds</th>
-                  <th>Result</th>
-                  <th>Cumulative</th>
+                  <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => sortParlay("date")}>Date<SortIcon col="date" /></th>
+                  <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => sortParlay("legs")}>Legs<SortIcon col="legs" /></th>
+                  <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => sortParlay("odds")}>Odds<SortIcon col="odds" /></th>
+                  <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => sortParlay("result")}>Result<SortIcon col="result" /></th>
                 </tr>
               </thead>
               <tbody>
-                {parlayByDay.filter((d) => d.legs > 0).map((d) => (
+                {sortedParlayRows.map((d) => (
                   <tr key={d.date}>
                     <td style={{ fontSize: "0.82rem" }}>{d.date}</td>
                     <td>{d.legs}</td>
@@ -249,9 +329,6 @@ export default function SimulatorPage() {
                       ) : (
                         <span style={{ color: "var(--error)" }}>-${stakeNum.toFixed(2)}</span>
                       )}
-                    </td>
-                    <td style={{ color: d.cumulative >= 0 ? "var(--success)" : "var(--error)", fontWeight: 600 }}>
-                      {d.cumulative >= 0 ? "+" : ""}{d.cumulative.toFixed(2)}
                     </td>
                   </tr>
                 ))}

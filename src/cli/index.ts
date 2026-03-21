@@ -1,7 +1,7 @@
 import * as fs from "fs/promises";
 import { prisma } from "../db/prisma.js";
 import { syncGamesForDate, syncGamesForRange, syncUpcomingGames, backfillGameExternalIds } from "../ingest/syncGames.js";
-import { getEasternDateFromUtc } from "../ingest/utils.js";
+import { getEasternDateFromUtc, dateStringToUtcMidday } from "../ingest/utils.js";
 import { syncNbaStatsForDate, syncNbaStatsForDateRange, syncUpcomingFromNba } from "../ingest/syncNbaStats.js";
 import { syncOddsLive, syncOddsForDate } from "../ingest/syncOdds.js";
 import { syncPlayerPropsLive } from "../ingest/syncPlayerProps.js";
@@ -42,9 +42,14 @@ import type { RollupFilters } from "../stats/filters.js";
 function parseFlags(args: string[]): Record<string, string> {
   const flags: Record<string, string> = {};
   for (let i = 0; i < args.length; i++) {
-    if (args[i].startsWith("--") && i + 1 < args.length) {
-      flags[args[i].slice(2)] = args[i + 1];
-      i++;
+    const arg = args[i];
+    if (arg === "--") continue;
+    if (arg.startsWith("--") && i + 1 < args.length) {
+      const value = args[i + 1];
+      if (!value.startsWith("--")) {
+        flags[arg.slice(2)] = value;
+        i++;
+      }
     }
   }
   return flags;
@@ -235,19 +240,40 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   "sync:upcoming": async (args) => {
     const flags = parseFlags(args);
     const dateStr = flags.date || new Date().toISOString().slice(0, 10);
-    
+    const skipExisting = (flags["skip-existing"] ?? "false") === "true";
+
     console.log(`\n=== Sync Upcoming Games for ${dateStr} (nba_api) ===\n`);
-    
+
+    if (skipExisting) {
+      const gameDate = dateStringToUtcMidday(dateStr);
+      const gamesForDate = await prisma.game.findMany({
+        where: { date: gameDate },
+        select: { homeScore: true, awayScore: true, status: true },
+      });
+      const allFinal =
+        gamesForDate.length > 0 &&
+        gamesForDate.every(
+          (g) =>
+            (g.homeScore ?? 0) > 0 &&
+            (g.awayScore ?? 0) > 0 &&
+            g.status?.includes("Final"),
+        );
+      if (allFinal) {
+        console.log(`Skip: ${gamesForDate.length} games already have final scores for ${dateStr}.`);
+        return;
+      }
+    }
+
     console.log("Step 1/2: Syncing upcoming games...");
     await syncUpcomingFromNba(dateStr);
-    
+
     console.log("\nStep 2/2: Syncing live odds...");
     try {
       await syncOddsLive();
     } catch (err) {
       console.warn("  Odds sync failed (non-fatal):", (err as Error).message);
     }
-    
+
     console.log("\n=== Upcoming sync complete ===");
   },
 

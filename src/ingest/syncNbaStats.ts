@@ -263,7 +263,26 @@ export async function syncUpcomingFromNba(date: string): Promise<number> {
         ],
       },
     });
-    if (existing) continue;
+    if (existing) {
+      // Update existing game with final scores when we have them
+      const hasScores = (g.homeScore ?? 0) > 0 || (g.awayScore ?? 0) > 0;
+      const needsUpdate =
+        hasScores &&
+        (!existing.homeScore ||
+          !existing.awayScore ||
+          !existing.status?.includes("Final"));
+      if (needsUpdate) {
+        await prisma.game.update({
+          where: { id: existing.id },
+          data: {
+            homeScore: g.homeScore ?? 0,
+            awayScore: g.awayScore ?? 0,
+            status: g.status ?? "Final",
+          },
+        });
+      }
+      continue;
+    }
 
     const nbaGameIdNum = parseInt(g.gameId, 10) || Math.abs(hashString(g.gameId));
     const game = await prisma.game.create({

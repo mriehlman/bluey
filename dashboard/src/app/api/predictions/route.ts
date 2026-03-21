@@ -683,6 +683,8 @@ export async function GET(req: Request) {
       maxBetPicksPerGame,
       fallbackAmericanOdds,
       includeDebugPlays,
+      // Ledger refresh (e.g. backfill) should capture all pick types for simulator filtering
+      overrideExcludeFamilies: refreshLedger ? [] : undefined,
     });
 
     if (engineOutput.gateDiagnostics) {
