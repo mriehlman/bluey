@@ -23,8 +23,24 @@ import {
   buildTeamAliasLookup,
   computeLineupSignalsFromCounts,
 } from "../../../../../src/features/injuryContext";
-
 export const dynamic = "force-dynamic";
+
+async function loadActiveModelVersionFromDb() {
+  try {
+    const active = await prisma.modelVersion.findFirst({
+      where: { isActive: true },
+    });
+    if (!active) return null;
+    return {
+      deployedPatterns: active.deployedPatterns as unknown as DeployedPatternV2[],
+      featureBins: active.featureBins as unknown as Record<string, any>,
+      metaModel: active.metaModel as unknown as Awaited<ReturnType<typeof loadMetaModel>>,
+      tuningConfig: active.tuningConfig as unknown as any,
+    };
+  } catch {
+    return null;
+  }
+}
 
 let suggestedPlayLedgerAvailableCache: boolean | null = null;
 type WagerSummary = {
@@ -431,10 +447,21 @@ export async function GET(req: Request) {
     playerPropsByGame.get(r.gameId)?.push(r);
   }
 
-  const [deployedV2Patterns, featureBins] = await Promise.all([
-    loadDeployedV2PatternsSafe(),
-    loadFeatureBinsSafe(),
-  ]);
+  const activeVersion = await loadActiveModelVersionFromDb();
+  let deployedV2Patterns: DeployedPatternV2[];
+  let featureBins: Map<string, any>;
+  let activeMetaModel = metaModel;
+
+  if (activeVersion) {
+    deployedV2Patterns = activeVersion.deployedPatterns;
+    featureBins = new Map(Object.entries(activeVersion.featureBins));
+    activeMetaModel = activeVersion.metaModel;
+  } else {
+    [deployedV2Patterns, featureBins] = await Promise.all([
+      loadDeployedV2PatternsSafe(),
+      loadFeatureBinsSafe(),
+    ]);
+  }
 
   const teamIds = [...new Set(games.flatMap((g) => [g.homeTeamId, g.awayTeamId]))];
   const teamSnapshots = await computeTeamSnapshots(season, targetDate, teamIds);
@@ -674,7 +701,7 @@ export async function GET(req: Request) {
       odds: engineOdds,
       deployedV2Patterns,
       featureBins,
-      metaModel,
+      metaModel: activeMetaModel,
       gamePlayerContext: gamePlayerCtx ?? {
         homeTopScorer: null, homeTopRebounder: null, homeTopPlaymaker: null,
         awayTopScorer: null, awayTopRebounder: null, awayTopPlaymaker: null,
@@ -836,9 +863,14 @@ export async function GET(req: Request) {
     console.error("Failed to upsert SuggestedPlayLedger rows:", err);
   }
 
+  const activeModelVersionInfo = activeVersion
+    ? { name: (await prisma.modelVersion.findFirst({ where: { isActive: true }, select: { name: true } }))?.name ?? null }
+    : null;
+
   return NextResponse.json({
     date: dateStr,
     season,
+    modelVersion: activeModelVersionInfo?.name ?? "live",
     dayBetSummary,
     ...(includeDebugPlays ? { gateDiagnostics } : {}),
     seasonToDate: {

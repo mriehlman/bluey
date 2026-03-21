@@ -1,6 +1,7 @@
 import { prisma } from "../db/prisma.js";
 import { DISCOVERY_DEFAULTS, VALIDATION_DEFAULTS } from "../config/tuning.js";
 import { outcomeFamily, matchesConditions, isLowSpecificityConditionToken } from "./metaModelCore.js";
+import { autoSnapshotBeforeDiscovery } from "./modelVersion.js";
 
 type FeatureBinDef = {
   kind: "quantile" | "fixed";
@@ -1003,6 +1004,12 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
   const maxSingletons = Math.max(10, Number(flags["max-singletons"] ?? DISCOVERY_DEFAULTS.maxSingletons));
 
   console.log("\n=== Discover Patterns v2 ===\n");
+
+  const skipSnapshot = flags["skip-snapshot"] === "true";
+  if (!skipSnapshot) {
+    await autoSnapshotBeforeDiscovery();
+  }
+
   const games = await loadTokenizedGames();
   const splits: SeasonSplit =
     cvMode === "loso"

@@ -37,6 +37,13 @@ import { runBacktest, backtestExisting, analyzePattern, quickValidate } from "..
 import { analyzeSuggestedPlayLedger } from "../backtest/suggestedPlayLedger.js";
 import { updateSuggestedPlayClv } from "../backtest/updateClvSnapshots.js";
 import { backfillSuggestedLedger } from "../backtest/backfillSuggestedLedger.js";
+import {
+  snapshotModelVersion,
+  listModelVersions,
+  activateModelVersion,
+  deactivateModelVersion,
+  deleteModelVersion,
+} from "../patterns/modelVersion.js";
 import type { RollupFilters } from "../stats/filters.js";
 
 function parseFlags(args: string[]): Record<string, string> {
@@ -741,6 +748,26 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
   "update:clv-snapshots": async (args) => {
     await updateSuggestedPlayClv(args);
+  },
+
+  "snapshot:model-version": async (args) => {
+    await snapshotModelVersion(args);
+  },
+
+  "list:model-versions": async (_args) => {
+    await listModelVersions();
+  },
+
+  "activate:model-version": async (args) => {
+    await activateModelVersion(args);
+  },
+
+  "deactivate:model-version": async (_args) => {
+    await deactivateModelVersion();
+  },
+
+  "delete:model-version": async (args) => {
+    await deleteModelVersion(args);
   },
 
 };

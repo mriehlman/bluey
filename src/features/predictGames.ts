@@ -17,6 +17,7 @@ import {
   type GamePlayerContext,
   type PlayerPropRow,
 } from "./predictionEngine.js";
+import { loadActiveModelVersion } from "../patterns/modelVersion.js";
 
 function getSeasonForDate(date: Date): number {
   return date.getMonth() >= 9 ? date.getFullYear() : date.getFullYear() - 1;
@@ -70,26 +71,40 @@ export async function predictGames(args: string[] = []): Promise<void> {
   const patterns = await prisma.gamePattern.findMany({
     orderBy: { confidenceScore: "desc" },
   });
-  const deployedV2 = await prisma.patternV2.findMany({
-    where: { status: "deployed" },
-    select: {
-      id: true,
-      outcomeType: true,
-      conditions: true,
-      posteriorHitRate: true,
-      edge: true,
-      score: true,
-      n: true,
-    },
-    orderBy: { score: "desc" },
-  }) as DeployedPatternV2[];
+
+  const activeVersion = await loadActiveModelVersion();
+  let deployedV2: DeployedPatternV2[];
+  let bins: Map<string, any>;
+  let metaModel: Awaited<ReturnType<typeof loadMetaModel>>;
+
+  if (activeVersion) {
+    console.log(`Using model version snapshot (active version found)`);
+    deployedV2 = activeVersion.deployedPatterns;
+    bins = new Map(Object.entries(activeVersion.featureBins));
+    metaModel = activeVersion.metaModel;
+  } else {
+    deployedV2 = await prisma.patternV2.findMany({
+      where: { status: "deployed" },
+      select: {
+        id: true,
+        outcomeType: true,
+        conditions: true,
+        posteriorHitRate: true,
+        edge: true,
+        score: true,
+        n: true,
+      },
+      orderBy: { score: "desc" },
+    }) as DeployedPatternV2[];
+    bins = await loadLatestFeatureBins(prisma);
+    metaModel = await loadMetaModel();
+  }
+
   const tokenizedTodayCount = await prisma.gameFeatureToken.count({
     where: { gameId: { in: games.map((g) => g.id) } },
   });
-  const bins = await loadLatestFeatureBins(prisma);
-  const metaModel = await loadMetaModel();
   console.log(`Loaded ${patterns.length} legacy stored patterns`);
-  console.log(`Loaded ${deployedV2.length} deployed PatternV2 rows`);
+  console.log(`Loaded ${deployedV2.length} deployed PatternV2 rows${activeVersion ? " (from snapshot)" : ""}`);
   console.log(`Found ${tokenizedTodayCount}/${games.length} GameFeatureToken rows for target games\n`);
   if (deployedV2.length > 0 && bins.size === 0) {
     console.log(

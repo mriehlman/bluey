@@ -477,3 +477,19 @@ model SuggestedPlayLedger {
   @@index([date, season])
   @@index([settledResult, date])
 }
+
+model ModelVersion {
+  id               String   @id @default(cuid())
+  name             String   @unique
+  description      String?
+  isActive         Boolean  @default(false)
+  deployedPatterns Json
+  featureBins      Json
+  metaModel        Json
+  tuningConfig     Json
+  stats            Json?
+  createdAt        DateTime @default(now())
+
+  @@index([isActive])
+  @@index([createdAt])
+}
