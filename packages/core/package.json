@@ -8,6 +8,7 @@
     "./config/*": "./src/config/*.ts",
     "./features/*": "./src/features/*.ts",
     "./ingest/*": "./src/ingest/*.ts",
+    "./ml/*": "./src/ml/*.ts",
     "./patterns/*": "./src/patterns/*.ts",
     "./profiles/*": "./src/profiles/*.ts",
     "./reports/*": "./src/reports/*.ts",

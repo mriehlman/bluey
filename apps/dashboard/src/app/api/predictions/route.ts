@@ -45,6 +45,7 @@ type CanonicalPredictionRow = {
   rankingPolicyVersion: string;
   aggregationPolicyVersion: string;
   featureSnapshotId: string;
+  modelVotes: unknown;
   supportingPatterns: string[] | null;
   supportingPatternCount: number;
   featureSnapshotPayloadSummary: unknown;
@@ -102,6 +103,7 @@ async function handleCanonicalPredictionList(url: URL) {
       cp."rankingPolicyVersion",
       cp."aggregationPolicyVersion",
       cp."featureSnapshotId",
+      cp."modelVotes",
       cp."supportingPatterns",
       COALESCE(array_length(cp."supportingPatterns", 1), 0)::int as "supportingPatternCount",
       jsonb_build_object(
@@ -140,6 +142,7 @@ async function handleCanonicalPredictionList(url: URL) {
         rankingPolicyVersion: row.rankingPolicyVersion,
         aggregationPolicyVersion: row.aggregationPolicyVersion,
         featureSnapshotId: row.featureSnapshotId,
+        modelVotes: row.modelVotes,
         supportingPatternCount: row.supportingPatternCount,
         supportingPatterns: row.supportingPatterns ?? [],
         featureSnapshotPayloadSummary: row.featureSnapshotPayloadSummary,
@@ -151,18 +154,117 @@ async function handleCanonicalPredictionList(url: URL) {
       })),
     });
   } catch (error) {
-    return NextResponse.json({
-      date: dateStr,
-      runId,
-      gameId,
-      market,
-      count: 0,
-      predictions: [],
-      message:
-        error instanceof Error
-          ? `Governance list unavailable: ${error.message}`
-          : "Governance list unavailable.",
-    });
+    try {
+      const legacyWhere: string[] = ["1=1"];
+      if (dateStr) legacyWhere.push(`cp."generatedAt"::date = '${sqlEsc(dateStr)}'::date`);
+      if (gameId) legacyWhere.push(`cp."gameId" = '${sqlEsc(gameId)}'`);
+      if (market) legacyWhere.push(`cp."market" = '${sqlEsc(market)}'`);
+
+      const legacyRows = await prisma.$queryRawUnsafe<Array<{
+        predictionId: string;
+        gameId: string;
+        market: string;
+        selection: string;
+        confidenceScore: number;
+        edgeEstimate: number;
+        generatedAt: Date | string;
+        predictionContractVersion: string;
+        modelBundleVersion: string;
+        featureSchemaVersion: string;
+        rankingPolicyVersion: string;
+        aggregationPolicyVersion: string;
+        featureSnapshotId: string;
+        modelVotes: unknown;
+        supportingPatterns: string[] | null;
+        supportingPatternCount: number;
+        featureSnapshotPayloadSummary: unknown;
+        oddsTimestampUsed: string | null;
+        statsSnapshotCutoff: string | null;
+        injuryLineupCutoff: string | null;
+      }>>(
+        `SELECT
+          cp."predictionId",
+          cp."gameId",
+          cp."market",
+          cp."selection",
+          cp."confidenceScore",
+          cp."edgeEstimate",
+          cp."generatedAt",
+          cp."predictionContractVersion",
+          cp."modelBundleVersion",
+          cp."featureSchemaVersion",
+          cp."rankingPolicyVersion",
+          cp."aggregationPolicyVersion",
+          cp."featureSnapshotId",
+          cp."modelVotes",
+          cp."supportingPatterns",
+          COALESCE(array_length(cp."supportingPatterns", 1), 0)::int as "supportingPatternCount",
+          jsonb_build_object(
+            'feature_schema_version', cp."featureSnapshotPayload"->>'feature_schema_version',
+            'token_count', COALESCE(jsonb_array_length(cp."featureSnapshotPayload"->'tokens'), 0),
+            'generated_from', cp."featureSnapshotPayload"->>'generated_from'
+          ) as "featureSnapshotPayloadSummary",
+          cp."featureSnapshotPayload"->>'odds_timestamp_used' as "oddsTimestampUsed",
+          cp."featureSnapshotPayload"->>'stats_snapshot_cutoff' as "statsSnapshotCutoff",
+          cp."featureSnapshotPayload"->>'injury_lineup_cutoff' as "injuryLineupCutoff"
+         FROM "CanonicalPrediction" cp
+         WHERE ${legacyWhere.join(" AND ")}
+         ORDER BY cp."generatedAt" DESC, cp."gameId" ASC
+         LIMIT ${limit}`,
+      );
+
+      return NextResponse.json({
+        date: dateStr,
+        runId,
+        gameId,
+        market,
+        count: legacyRows.length,
+        predictions: legacyRows.map((row) => ({
+          predictionId: row.predictionId,
+          runId: null,
+          runStartedAt: null,
+          gameId: row.gameId,
+          market: row.market,
+          selection: row.selection,
+          confidenceScore: row.confidenceScore,
+          edgeEstimate: row.edgeEstimate,
+          generatedAt: row.generatedAt,
+          predictionContractVersion: row.predictionContractVersion,
+          modelBundleVersion: row.modelBundleVersion,
+          featureSchemaVersion: row.featureSchemaVersion,
+          rankingPolicyVersion: row.rankingPolicyVersion,
+          aggregationPolicyVersion: row.aggregationPolicyVersion,
+          featureSnapshotId: row.featureSnapshotId,
+          modelVotes: row.modelVotes,
+          supportingPatternCount: row.supportingPatternCount,
+          supportingPatterns: row.supportingPatterns ?? [],
+          featureSnapshotPayloadSummary: row.featureSnapshotPayloadSummary,
+          sourceTimeMetadata: {
+            oddsTimestampUsed: row.oddsTimestampUsed,
+            statsSnapshotCutoff: row.statsSnapshotCutoff,
+            injuryLineupCutoff: row.injuryLineupCutoff,
+          },
+        })),
+        message: runId
+          ? "Run filter unavailable for legacy records (run columns missing)."
+          : "Loaded legacy canonical predictions (run columns missing).",
+      });
+    } catch (fallbackError) {
+      return NextResponse.json({
+        date: dateStr,
+        runId,
+        gameId,
+        market,
+        count: 0,
+        predictions: [],
+        message:
+          fallbackError instanceof Error
+            ? `Governance list unavailable: ${fallbackError.message}`
+            : error instanceof Error
+              ? `Governance list unavailable: ${error.message}`
+              : "Governance list unavailable.",
+      });
+    }
   }
 }
 

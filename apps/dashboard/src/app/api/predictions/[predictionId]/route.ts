@@ -93,14 +93,89 @@ export async function GET(
       },
     });
   } catch (error) {
-    return NextResponse.json(
-      {
-        message:
-          error instanceof Error
-            ? `Prediction detail unavailable: ${error.message}`
-            : "Prediction detail unavailable.",
-      },
-      { status: 503 },
-    );
+    try {
+      const rows = await prisma.$queryRawUnsafe<Array<{
+        predictionId: string;
+        gameId: string;
+        market: string;
+        selection: string;
+        confidenceScore: number;
+        edgeEstimate: number;
+        generatedAt: Date | string;
+        predictionContractVersion: string;
+        modelBundleVersion: string;
+        featureSchemaVersion: string;
+        rankingPolicyVersion: string;
+        aggregationPolicyVersion: string;
+        featureSnapshotId: string;
+        modelVotes: unknown;
+        supportingPatterns: string[] | null;
+        featureSnapshotPayload: unknown;
+      }>>(
+        `SELECT
+          cp."predictionId",
+          cp."gameId",
+          cp."market",
+          cp."selection",
+          cp."confidenceScore",
+          cp."edgeEstimate",
+          cp."generatedAt",
+          cp."predictionContractVersion",
+          cp."modelBundleVersion",
+          cp."featureSchemaVersion",
+          cp."rankingPolicyVersion",
+          cp."aggregationPolicyVersion",
+          cp."featureSnapshotId",
+          cp."modelVotes",
+          cp."supportingPatterns",
+          cp."featureSnapshotPayload"
+         FROM "CanonicalPrediction" cp
+         WHERE cp."predictionId" = '${sqlEsc(predictionId)}'
+         LIMIT 1`,
+      );
+      const row = rows[0];
+      if (!row) {
+        return NextResponse.json(
+          { message: "Prediction not found." },
+          { status: 404 },
+        );
+      }
+      return NextResponse.json({
+        prediction: {
+          predictionId: row.predictionId,
+          runId: null,
+          runStartedAt: null,
+          runContext: null,
+          gameId: row.gameId,
+          market: row.market,
+          selection: row.selection,
+          confidenceScore: row.confidenceScore,
+          edgeEstimate: row.edgeEstimate,
+          generatedAt: row.generatedAt,
+          predictionContractVersion: row.predictionContractVersion,
+          modelBundleVersion: row.modelBundleVersion,
+          featureSchemaVersion: row.featureSchemaVersion,
+          rankingPolicyVersion: row.rankingPolicyVersion,
+          aggregationPolicyVersion: row.aggregationPolicyVersion,
+          featureSnapshotId: row.featureSnapshotId,
+          modelVotes: row.modelVotes,
+          supportingPatterns: row.supportingPatterns ?? [],
+          featureSnapshotPayload: row.featureSnapshotPayload,
+        },
+        message: "Loaded legacy prediction detail (run columns missing).",
+      });
+    } catch (fallbackError) {
+      return NextResponse.json(
+        {
+          message:
+            fallbackError instanceof Error
+              ? `Prediction detail unavailable: ${fallbackError.message}`
+              : error instanceof Error
+                ? `Prediction detail unavailable: ${error.message}`
+                : "Prediction detail unavailable.",
+        },
+        { status: 503 },
+      );
+    }
   }
 }

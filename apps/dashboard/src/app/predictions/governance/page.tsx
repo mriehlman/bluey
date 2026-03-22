@@ -18,6 +18,7 @@ type PredictionListRow = {
   rankingPolicyVersion: string;
   aggregationPolicyVersion: string;
   featureSnapshotId: string;
+  modelVotes: unknown;
   supportingPatternCount: number;
   supportingPatterns: string[];
   featureSnapshotPayloadSummary: Record<string, unknown>;
@@ -72,6 +73,20 @@ type CompareSummary = {
   rejections: number;
 };
 
+type PredictionDiffRow = {
+  key: string;
+  changeType: "added" | "removed" | "changed";
+  gameId: string;
+  market: string;
+  selection: string;
+  currentPredictionId: string | null;
+  comparePredictionId: string | null;
+  confidenceDelta: number | null;
+  edgeDelta: number | null;
+  supportingPatternsChanged: boolean;
+  voteMixChanged: boolean;
+};
+
 export default function GovernanceLineagePage() {
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [runId, setRunId] = useState("");
@@ -90,7 +105,13 @@ export default function GovernanceLineagePage() {
   const [activeTab, setActiveTab] = useState<"predictions" | "rejections">("predictions");
   const [error, setError] = useState<string | null>(null);
   const [compareSummary, setCompareSummary] = useState<CompareSummary | null>(null);
+  const [comparePredictions, setComparePredictions] = useState<PredictionListRow[]>([]);
   const [loadingCompareSummary, setLoadingCompareSummary] = useState(false);
+
+  function isInformationalMessage(message: string): boolean {
+    const m = message.toLowerCase();
+    return m.includes("not found yet") || m.includes("loaded legacy");
+  }
 
   async function loadRuns() {
     setLoadingRuns(true);
@@ -99,10 +120,28 @@ export default function GovernanceLineagePage() {
       if (date) params.set("date", date);
       const res = await fetch(`/api/predictions/runs?${params.toString()}`, { cache: "no-store" });
       const data = await res.json();
-      setRuns((data.runs ?? []) as PredictionRun[]);
-      if (!runId && data.runs?.length > 0) setRunId(data.runs[0].runId);
+      const nextRuns = (data.runs ?? []) as PredictionRun[];
+      setRuns(nextRuns);
+      const runIds = new Set(nextRuns.map((run) => run.runId));
+      if (nextRuns.length > 0 && !runId) {
+        setRunId(nextRuns[0].runId);
+      } else if (runId && !runIds.has(runId)) {
+        setRunId("");
+      }
+      if (compareRunId && !runIds.has(compareRunId)) {
+        setCompareRunId("");
+      }
+      if (
+        typeof data.message === "string" &&
+        nextRuns.length === 0 &&
+        !isInformationalMessage(data.message)
+      ) {
+        setError(data.message);
+      }
     } catch {
       setRuns([]);
+      setRunId("");
+      setCompareRunId("");
     } finally {
       setLoadingRuns(false);
     }
@@ -122,7 +161,15 @@ export default function GovernanceLineagePage() {
         cache: "no-store",
       });
       const data = await res.json();
-      setPredictions((data.predictions ?? []) as PredictionListRow[]);
+      const nextPredictions = (data.predictions ?? []) as PredictionListRow[];
+      setPredictions(nextPredictions);
+      if (
+        typeof data.message === "string" &&
+        nextPredictions.length === 0 &&
+        !isInformationalMessage(data.message)
+      ) {
+        setError(data.message);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load predictions.");
       setPredictions([]);
@@ -143,7 +190,15 @@ export default function GovernanceLineagePage() {
         cache: "no-store",
       });
       const data = await res.json();
-      setRejections((data.rejections ?? []) as RejectionRow[]);
+      const nextRejections = (data.rejections ?? []) as RejectionRow[];
+      setRejections(nextRejections);
+      if (
+        typeof data.message === "string" &&
+        nextRejections.length === 0 &&
+        !isInformationalMessage(data.message)
+      ) {
+        setError(data.message);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load rejections.");
       setRejections([]);
@@ -154,8 +209,6 @@ export default function GovernanceLineagePage() {
 
   useEffect(() => {
     void loadRuns();
-    void loadPredictions();
-    void loadRejections();
   }, []);
 
   useEffect(() => {
@@ -163,8 +216,14 @@ export default function GovernanceLineagePage() {
   }, [date]);
 
   useEffect(() => {
+    void loadPredictions();
+    void loadRejections();
+  }, [date, runId, gameId, market]);
+
+  useEffect(() => {
     if (!compareRunId.trim()) {
       setCompareSummary(null);
+      setComparePredictions([]);
       return;
     }
     let cancelled = false;
@@ -195,6 +254,7 @@ export default function GovernanceLineagePage() {
           ? comparePredictions.reduce((sum, row) => sum + row.confidenceScore, 0) / comparePredictions.length
           : null;
         if (!cancelled) {
+          setComparePredictions(comparePredictions);
           setCompareSummary({
             predictions: comparePredictions.length,
             avgConfidence,
@@ -202,7 +262,10 @@ export default function GovernanceLineagePage() {
           });
         }
       } catch {
-        if (!cancelled) setCompareSummary(null);
+        if (!cancelled) {
+          setCompareSummary(null);
+          setComparePredictions([]);
+        }
       } finally {
         if (!cancelled) setLoadingCompareSummary(false);
       }
@@ -321,6 +384,90 @@ export default function GovernanceLineagePage() {
     return fields.filter((row) => JSON.stringify(row.current) !== JSON.stringify(row.previous));
   }, [selectedPrediction, comparePrediction]);
 
+  const predictionDiffRows = useMemo(() => {
+    if (!compareRunId || comparePredictions.length === 0) return [];
+    const keyOf = (p: PredictionListRow) => `${p.gameId}||${p.market}||${p.selection}`;
+    const normalizePatterns = (patterns: string[]) => [...patterns].sort();
+    const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+    const currentByKey = new Map(predictions.map((p) => [keyOf(p), p]));
+    const compareByKey = new Map(comparePredictions.map((p) => [keyOf(p), p]));
+    const allKeys = new Set([...currentByKey.keys(), ...compareByKey.keys()]);
+    const rows: PredictionDiffRow[] = [];
+
+    for (const key of allKeys) {
+      const current = currentByKey.get(key);
+      const compare = compareByKey.get(key);
+      const gameId = current?.gameId ?? compare?.gameId ?? "";
+      const marketValue = current?.market ?? compare?.market ?? "";
+      const selection = current?.selection ?? compare?.selection ?? "";
+      if (current && !compare) {
+        rows.push({
+          key,
+          changeType: "added",
+          gameId,
+          market: marketValue,
+          selection,
+          currentPredictionId: current.predictionId,
+          comparePredictionId: null,
+          confidenceDelta: null,
+          edgeDelta: null,
+          supportingPatternsChanged: false,
+          voteMixChanged: false,
+        });
+        continue;
+      }
+      if (!current && compare) {
+        rows.push({
+          key,
+          changeType: "removed",
+          gameId,
+          market: marketValue,
+          selection,
+          currentPredictionId: null,
+          comparePredictionId: compare.predictionId,
+          confidenceDelta: null,
+          edgeDelta: null,
+          supportingPatternsChanged: false,
+          voteMixChanged: false,
+        });
+        continue;
+      }
+      if (!current || !compare) continue;
+      const confidenceDelta = current.confidenceScore - compare.confidenceScore;
+      const edgeDelta = current.edgeEstimate - compare.edgeEstimate;
+      const supportingPatternsChanged = !sameJson(
+        normalizePatterns(current.supportingPatterns ?? []),
+        normalizePatterns(compare.supportingPatterns ?? []),
+      );
+      const voteMixChanged = !sameJson(current.modelVotes ?? null, compare.modelVotes ?? null);
+      const changed =
+        Math.abs(confidenceDelta) > 1e-9 ||
+        Math.abs(edgeDelta) > 1e-9 ||
+        supportingPatternsChanged ||
+        voteMixChanged ||
+        current.predictionId !== compare.predictionId;
+      if (!changed) continue;
+      rows.push({
+        key,
+        changeType: "changed",
+        gameId,
+        market: marketValue,
+        selection,
+        currentPredictionId: current.predictionId,
+        comparePredictionId: compare.predictionId,
+        confidenceDelta,
+        edgeDelta,
+        supportingPatternsChanged,
+        voteMixChanged,
+      });
+    }
+    return rows.sort((a, b) => {
+      const rank = (t: PredictionDiffRow["changeType"]) =>
+        t === "added" ? 0 : t === "removed" ? 1 : 2;
+      return rank(a.changeType) - rank(b.changeType);
+    });
+  }, [compareRunId, comparePredictions, predictions]);
+
   const compareDeltas = useMemo(() => {
     if (!compareSummary) return null;
     const predDelta = predictions.length - compareSummary.predictions;
@@ -344,6 +491,13 @@ export default function GovernanceLineagePage() {
     if (value > 0) return "delta-chip delta-positive";
     if (value < 0) return "delta-chip delta-negative";
     return "delta-chip delta-neutral";
+  }
+
+  function fmtSignedPercent(value: number | null, digits = 2): string {
+    if (value == null) return "n/a";
+    const pct = value * 100;
+    const sign = pct > 0 ? "+" : "";
+    return `${sign}${pct.toFixed(digits)}%`;
   }
 
   function exportJson(filename: string, payload: unknown) {
@@ -507,6 +661,54 @@ export default function GovernanceLineagePage() {
           </>
         ) : null}
       </div>
+
+      {compareRun ? (
+        <div className="card" style={{ marginBottom: 12 }}>
+          <h2 style={{ marginTop: 0 }}>Prediction Diff (filtered)</h2>
+          {loadingCompareSummary ? <p className="muted">Loading compare run diff...</p> : null}
+          <table>
+            <thead>
+              <tr>
+                <th>Change</th>
+                <th>Game</th>
+                <th>Market / Selection</th>
+                <th>Prediction IDs</th>
+                <th>Conf Δ</th>
+                <th>Edge Δ</th>
+                <th>Patterns</th>
+                <th>Votes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {predictionDiffRows.map((row) => (
+                <tr key={row.key}>
+                  <td className="mono">{row.changeType}</td>
+                  <td className="mono">{row.gameId}</td>
+                  <td>{row.market} / {row.selection}</td>
+                  <td className="mono">
+                    cur: {row.currentPredictionId?.slice(0, 8) ?? "-"}
+                    <br />
+                    cmp: {row.comparePredictionId?.slice(0, 8) ?? "-"}
+                  </td>
+                  <td className="mono">{fmtSignedPercent(row.confidenceDelta, 2)}</td>
+                  <td className="mono">{fmtSignedPercent(row.edgeDelta, 2)}</td>
+                  <td className="mono">
+                    {row.changeType === "changed" ? (row.supportingPatternsChanged ? "changed" : "same") : "-"}
+                  </td>
+                  <td className="mono">
+                    {row.changeType === "changed" ? (row.voteMixChanged ? "changed" : "same") : "-"}
+                  </td>
+                </tr>
+              ))}
+              {predictionDiffRows.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="muted">No added/removed/changed prediction rows for current compare filters.</td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
         <button type="button" onClick={() => setActiveTab("predictions")}>

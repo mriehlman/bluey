@@ -38,6 +38,7 @@ import { runBacktest, backtestExisting, analyzePattern, quickValidate } from "@b
 import { analyzeSuggestedPlayLedger } from "@bluey/core/backtest/suggestedPlayLedger";
 import { updateSuggestedPlayClv } from "@bluey/core/backtest/updateClvSnapshots";
 import { backfillSuggestedLedger } from "@bluey/core/backtest/backfillSuggestedLedger";
+import { runPlayerPointsModel } from "@bluey/core/ml/playerPointsModel";
 import {
   snapshotModelVersion,
   listModelVersions,
@@ -777,6 +778,10 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
   "report:accuracy": async (args) => {
     await reportPredictionAccuracy(args);
+  },
+
+  "ml:player-points": async (args) => {
+    await runPlayerPointsModel(args);
   },
 
 };

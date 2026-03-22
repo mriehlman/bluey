@@ -14,6 +14,13 @@ function sqlEsc(input: string): string {
   return input.replaceAll("'", "''");
 }
 
+async function canonicalPredictionTableExists(): Promise<boolean> {
+  const rows = await prisma.$queryRawUnsafe<Array<{ exists: boolean }>>(
+    `SELECT to_regclass('public."CanonicalPrediction"') IS NOT NULL as "exists"`,
+  );
+  return Boolean(rows[0]?.exists);
+}
+
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
@@ -23,6 +30,15 @@ export async function GET(req: Request) {
   const limit = Number.isFinite(requestedLimit) && requestedLimit > 0
     ? Math.min(500, requestedLimit)
     : 100;
+  const exists = await canonicalPredictionTableExists();
+  if (!exists) {
+    return NextResponse.json({
+      date: dateStr,
+      count: 0,
+      runs: [],
+      message: "CanonicalPrediction table not found yet.",
+    });
+  }
   const where = dateStr
     ? `WHERE cp."generatedAt"::date = '${sqlEsc(dateStr)}'::date AND cp."runId" IS NOT NULL`
     : `WHERE cp."runId" IS NOT NULL`;
