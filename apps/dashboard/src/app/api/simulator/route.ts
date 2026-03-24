@@ -11,6 +11,7 @@ interface LedgerRow {
   metaScore: number | null;
   settledHit: boolean;
   mlInvolved: boolean;
+  laneTag: string | null;
   homeCode: string | null;
   awayCode: string | null;
 }
@@ -24,6 +25,28 @@ export async function GET(req: Request) {
   const modelVersion = url.searchParams.get("modelVersion") ?? "all";
   const oddsMode = (url.searchParams.get("oddsMode") ?? "all").toLowerCase();
   const gateMode = (url.searchParams.get("gateMode") ?? "all").toLowerCase();
+  const lane = (url.searchParams.get("lane") ?? "all").toLowerCase();
+  if (
+    ![
+      "all",
+      "moneyline",
+      "spread",
+      "total",
+      "player_points",
+      "player_rebounds",
+      "player_assists",
+      "other_prop",
+      "other",
+    ].includes(lane)
+  ) {
+    return NextResponse.json(
+      {
+        error:
+          "lane must be all, moneyline, spread, total, player_points, player_rebounds, player_assists, other_prop, or other",
+      },
+      { status: 400 },
+    );
+  }
   const oddsModeFilter =
     oddsMode === "require"
       ? `AND COALESCE(cp."runContext"->>'oddsMode','full') = 'require'`
@@ -44,6 +67,10 @@ export async function GET(req: Request) {
       : gateMode === "legacy"
         ? `AND COALESCE((cp."runContext"->>'strictGates')::boolean, FALSE) = FALSE`
         : "";
+  const laneFilter =
+    lane === "all"
+      ? ""
+      : `AND COALESCE(NULLIF(s."laneTag", ''), 'other') = '${sqlEsc(lane)}'`;
 
   await prisma.$executeRawUnsafe(
     `ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "mlInvolved" boolean NOT NULL DEFAULT FALSE`,
@@ -84,6 +111,7 @@ export async function GET(req: Request) {
       s."metaScore",
       s."settledHit",
       COALESCE(s."mlInvolved", FALSE) as "mlInvolved",
+      s."laneTag" as "laneTag",
       ht."code" as "homeCode",
       at2."code" as "awayCode"
     FROM canonical_latest cl
@@ -97,6 +125,7 @@ export async function GET(req: Request) {
         AND s."gameId" = cl."gameId"
         AND s."outcomeType" = cl."outcomeType"
         AND s."settledHit" IS NOT NULL
+        ${laneFilter}
       ORDER BY s."confidence" DESC NULLS LAST, s."updatedAt" DESC
       LIMIT 1
     ) s ON TRUE
@@ -123,10 +152,11 @@ export async function GET(req: Request) {
       odds: p.priceAmerican ?? -110,
       hit: p.settledHit,
       mlInvolved: Boolean(p.mlInvolved),
+      laneTag: p.laneTag ?? null,
       meta: p.metaScore,
       posterior: p.posteriorHitRate,
     })),
   }));
 
-  return NextResponse.json({ days, seasons, modelVersion, oddsMode, gateMode });
+  return NextResponse.json({ days, seasons, modelVersion, oddsMode, gateMode, lane });
 }

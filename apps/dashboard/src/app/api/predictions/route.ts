@@ -27,6 +27,7 @@ import {
   computeLineupSignalsFromCounts,
 } from "@bluey/core/features/injuryContext";
 import { syncNbaStatsForDate, syncUpcomingFromNba } from "@bluey/core/ingest/syncNbaStats";
+import { syncOddsForDate } from "@bluey/core/ingest/syncOdds";
 import { syncInjuries } from "@bluey/core/ingest/syncInjuries";
 import { syncLineups } from "@bluey/core/ingest/syncLineups";
 import * as path from "path";
@@ -587,6 +588,11 @@ async function autoSyncForDate(dateStr: string): Promise<boolean> {
     await syncUpcomingFromNba(dateStr);
   } catch (e) {
     console.warn("[predictions] Games sync warning:", String(e).slice(0, 200));
+  }
+  try {
+    await syncOddsForDate(dateStr);
+  } catch (e) {
+    console.warn("[predictions] Odds sync warning:", String(e).slice(0, 200));
   }
   try {
     await syncInjuries(["--date", dateStr]);

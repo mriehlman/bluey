@@ -13,6 +13,7 @@ export async function GET(req: Request) {
   const month = url.searchParams.get("month"); // YYYY-MM
   const filter = url.searchParams.get("filter") ?? "all"; // game | player | all
   const mlFilter = url.searchParams.get("mlFilter") ?? "all"; // all | ml_only | no_ml
+  const lane = (url.searchParams.get("lane") ?? "all").toLowerCase(); // all | moneyline | spread | total | ...
   const modelVersion = url.searchParams.get("modelVersion") ?? "all"; // all | live | <snapshot name>
   const gateMode = (url.searchParams.get("gateMode") ?? "legacy").toLowerCase(); // legacy | strict
   if (!month || !/^\d{4}-\d{2}$/.test(month)) {
@@ -30,6 +31,24 @@ export async function GET(req: Request) {
   if (!["all", "ml_only", "no_ml"].includes(mlFilter)) {
     return NextResponse.json(
       { error: "mlFilter must be all, ml_only, or no_ml" },
+      { status: 400 },
+    );
+  }
+  if (
+    ![
+      "all",
+      "moneyline",
+      "spread",
+      "total",
+      "player_points",
+      "player_rebounds",
+      "player_assists",
+      "other_prop",
+      "other",
+    ].includes(lane)
+  ) {
+    return NextResponse.json(
+      { error: "lane must be all, moneyline, spread, total, player_points, player_rebounds, player_assists, other_prop, or other" },
       { status: 400 },
     );
   }
@@ -65,6 +84,10 @@ export async function GET(req: Request) {
       : mlFilter === "ml_only"
         ? `AND COALESCE(s."mlInvolved", FALSE) = TRUE`
         : `AND COALESCE(s."mlInvolved", FALSE) = FALSE`;
+  const laneFilterSql =
+    lane === "all"
+      ? ""
+      : `AND COALESCE(NULLIF(s."laneTag", ''), 'other') = '${sqlEsc(lane)}'`;
   const gateModeFilter =
     gateMode === "strict"
       ? `AND COALESCE((cp."runContext"->>'strictGates')::boolean, FALSE) = TRUE`
@@ -107,13 +130,14 @@ export async function GET(req: Request) {
        WHERE 1=1
          ${typeFilter.replaceAll('l."', 's."')}
         ${mlFilterSql}
+        ${laneFilterSql}
        GROUP BY s."date"
       HAVING BOOL_AND(s."settledHit" = TRUE)
          AND COUNT(*) > 0`,
     );
 
     const dates = rows.map((r) => r.date).filter(Boolean);
-    return NextResponse.json({ dates, modelVersion, gateMode });
+    return NextResponse.json({ dates, modelVersion, gateMode, lane });
   } catch (err) {
     const e = err as { code?: string };
     if (e?.code === "P2021" || (e?.code === "P2010")) {

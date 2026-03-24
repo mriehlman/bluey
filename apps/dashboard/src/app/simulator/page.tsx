@@ -9,6 +9,7 @@ interface Pick {
   odds: number;
   hit: boolean;
   mlInvolved?: boolean;
+  laneTag?: string | null;
   meta: number | null;
   posterior: number;
 }
@@ -32,6 +33,26 @@ function filterPicksByMl<T extends { mlInvolved?: boolean }>(
 ): T[] {
   if (mlFilter === "all") return picks;
   return picks.filter((p) => (mlFilter === "ml_only" ? !!p.mlInvolved : !p.mlInvolved));
+}
+
+function inferLaneTag(outcomeType: string): string {
+  const base = (outcomeType ?? "").replace(/:.*$/, "");
+  if (base.includes("WIN")) return "moneyline";
+  if (base.includes("COVERED")) return "spread";
+  if (base.includes("OVER") || base.includes("UNDER") || base.includes("TOTAL_")) return "total";
+  if (base === "PLAYER_10_PLUS_REBOUNDS" || base.includes("REBOUNDER")) return "player_rebounds";
+  if (base === "PLAYER_10_PLUS_ASSISTS" || base.includes("ASSIST") || base.includes("PLAYMAKER")) return "player_assists";
+  if (base === "PLAYER_30_PLUS" || base === "PLAYER_40_PLUS" || base.includes("SCORER")) return "player_points";
+  if (base.startsWith("PLAYER_") || base.startsWith("HOME_TOP_") || base.startsWith("AWAY_TOP_")) return "other_prop";
+  return "other";
+}
+
+function filterPicksByLane<T extends { outcomeType?: string; laneTag?: string | null }>(
+  picks: T[],
+  lane: "all" | "moneyline" | "spread" | "total" | "player_points" | "player_rebounds" | "player_assists" | "other_prop" | "other",
+): T[] {
+  if (lane === "all") return picks;
+  return picks.filter((p) => (p.laneTag ?? inferLaneTag(p.outcomeType ?? "")) === lane);
 }
 
 interface Day {
@@ -80,6 +101,7 @@ export default function SimulatorPage() {
   const [mlFilter, setMlFilter] = useState<"all" | "ml_only" | "no_ml">("all");
   const [oddsMode, setOddsMode] = useState<"all" | "full" | "require" | "ignore">("all");
   const [gateMode, setGateMode] = useState<"all" | "legacy" | "strict">("all");
+  const [laneFilter, setLaneFilter] = useState<"all" | "moneyline" | "spread" | "total" | "player_points" | "player_rebounds" | "player_assists" | "other_prop" | "other">("all");
   const [minParlayLegs, setMinParlayLegs] = useState("1");
   const [runningSeason, setRunningSeason] = useState(false);
   const [runSeasonMsg, setRunSeasonMsg] = useState<string>("");
@@ -121,6 +143,7 @@ export default function SimulatorPage() {
     if (selectedModelVersion !== "all") qp.set("modelVersion", selectedModelVersion);
     if (oddsMode !== "all") qp.set("oddsMode", oddsMode);
     if (gateMode !== "all") qp.set("gateMode", gateMode);
+    if (laneFilter !== "all") qp.set("lane", laneFilter);
     const qs = qp.toString() ? `?${qp.toString()}` : "";
     fetch(`/api/simulator${qs}`)
       .then((r) => r.json())
@@ -136,7 +159,7 @@ export default function SimulatorPage() {
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, [selectedModelVersion, oddsMode, gateMode]);
+  }, [selectedModelVersion, oddsMode, gateMode, laneFilter]);
 
   const runSeasonWithFilters = async () => {
     if (!selectedSeason || selectedSeason === "all") {
@@ -174,6 +197,7 @@ export default function SimulatorPage() {
       if (selectedModelVersion !== "all") qp.set("modelVersion", selectedModelVersion);
       if (oddsMode !== "all") qp.set("oddsMode", oddsMode);
       if (gateMode !== "all") qp.set("gateMode", gateMode);
+      if (laneFilter !== "all") qp.set("lane", laneFilter);
       const qs = qp.toString() ? `?${qp.toString()}` : "";
       const refreshed = await fetch(`/api/simulator${qs}`).then((r) => r.json());
       setData(refreshed);
@@ -207,7 +231,7 @@ export default function SimulatorPage() {
 
   const filteredDays = seasonFilteredDays.map((d) => ({
     ...d,
-    picks: filterPicksByMl(filterPicksByType(d.picks, pickType), mlFilter),
+    picks: filterPicksByLane(filterPicksByMl(filterPicksByType(d.picks, pickType), mlFilter), laneFilter),
   }));
 
   const allPicks = filteredDays.flatMap((d) => d.picks);
@@ -382,6 +406,24 @@ export default function SimulatorPage() {
               <option value="strict">strict</option>
             </select>
           </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+            <label className="muted" style={{ fontSize: "0.85rem" }}>Lane</label>
+            <select
+              value={laneFilter}
+              onChange={(e) => setLaneFilter(e.target.value as typeof laneFilter)}
+              style={{ padding: "0.35rem 0.45rem", fontSize: "0.85rem" }}
+            >
+              <option value="all">all lanes</option>
+              <option value="moneyline">moneyline</option>
+              <option value="spread">spread</option>
+              <option value="total">total</option>
+              <option value="player_points">player_points</option>
+              <option value="player_rebounds">player_rebounds</option>
+              <option value="player_assists">player_assists</option>
+              <option value="other_prop">other_prop</option>
+              <option value="other">other</option>
+            </select>
+          </div>
           <button
             type="button"
             onClick={runSeasonWithFilters}
@@ -418,6 +460,7 @@ export default function SimulatorPage() {
         {selectedModelVersion !== "all" && <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>• model {selectedModelVersion}</span>}
         {oddsMode !== "all" && <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>• oddsMode {oddsMode}</span>}
         {gateMode !== "all" && <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>• gates {gateMode}</span>}
+        {laneFilter !== "all" && <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>• lane {laneFilter}</span>}
         <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>• canonical latest run</span>
       </div>
       {runSeasonMsg && (

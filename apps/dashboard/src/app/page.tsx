@@ -53,6 +53,7 @@ interface SuggestedPick {
     label: string;
   } | null;
   mlInvolved?: boolean;
+  laneTag?: string;
   playerTarget?: PlayerTarget | null;
   result?: PredictionResult | null;
 }
@@ -77,6 +78,7 @@ interface ModelPick {
     label: string;
   } | null;
   result?: PredictionResult | null;
+  laneTag?: string;
 }
 
 interface GamePrediction {
@@ -205,6 +207,27 @@ function filterPicksByMl<T extends { mlInvolved?: boolean }>(
   return picks.filter((p) => (filter === "ml_only" ? !!p.mlInvolved : !p.mlInvolved));
 }
 
+function inferLaneTag(outcomeType: string): string {
+  const base = (outcomeType ?? "").replace(/:.*$/, "");
+  if (base.includes("WIN")) return "moneyline";
+  if (base.includes("COVERED")) return "spread";
+  if (base.includes("OVER") || base.includes("UNDER") || base.includes("TOTAL_")) return "total";
+  if (base === "PLAYER_10_PLUS_REBOUNDS" || base.includes("REBOUNDER")) return "player_rebounds";
+  if (base === "PLAYER_10_PLUS_ASSISTS" || base.includes("ASSIST") || base.includes("PLAYMAKER")) return "player_assists";
+  if (base === "PLAYER_30_PLUS" || base === "PLAYER_40_PLUS" || base.includes("SCORER")) return "player_points";
+  if (base.startsWith("PLAYER_") || base.startsWith("HOME_TOP_") || base.startsWith("AWAY_TOP_")) return "other_prop";
+  return "other";
+}
+
+function filterByLane<T extends { outcomeType: string; laneTag?: string }>(
+  picks: T[] | undefined,
+  lane: "all" | "moneyline" | "spread" | "total" | "player_points" | "player_rebounds" | "player_assists" | "other_prop" | "other",
+): T[] {
+  if (!picks) return [];
+  if (lane === "all") return picks;
+  return picks.filter((p) => (p.laneTag ?? inferLaneTag(p.outcomeType)) === lane);
+}
+
 export function PredictionsPage() {
   const [date, setDate] = useState(() => getLocalDateString());
   const [data, setData] = useState<PredictionData | null>(null);
@@ -218,6 +241,7 @@ export function PredictionsPage() {
   const [pickType, setPickType] = useState<"game" | "player" | "all">("game");
   const [mlFilter, setMlFilter] = useState<"all" | "ml_only" | "no_ml">("all");
   const [gateMode, setGateMode] = useState<"legacy" | "strict">("legacy");
+  const [laneFilter, setLaneFilter] = useState<"all" | "moneyline" | "spread" | "total" | "player_points" | "player_rebounds" | "player_assists" | "other_prop" | "other">("all");
   const [calendarMonth, setCalendarMonth] = useState(() => {
     const d = new Date();
     return { year: d.getFullYear(), month: d.getMonth() };
@@ -315,14 +339,14 @@ export function PredictionsPage() {
     const monthStr = `${calendarMonth.year}-${String(calendarMonth.month + 1).padStart(2, "0")}`;
     const modelVersion = data?.modelVersion ?? "live";
     fetch(
-      `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&modelVersion=${encodeURIComponent(modelVersion)}&gateMode=${gateMode}`,
+      `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&lane=${laneFilter}&modelVersion=${encodeURIComponent(modelVersion)}&gateMode=${gateMode}`,
     )
       .then((r) => r.json())
       .then((json: { dates?: string[] }) => {
         setPerfectDates(new Set(json.dates ?? []));
       })
       .catch(() => setPerfectDates(new Set()));
-  }, [calendarMonth.year, calendarMonth.month, pickType, mlFilter, gateMode, data?.modelVersion]);
+  }, [calendarMonth.year, calendarMonth.month, pickType, mlFilter, laneFilter, gateMode, data?.modelVersion]);
 
   const runSync = useCallback(async () => {
     setSyncing(true);
@@ -342,7 +366,7 @@ export function PredictionsPage() {
         const monthStr = `${calendarMonth.year}-${String(calendarMonth.month + 1).padStart(2, "0")}`;
         const modelVersion = data?.modelVersion ?? "live";
         fetch(
-          `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&modelVersion=${encodeURIComponent(modelVersion)}&gateMode=${gateMode}`,
+          `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&lane=${laneFilter}&modelVersion=${encodeURIComponent(modelVersion)}&gateMode=${gateMode}`,
         )
           .then((r) => r.json())
           .then((j: { dates?: string[] }) => setPerfectDates(new Set(j.dates ?? [])))
@@ -353,7 +377,7 @@ export function PredictionsPage() {
     } finally {
       setSyncing(false);
     }
-  }, [date, fetchPredictions, calendarMonth.year, calendarMonth.month, pickType, mlFilter, gateMode, data?.modelVersion]);
+  }, [date, fetchPredictions, calendarMonth.year, calendarMonth.month, pickType, mlFilter, laneFilter, gateMode, data?.modelVersion]);
 
   const switchModelVersion = useCallback(async (next: string) => {
     setSwitchingModelVersion(true);
@@ -556,9 +580,9 @@ export function PredictionsPage() {
 
   const filteredGames = data?.games.map((g) => ({
     ...g,
-    suggestedBetPicks: filterPicksByMl(filterPicks(g.suggestedBetPicks, pickType), mlFilter),
-    suggestedPlays: filterPicks(g.suggestedPlays, pickType),
-    discoveryV2Matches: filterPicks(g.discoveryV2Matches, pickType),
+    suggestedBetPicks: filterByLane(filterPicksByMl(filterPicks(g.suggestedBetPicks, pickType), mlFilter), laneFilter),
+    suggestedPlays: filterByLane(filterPicks(g.suggestedPlays, pickType), laneFilter),
+    discoveryV2Matches: filterByLane(filterPicks(g.discoveryV2Matches, pickType), laneFilter),
   })) ?? [];
   const totalPicks = filteredGames.reduce((sum, g) => sum + (g.suggestedBetPicks?.length ?? 0), 0);
 
@@ -594,6 +618,11 @@ export function PredictionsPage() {
             {gateMode === "strict" && (
               <span className="muted" style={{ fontSize: "0.9rem", fontWeight: 400 }}>
                 {" "}(strict gates)
+              </span>
+            )}
+            {laneFilter !== "all" && (
+              <span className="muted" style={{ fontSize: "0.9rem", fontWeight: 400 }}>
+                {" "}(lane: {laneFilter})
               </span>
             )}
             {dayHitSummary.total > 0 && (
@@ -1172,6 +1201,24 @@ export function PredictionsPage() {
               {t === "legacy" ? "Legacy" : "Strict"}
             </button>
           ))}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.5rem" }}>
+          <span className="muted" style={{ fontSize: "0.8rem" }}>Lane:</span>
+          <select
+            value={laneFilter}
+            onChange={(e) => setLaneFilter(e.target.value as typeof laneFilter)}
+            style={{ width: "100%", padding: "0.3rem 0.4rem", fontSize: "0.72rem" }}
+          >
+            <option value="all">All lanes</option>
+            <option value="moneyline">moneyline</option>
+            <option value="spread">spread</option>
+            <option value="total">total</option>
+            <option value="player_points">player_points</option>
+            <option value="player_rebounds">player_rebounds</option>
+            <option value="player_assists">player_assists</option>
+            <option value="other_prop">other_prop</option>
+            <option value="other">other</option>
+          </select>
         </div>
         {mlFilter !== "all" && pickType === "game" && (
           <div className="muted" style={{ fontSize: "0.72rem", marginBottom: "0.5rem" }}>

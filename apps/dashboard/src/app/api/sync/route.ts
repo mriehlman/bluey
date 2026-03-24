@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { syncNbaStatsForDate, syncUpcomingFromNba } from "@bluey/core/ingest/syncNbaStats";
+import { syncOddsForDate } from "@bluey/core/ingest/syncOdds";
 import { syncInjuries } from "@bluey/core/ingest/syncInjuries";
 import { syncLineups } from "@bluey/core/ingest/syncLineups";
 
@@ -21,9 +22,16 @@ export async function POST(req: Request) {
 
   try {
     await syncUpcomingFromNba(dateStr);
-    steps.push({ step: "games+odds", ok: true });
+    steps.push({ step: "games", ok: true });
   } catch (e) {
-    steps.push({ step: "games+odds", ok: false, message: String(e).slice(0, 200) });
+    steps.push({ step: "games", ok: false, message: String(e).slice(0, 200) });
+  }
+
+  try {
+    await syncOddsForDate(dateStr);
+    steps.push({ step: "odds", ok: true });
+  } catch (e) {
+    steps.push({ step: "odds", ok: false, message: String(e).slice(0, 200) });
   }
 
   try {
