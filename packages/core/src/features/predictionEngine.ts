@@ -183,6 +183,8 @@ export type PredictionInput = {
   propsForGame: PlayerPropRow[];
   maxBetPicksPerGame: number;
   fallbackAmericanOdds?: number;
+  /** If false, disable fallback -110 style market pricing when source prices are missing. */
+  allowFallbackMarketOdds?: boolean;
   includeDebugPlays?: boolean;
   /** Override excludeFamilies (e.g. [] for backfill to capture all pick types). */
   overrideExcludeFamilies?: readonly string[];
@@ -511,7 +513,9 @@ function selectBestMarketBackedPick(args: {
   supportN?: number;
   gameOdds?: OddsLite | null;
   defaultMarketPrice?: number;
+  allowFallbackMarketOdds?: boolean;
 }): SuggestedMarketPick | null {
+  const allowFallbackMarketOdds = args.allowFallbackMarketOdds !== false;
   const { outcomeType, target, propsForGame, baseProb } = args;
   const confidence = Math.max(0, Math.min(1, args.confidence ?? 0));
   const support = Math.max(1, args.supportN ?? 1);
@@ -520,6 +524,7 @@ function selectBestMarketBackedPick(args: {
   if (baseOutcome === "HOME_WIN" || baseOutcome === "AWAY_WIN") {
     const consensusPrice = baseOutcome === "HOME_WIN" ? args.gameOdds?.mlHome : args.gameOdds?.mlAway;
     const fallbackPrice =
+      allowFallbackMarketOdds &&
       Number.isFinite(args.defaultMarketPrice ?? NaN) && (args.defaultMarketPrice ?? 0) !== 0
         ? Number(args.defaultMarketPrice)
         : null;
@@ -560,9 +565,12 @@ function selectBestMarketBackedPick(args: {
   ) {
     const spread = args.gameOdds?.spreadHome;
     if (spread == null || !Number.isFinite(spread)) return null;
-    const price = Number.isFinite(args.defaultMarketPrice ?? NaN) && (args.defaultMarketPrice ?? 0) !== 0
-      ? Number(args.defaultMarketPrice)
-      : -110;
+    const explicitFallbackPrice =
+      Number.isFinite(args.defaultMarketPrice ?? NaN) && (args.defaultMarketPrice ?? 0) !== 0
+        ? Number(args.defaultMarketPrice)
+        : null;
+    const price = explicitFallbackPrice ?? (allowFallbackMarketOdds ? -110 : null);
+    if (price == null || !Number.isFinite(price) || price === 0) return null;
     if (price < PREDICTION_TUNING.maxNegativeAmericanOdds) return null;
     const implied = impliedProbFromAmerican(price);
     if (implied == null) return null;
@@ -608,9 +616,12 @@ function selectBestMarketBackedPick(args: {
   ) {
     const total = args.gameOdds?.totalOver;
     if (total == null || !Number.isFinite(total)) return null;
-    const price = Number.isFinite(args.defaultMarketPrice ?? NaN) && (args.defaultMarketPrice ?? 0) !== 0
-      ? Number(args.defaultMarketPrice)
-      : -110;
+    const explicitFallbackPrice =
+      Number.isFinite(args.defaultMarketPrice ?? NaN) && (args.defaultMarketPrice ?? 0) !== 0
+        ? Number(args.defaultMarketPrice)
+        : null;
+    const price = explicitFallbackPrice ?? (allowFallbackMarketOdds ? -110 : null);
+    if (price == null || !Number.isFinite(price) || price === 0) return null;
     if (price < PREDICTION_TUNING.maxNegativeAmericanOdds) return null;
     const implied = impliedProbFromAmerican(price);
     if (implied == null) return null;
@@ -1090,6 +1101,7 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
     propsForGame,
     maxBetPicksPerGame,
     fallbackAmericanOdds,
+    allowFallbackMarketOdds = true,
     includeDebugPlays,
     overrideExcludeFamilies,
     predictionGeneratedAtIso,
@@ -1243,6 +1255,7 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
         supportN: r.bestN,
         gameOdds: odds,
         defaultMarketPrice: fallbackAmericanOdds,
+        allowFallbackMarketOdds,
       });
       const laneTag = deriveLaneTag(r.outcomeType, marketPick?.market ?? null);
       const marketFamily = deriveMarketFamily(marketPick?.marketType ?? "other", r.outcomeType);
@@ -1381,13 +1394,14 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
       ? rankedSuggestedPlays.filter((p) => !excludedFamilies.has(betFamilyForOutcome(p.outcomeType)))
       : rankedSuggestedPlays;
 
-  const qualitySuggestedPlays = familyFilteredPlays.filter((p) => {
+  // Build the baseline (legacy) pick universe first. Strict mode should be subtractive-only.
+  const legacyQualitySuggestedPlays = familyFilteredPlays.filter((p) => {
     const family = betFamilyForOutcome(p.outcomeType);
     const strictCfg = PICK_QUALITY_TUNING.strictGateByFamily[family];
     const evalResult = evaluateSuggestedPlayQualityGate({
       ...p,
       requireMarketLine: false,
-      strictGateEnabled: strictActionabilityGatesEnabled,
+      strictGateEnabled: false,
       calibratedWinProbability: p.calibratedWinProbability,
       impliedMarketProbability: p.impliedMarketProbability,
       edgeVsMarket: p.adjustedEdgeScore ?? p.edgeVsMarket,
@@ -1395,17 +1409,16 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
       strictMinCalibratedEdge: strictCfg.minCalibratedEdge,
       strictMaxUncertaintyScore: strictCfg.maxUncertaintyScore,
     });
-    if (gateDiagnostics) recordGateEval(gateDiagnostics.quality, evalResult);
     return evalResult.pass;
   });
 
-  const bettableSuggestedPlays = qualitySuggestedPlays.filter((p) => {
+  const legacyBettableSuggestedPlays = legacyQualitySuggestedPlays.filter((p) => {
     const family = betFamilyForOutcome(p.outcomeType);
     const strictCfg = PICK_QUALITY_TUNING.strictGateByFamily[family];
     const evalResult = evaluateSuggestedPlayQualityGate({
       ...p,
       requireMarketLine: true,
-      strictGateEnabled: strictActionabilityGatesEnabled,
+      strictGateEnabled: false,
       calibratedWinProbability: p.calibratedWinProbability,
       impliedMarketProbability: p.impliedMarketProbability,
       edgeVsMarket: p.adjustedEdgeScore ?? p.edgeVsMarket,
@@ -1413,18 +1426,43 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
       strictMinCalibratedEdge: strictCfg.minCalibratedEdge,
       strictMaxUncertaintyScore: strictCfg.maxUncertaintyScore,
     });
-    if (gateDiagnostics) recordGateEval(gateDiagnostics.bettable, evalResult);
     return evalResult.pass;
   });
 
-  const suggestedBetPicks =
-    bettableSuggestedPlays.length > 0
-      ? selectDiversifiedBetPicks(bettableSuggestedPlays, maxBetPicksPerGame)
+  const legacySuggestedBetPicks =
+    legacyBettableSuggestedPlays.length > 0
+      ? selectDiversifiedBetPicks(legacyBettableSuggestedPlays, maxBetPicksPerGame)
       : [];
 
+  const suggestedBetPicks = strictActionabilityGatesEnabled
+    ? legacySuggestedBetPicks.filter((p) => {
+        const family = betFamilyForOutcome(p.outcomeType);
+        const strictCfg = PICK_QUALITY_TUNING.strictGateByFamily[family];
+        const moneylineStrict = strictCfg as {
+          minMoneylineImpliedProbability?: number;
+          minMoneylineLongshotEdgeOverride?: number;
+        };
+        const evalResult = evaluateSuggestedPlayQualityGate({
+          ...p,
+          requireMarketLine: true,
+          strictGateEnabled: true,
+          calibratedWinProbability: p.calibratedWinProbability,
+          impliedMarketProbability: p.impliedMarketProbability,
+          edgeVsMarket: p.adjustedEdgeScore ?? p.edgeVsMarket,
+          uncertaintyScore: p.uncertaintyScore,
+          strictMinCalibratedEdge: strictCfg.minCalibratedEdge,
+          strictMaxUncertaintyScore: strictCfg.maxUncertaintyScore,
+          strictMinMoneylineImpliedProbability: moneylineStrict.minMoneylineImpliedProbability ?? null,
+          strictMinMoneylineLongshotEdgeOverride: moneylineStrict.minMoneylineLongshotEdgeOverride ?? null,
+        });
+        if (gateDiagnostics) recordGateEval(gateDiagnostics.bettable, evalResult);
+        return evalResult.pass;
+      })
+    : legacySuggestedBetPicks;
+
   const suggestedPlays =
-    includeDebugPlays && qualitySuggestedPlays.length > 0
-      ? selectDiversifiedBetPicks(qualitySuggestedPlays, Math.max(3, maxBetPicksPerGame))
+    includeDebugPlays && legacyQualitySuggestedPlays.length > 0
+      ? selectDiversifiedBetPicks(legacyQualitySuggestedPlays, Math.max(3, maxBetPicksPerGame))
       : [];
 
   const canonicalPredictions: PredictionRecord[] = allRankedPlays

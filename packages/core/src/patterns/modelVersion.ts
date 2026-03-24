@@ -270,6 +270,24 @@ export async function loadActiveModelVersion(): Promise<ModelVersionSnapshot | n
   };
 }
 
+export async function loadModelVersionByName(name: string): Promise<ModelVersionSnapshot | null> {
+  const row = await prisma.modelVersion.findUnique({
+    where: { name },
+  });
+  if (!row) return null;
+  const patterns = row.deployedPatterns as unknown as DeployedPatternV2[];
+  const bins = row.featureBins as unknown as Record<string, FeatureBinDef>;
+  const meta = row.metaModel as unknown as MetaModel;
+  const tuning = row.tuningConfig as unknown as typeof PREDICTION_TUNING;
+  return {
+    name: row.name,
+    deployedPatterns: patterns,
+    featureBins: bins,
+    metaModel: meta,
+    tuningConfig: tuning,
+  };
+}
+
 export async function autoSnapshotBeforeDiscovery(): Promise<void> {
   const deployedCount = await prisma.patternV2.count({ where: { status: "deployed" } });
   if (deployedCount === 0) {

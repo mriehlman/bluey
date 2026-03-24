@@ -44,6 +44,7 @@ import {
   buildSourceReliabilitySnapshot,
 } from "@bluey/core/features/pickQualityOps";
 import { dailyPicks } from "@bluey/core/features/dailyPicks";
+import { searchPatternCombos } from "@bluey/core/features/patternComboSearch";
 import { runBacktest, backtestExisting, analyzePattern, quickValidate } from "@bluey/core/backtest/backtest";
 import { analyzeSuggestedPlayLedger } from "@bluey/core/backtest/suggestedPlayLedger";
 import { updateSuggestedPlayClv } from "@bluey/core/backtest/updateClvSnapshots";
@@ -307,6 +308,9 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   "predict:today": async (args) => {
     const flags = parseFlags(args);
     const dateStr = flags.date || new Date().toISOString().slice(0, 10);
+    const predictFlags: string[] = ["--date", dateStr];
+    if (flags.oddsMode) predictFlags.push("--oddsMode", flags.oddsMode);
+    if (flags.strictGates) predictFlags.push("--strictGates", flags.strictGates);
     
     console.log(`\n=== Today's Predictions for ${dateStr} ===\n`);
     
@@ -324,7 +328,7 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     
     // Step 3: Run predictions
     console.log("\nStep 3/3: Running predictions...\n");
-    await predictGames(["--date", dateStr]);
+    await predictGames(predictFlags);
   },
 
   "predict:all": async (args) => {
@@ -352,7 +356,11 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
       const d = dates[i]!;
       console.log(`[${i + 1}/${dates.length}] predictGames --date ${d}`);
       try {
-        await predictGames(["--date", d]);
+        const predictArgs = ["--date", d];
+        if (flags.oddsMode) predictArgs.push("--oddsMode", flags.oddsMode);
+        if (flags.modelVersion) predictArgs.push("--modelVersion", flags.modelVersion);
+        if (flags.strictGates) predictArgs.push("--strictGates", flags.strictGates);
+        await predictGames(predictArgs);
         ok += 1;
       } catch (err) {
         failed += 1;
@@ -856,6 +864,9 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   },
   "report:vote-weight-input-audit": async (args) => {
     await reportVoteWeightInputAudit(args);
+  },
+  "search:pattern-combos": async (args) => {
+    await searchPatternCombos(args);
   },
 
   "ml:player-points": async (args) => {

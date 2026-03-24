@@ -19,7 +19,8 @@ export type GateRejectReason =
   | "odds_too_negative"
   | "calibrated_edge_below_min"
   | "uncertainty_above_max"
-  | "missing_market_snapshot";
+  | "missing_market_snapshot"
+  | "moneyline_longshot_blocked";
 
 function parseTotalThresholdOutcome(
   outcomeType: string,
@@ -155,6 +156,8 @@ export function evaluateSuggestedPlayQualityGate(play: {
   uncertaintyScore?: number | null;
   strictMinCalibratedEdge?: number | null;
   strictMaxUncertaintyScore?: number | null;
+  strictMinMoneylineImpliedProbability?: number | null;
+  strictMinMoneylineLongshotEdgeOverride?: number | null;
 }): { pass: boolean; reason?: GateRejectReason } {
   const family = betFamilyForOutcome(play.outcomeType);
   const gates = gateThresholdsForFamily(family);
@@ -195,6 +198,18 @@ export function evaluateSuggestedPlayQualityGate(play: {
     if (play.strictMaxUncertaintyScore != null && play.uncertaintyScore != null) {
       if (play.uncertaintyScore > play.strictMaxUncertaintyScore) {
         return { pass: false, reason: "uncertainty_above_max" };
+      }
+    }
+    if (
+      family === "MONEYLINE" &&
+      play.strictMinMoneylineImpliedProbability != null &&
+      play.impliedMarketProbability != null &&
+      play.impliedMarketProbability < play.strictMinMoneylineImpliedProbability
+    ) {
+      const edge = play.edgeVsMarket ?? Number.NEGATIVE_INFINITY;
+      const override = play.strictMinMoneylineLongshotEdgeOverride;
+      if (override == null || edge < override) {
+        return { pass: false, reason: "moneyline_longshot_blocked" };
       }
     }
   }

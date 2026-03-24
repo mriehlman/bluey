@@ -14,6 +14,7 @@ export async function GET(req: Request) {
   const filter = url.searchParams.get("filter") ?? "all"; // game | player | all
   const mlFilter = url.searchParams.get("mlFilter") ?? "all"; // all | ml_only | no_ml
   const modelVersion = url.searchParams.get("modelVersion") ?? "all"; // all | live | <snapshot name>
+  const gateMode = (url.searchParams.get("gateMode") ?? "legacy").toLowerCase(); // legacy | strict
   if (!month || !/^\d{4}-\d{2}$/.test(month)) {
     return NextResponse.json(
       { error: "Requires ?month=YYYY-MM" },
@@ -29,6 +30,12 @@ export async function GET(req: Request) {
   if (!["all", "ml_only", "no_ml"].includes(mlFilter)) {
     return NextResponse.json(
       { error: "mlFilter must be all, ml_only, or no_ml" },
+      { status: 400 },
+    );
+  }
+  if (!["legacy", "strict"].includes(gateMode)) {
+    return NextResponse.json(
+      { error: "gateMode must be legacy or strict" },
       { status: 400 },
     );
   }
@@ -58,6 +65,10 @@ export async function GET(req: Request) {
       : mlFilter === "ml_only"
         ? `AND COALESCE(s."mlInvolved", FALSE) = TRUE`
         : `AND COALESCE(s."mlInvolved", FALSE) = FALSE`;
+  const gateModeFilter =
+    gateMode === "strict"
+      ? `AND COALESCE((cp."runContext"->>'strictGates')::boolean, FALSE) = TRUE`
+      : `AND COALESCE((cp."runContext"->>'strictGates')::boolean, FALSE) = FALSE`;
 
   try {
     const rows = await prisma.$queryRawUnsafe<
@@ -73,6 +84,7 @@ export async function GET(req: Request) {
            AND g."date" >= '${start}'
            AND g."date" <= '${end}'
            ${modelVersionFilter}
+           ${gateModeFilter}
          ORDER BY g."date"::date, cp."runStartedAt" DESC NULLS LAST, cp."generatedAt" DESC
        ),
       canonical_games AS (
@@ -101,7 +113,7 @@ export async function GET(req: Request) {
     );
 
     const dates = rows.map((r) => r.date).filter(Boolean);
-    return NextResponse.json({ dates, modelVersion });
+    return NextResponse.json({ dates, modelVersion, gateMode });
   } catch (err) {
     const e = err as { code?: string };
     if (e?.code === "P2021" || (e?.code === "P2010")) {

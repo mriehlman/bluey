@@ -4,6 +4,21 @@ type FamilyGate = {
   minEv: number;
 };
 
+type StrictGateByFamilyConfig = {
+  minCalibratedEdge: number;
+  maxUncertaintyScore: number;
+  /**
+   * Strict mode only: block extreme moneyline longshots when implied win probability is too low.
+   * Example: +750 ~= 0.118 implied probability, so min 0.15 would block it.
+   */
+  minMoneylineImpliedProbability?: number;
+  /**
+   * Optional strict-mode escape hatch for longshots:
+   * if adjusted edge meets this threshold, allow despite low implied probability.
+   */
+  minMoneylineLongshotEdgeOverride?: number;
+};
+
 export const DISCOVERY_DEFAULTS = {
   objective: "hit_rate",
   trainSeason: 2023,
@@ -99,9 +114,17 @@ export const PICK_QUALITY_TUNING = {
     PLAYER: { minCalibratedEdge: 0.015, maxUncertaintyScore: 0.72 },
     TOTAL: { minCalibratedEdge: 0.01, maxUncertaintyScore: 0.74 },
     SPREAD: { minCalibratedEdge: 0.01, maxUncertaintyScore: 0.74 },
-    MONEYLINE: { minCalibratedEdge: 0.012, maxUncertaintyScore: 0.7 },
+    MONEYLINE: {
+      minCalibratedEdge: 0.012,
+      // Tighter uncertainty cap to avoid shaky coin-flip style ML picks.
+      maxUncertaintyScore: 0.52,
+      // Allow borderline plus-money dogs (e.g. +570 ~ 0.149) while still blocking extreme longshots.
+      minMoneylineImpliedProbability: 0.145,
+      // Leave unset to hard-block extreme longshots in strict mode.
+      minMoneylineLongshotEdgeOverride: undefined,
+    },
     OTHER: { minCalibratedEdge: 0.01, maxUncertaintyScore: 0.75 },
-  },
+  } satisfies Record<"PLAYER" | "TOTAL" | "SPREAD" | "MONEYLINE" | "OTHER", StrictGateByFamilyConfig>,
 } as const;
 
 export const LEDGER_TUNING = {

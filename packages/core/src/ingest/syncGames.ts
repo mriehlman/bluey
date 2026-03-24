@@ -7,6 +7,80 @@ import {
   type BdlTeam,
 } from "../api/balldontlie";
 
+async function rehomeOddsFromShadowGames(args: {
+  canonicalGameId: string;
+  canonicalSourceGameId: number;
+  date: Date;
+  homeTeamId: number;
+  awayTeamId: number;
+}): Promise<number> {
+  const shadows = await prisma.game.findMany({
+    where: {
+      id: { not: args.canonicalGameId },
+      sourceGameId: { lt: 0 },
+      date: args.date,
+      homeTeamId: args.homeTeamId,
+      awayTeamId: args.awayTeamId,
+    },
+    select: { id: true },
+  });
+  if (shadows.length === 0) return 0;
+
+  let moved = 0;
+  for (const shadow of shadows) {
+    const oddsRows = await prisma.gameOdds.findMany({
+      where: { gameId: shadow.id },
+      select: {
+        source: true,
+        spreadHome: true,
+        spreadAway: true,
+        totalOver: true,
+        totalUnder: true,
+        mlHome: true,
+        mlAway: true,
+        fetchedAt: true,
+      },
+    });
+    for (const row of oddsRows) {
+      await prisma.gameOdds.upsert({
+        where: {
+          gameId_source: {
+            gameId: args.canonicalGameId,
+            source: row.source,
+          },
+        },
+        update: {
+          spreadHome: row.spreadHome,
+          spreadAway: row.spreadAway,
+          totalOver: row.totalOver,
+          totalUnder: row.totalUnder,
+          mlHome: row.mlHome,
+          mlAway: row.mlAway,
+          fetchedAt: row.fetchedAt,
+        },
+        create: {
+          gameId: args.canonicalGameId,
+          source: row.source,
+          spreadHome: row.spreadHome,
+          spreadAway: row.spreadAway,
+          totalOver: row.totalOver,
+          totalUnder: row.totalUnder,
+          mlHome: row.mlHome,
+          mlAway: row.mlAway,
+          fetchedAt: row.fetchedAt,
+        },
+      });
+      moved++;
+    }
+  }
+  if (moved > 0) {
+    console.log(
+      `  Rehomed ${moved} GameOdds rows onto canonical game ${args.canonicalSourceGameId} (${args.canonicalGameId})`,
+    );
+  }
+  return moved;
+}
+
 async function upsertTeam(team: BdlTeam): Promise<void> {
   await prisma.team.upsert({
     where: { id: team.id },
@@ -46,6 +120,71 @@ async function upsertGame(game: BdlGame, includeScheduled = false): Promise<stri
   const date = new Date(
     Date.UTC(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3])),
   );
+
+  const existingBySource = await prisma.game.findUnique({
+    where: { sourceGameId: game.id },
+    select: { id: true },
+  });
+
+  if (!existingBySource) {
+    // If this game was previously created from odds ingest with a synthetic negative sourceGameId,
+    // claim that row instead of creating a duplicate canonical game row.
+    const shadow = await prisma.game.findFirst({
+      where: {
+        sourceGameId: { lt: 0 },
+        date,
+        homeTeamId: game.home_team.id,
+        awayTeamId: game.visitor_team.id,
+      },
+      select: { id: true },
+    });
+    if (shadow) {
+      const claimed = await prisma.game.update({
+        where: { id: shadow.id },
+        data: {
+          sourceGameId: game.id,
+          date,
+          season: game.season,
+          stage: game.postseason ? 4 : 2,
+          league: "standard",
+          homeTeamId: game.home_team.id,
+          awayTeamId: game.visitor_team.id,
+          homeScore: game.home_team_score,
+          awayScore: game.visitor_team_score,
+          homeTeamNameSnapshot: game.home_team.full_name,
+          awayTeamNameSnapshot: game.visitor_team.full_name,
+          seasonType: game.postseason ? "POST" : "REG",
+        },
+      });
+
+      await prisma.externalIdMap.upsert({
+        where: {
+          entityType_source_sourceId: {
+            entityType: "GAME",
+            source: "balldontlie",
+            sourceId: String(game.id),
+          },
+        },
+        update: { internalId: `game:${claimed.id}` },
+        create: {
+          entityType: "GAME",
+          source: "balldontlie",
+          sourceId: String(game.id),
+          internalId: `game:${claimed.id}`,
+        },
+      });
+
+      await prisma.gameExternalId.upsert({
+        where: {
+          gameId_source: { gameId: claimed.id, source: "balldontlie" },
+        },
+        update: { sourceId: String(game.id) },
+        create: { gameId: claimed.id, source: "balldontlie", sourceId: String(game.id) },
+      });
+
+      return claimed.id;
+    }
+  }
 
   const result = await prisma.game.upsert({
     where: { sourceGameId: game.id },
@@ -101,6 +240,14 @@ async function upsertGame(game: BdlGame, includeScheduled = false): Promise<stri
     },
     update: { sourceId: String(game.id) },
     create: { gameId: result.id, source: "balldontlie", sourceId: String(game.id) },
+  });
+
+  await rehomeOddsFromShadowGames({
+    canonicalGameId: result.id,
+    canonicalSourceGameId: game.id,
+    date,
+    homeTeamId: game.home_team.id,
+    awayTeamId: game.visitor_team.id,
   });
 
   return result.id;

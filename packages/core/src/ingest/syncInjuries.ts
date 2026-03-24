@@ -148,7 +148,7 @@ export async function syncInjuries(args: string[] = []): Promise<void> {
   const from = flags.from;
   const to = flags.to;
   const snapshots = parseSnapshotSpecs(flags);
-  const skipExisting = (flags["skip-existing"] ?? "false") === "true";
+  const skipExisting = (flags["skip-existing"] ?? "true") === "true";
   const delayMs = Math.max(0, Number(flags["delay-ms"] ?? "0"));
   const concurrency = Math.max(1, Number(flags.concurrency ?? "3"));
 

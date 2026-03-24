@@ -20,7 +20,7 @@ import {
   type PlayerPropRow,
 } from "./predictionEngine";
 import { assertPredictionRecord, type PredictionRecord } from "./predictionContract";
-import { loadActiveModelVersion } from "../patterns/modelVersion";
+import { loadActiveModelVersion, loadModelVersionByName } from "../patterns/modelVersion";
 import { loadCalibrationArtifacts, loadSourceReliabilitySnapshot } from "./pickQuality";
 
 function getSeasonForDate(date: Date): number {
@@ -284,6 +284,13 @@ export async function predictGames(args: string[] = []): Promise<void> {
       : flags.dynamicVoteWeighting === "true";
   const voteWeightingStrength =
     flags.voteWeightingStrength == null ? undefined : Number(flags.voteWeightingStrength);
+  const oddsModeRaw = (flags.oddsMode ?? "full").toLowerCase();
+  const oddsMode: "full" | "require" | "ignore" =
+    oddsModeRaw === "require" || oddsModeRaw === "ignore" ? oddsModeRaw : "full";
+  const strictGates =
+    flags.strictGates == null
+      ? PICK_QUALITY_TUNING.enableStrictActionabilityGates
+      : flags.strictGates === "true";
   const voteWeightingVersion: "legacy" | "weighted_v1" =
     (dynamicVoteWeightingEnabled ?? PICK_QUALITY_TUNING.enableDynamicVoteWeighting)
       ? "weighted_v1"
@@ -296,6 +303,9 @@ export async function predictGames(args: string[] = []): Promise<void> {
     flags,
     voteWeightingVersion,
     voteWeightingStrength: voteWeightingStrength ?? PICK_QUALITY_TUNING.voteWeightingStrength,
+    oddsMode,
+    strictGates,
+    requestedModelVersion: flags.modelVersion ?? null,
   };
   const canonicalRecords: PredictionRecord[] = [];
   const rejectionArtifact: Array<{
@@ -307,6 +317,8 @@ export async function predictGames(args: string[] = []): Promise<void> {
   await ensureCanonicalPredictionTables();
 
   console.log(`\n=== Predictions for ${dateStr} (season ${season}) ===\n`);
+  console.log(`Odds mode: ${oddsMode} (${oddsMode === "full" ? "allow fallback odds" : oddsMode === "require" ? "require real market odds" : "ignore odds in pick construction"})\n`);
+  console.log(`Strict gates: ${strictGates ? "enabled" : "disabled"}\n`);
 
   // Load games on this date
   const games = await prisma.game.findMany({
@@ -337,18 +349,35 @@ export async function predictGames(args: string[] = []): Promise<void> {
     orderBy: { confidenceScore: "desc" },
   });
 
-  const activeVersion = await loadActiveModelVersion();
+  const requestedModelVersion = flags.modelVersion;
+  const forcedLive = requestedModelVersion === "live";
+  const explicitVersion =
+    requestedModelVersion && requestedModelVersion !== "live"
+      ? await loadModelVersionByName(requestedModelVersion)
+      : null;
+  if (requestedModelVersion && requestedModelVersion !== "live" && !explicitVersion) {
+    console.error(`Model version "${requestedModelVersion}" not found.`);
+    process.exit(1);
+  }
+  const activeVersion = forcedLive ? null : (explicitVersion ?? (await loadActiveModelVersion()));
   let deployedV2: DeployedPatternV2[];
   let bins: Map<string, any>;
   let metaModel: Awaited<ReturnType<typeof loadMetaModel>>;
 
   if (activeVersion) {
-    console.log(`Using model version snapshot (active version found)`);
+    if (explicitVersion) {
+      console.log(`Using model version snapshot "${requestedModelVersion}"`);
+    } else {
+      console.log(`Using model version snapshot (active version found)`);
+    }
     deployedV2 = activeVersion.deployedPatterns;
     bins = new Map(Object.entries(activeVersion.featureBins));
     metaModel = activeVersion.metaModel;
     runContext.modelVersionName = (activeVersion as { name?: string }).name ?? null;
   } else {
+    if (forcedLive) {
+      console.log("Using live model artifacts (requested --modelVersion live)");
+    }
     deployedV2 = await prisma.patternV2.findMany({
       where: { status: "deployed" },
       select: {
@@ -645,27 +674,34 @@ export async function predictGames(args: string[] = []): Promise<void> {
             mlAway: (consensusOdds as any).mlAway ?? (consensusOdds as any).moneylineAway ?? null,
           }
         : null;
+      const effectiveEngineOdds = oddsMode === "ignore" ? null : engineOdds;
+      const effectivePropsForGame = oddsMode === "ignore" ? [] : propsForGame;
       const modelVersionName = activeVersion ? (activeVersion as any).name ?? null : null;
 
       const engineOutput = generateGamePredictions({
         season,
         gameContext: virtualContext,
-        odds: engineOdds,
+        odds: effectiveEngineOdds,
         deployedV2Patterns: deployedV2,
         featureBins: bins,
         metaModel,
         gamePlayerContext: gamePlayerCtx,
-        propsForGame: propsForGame,
+        propsForGame: effectivePropsForGame,
         maxBetPicksPerGame: Math.max(1, LEDGER_TUNING.maxBetPicksPerGame),
-        fallbackAmericanOdds: LEDGER_TUNING.fallbackAmericanOdds,
+        fallbackAmericanOdds: oddsMode === "full" ? LEDGER_TUNING.fallbackAmericanOdds : undefined,
+        allowFallbackMarketOdds: oddsMode === "full",
         modelBundleVersion: modelVersionName ?? undefined,
         dynamicVoteWeightingEnabled,
         voteWeightingStrength,
         voteWeightingVersion,
         calibrationArtifacts,
         sourceReliabilitySnapshot,
+        strictActionabilityGatesEnabled: strictGates,
         sourceTimestamps: {
-          oddsTimestampUsed: consensusOdds?.fetchedAt?.toISOString?.() ?? null,
+          oddsTimestampUsed:
+            oddsMode === "ignore"
+              ? null
+              : consensusOdds?.fetchedAt?.toISOString?.() ?? null,
           statsSnapshotCutoff: targetDate.toISOString(),
           injuryLineupCutoff: targetDate.toISOString(),
         },

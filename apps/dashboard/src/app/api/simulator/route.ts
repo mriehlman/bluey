@@ -22,12 +22,28 @@ function sqlEsc(value: string): string {
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const modelVersion = url.searchParams.get("modelVersion") ?? "all";
+  const oddsMode = (url.searchParams.get("oddsMode") ?? "all").toLowerCase();
+  const gateMode = (url.searchParams.get("gateMode") ?? "all").toLowerCase();
+  const oddsModeFilter =
+    oddsMode === "require"
+      ? `AND COALESCE(cp."runContext"->>'oddsMode','full') = 'require'`
+      : oddsMode === "ignore"
+        ? `AND COALESCE(cp."runContext"->>'oddsMode','full') = 'ignore'`
+        : oddsMode === "full"
+          ? `AND COALESCE(cp."runContext"->>'oddsMode','full') = 'full'`
+          : "";
   const modelVersionFilter =
     modelVersion === "all"
       ? ""
       : modelVersion === "live"
         ? `AND COALESCE(cp."runContext"->>'modelVersionName', 'live') = 'live'`
         : `AND cp."runContext"->>'modelVersionName' = '${sqlEsc(modelVersion)}'`;
+  const gateModeFilter =
+    gateMode === "strict"
+      ? `AND COALESCE((cp."runContext"->>'strictGates')::boolean, FALSE) = TRUE`
+      : gateMode === "legacy"
+        ? `AND COALESCE((cp."runContext"->>'strictGates')::boolean, FALSE) = FALSE`
+        : "";
 
   await prisma.$executeRawUnsafe(
     `ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "mlInvolved" boolean NOT NULL DEFAULT FALSE`,
@@ -42,6 +58,8 @@ export async function GET(req: Request) {
       JOIN "Game" g ON g."id" = cp."gameId"
       WHERE cp."runId" IS NOT NULL
         ${modelVersionFilter}
+        ${oddsModeFilter}
+        ${gateModeFilter}
       ORDER BY g."date"::date, cp."runStartedAt" DESC NULLS LAST, cp."generatedAt" DESC
     ),
     canonical_latest AS (
@@ -110,5 +128,5 @@ export async function GET(req: Request) {
     })),
   }));
 
-  return NextResponse.json({ days, seasons, modelVersion });
+  return NextResponse.json({ days, seasons, modelVersion, oddsMode, gateMode });
 }

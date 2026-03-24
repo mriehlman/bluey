@@ -78,7 +78,11 @@ export default function SimulatorPage() {
   const [parlaySort, setParlaySort] = useState<{ col: string; asc: boolean }>({ col: "date", asc: true });
   const [pickType, setPickType] = useState<"game" | "player" | "all">("game");
   const [mlFilter, setMlFilter] = useState<"all" | "ml_only" | "no_ml">("all");
+  const [oddsMode, setOddsMode] = useState<"all" | "full" | "require" | "ignore">("all");
+  const [gateMode, setGateMode] = useState<"all" | "legacy" | "strict">("all");
   const [minParlayLegs, setMinParlayLegs] = useState("1");
+  const [runningSeason, setRunningSeason] = useState(false);
+  const [runSeasonMsg, setRunSeasonMsg] = useState<string>("");
 
   useEffect(() => {
     fetch("/api/model-versions")
@@ -113,10 +117,11 @@ export default function SimulatorPage() {
 
   useEffect(() => {
     setLoading(true);
-    const qs =
-      selectedModelVersion === "all"
-        ? ""
-        : `?modelVersion=${encodeURIComponent(selectedModelVersion)}`;
+    const qp = new URLSearchParams();
+    if (selectedModelVersion !== "all") qp.set("modelVersion", selectedModelVersion);
+    if (oddsMode !== "all") qp.set("oddsMode", oddsMode);
+    if (gateMode !== "all") qp.set("gateMode", gateMode);
+    const qs = qp.toString() ? `?${qp.toString()}` : "";
     fetch(`/api/simulator${qs}`)
       .then((r) => r.json())
       .then((d) => {
@@ -131,10 +136,58 @@ export default function SimulatorPage() {
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, [selectedModelVersion]);
+  }, [selectedModelVersion, oddsMode, gateMode]);
+
+  const runSeasonWithFilters = async () => {
+    if (!selectedSeason || selectedSeason === "all") {
+      setRunSeasonMsg("Select a specific season first.");
+      return;
+    }
+    if (selectedModelVersion === "all") {
+      setRunSeasonMsg("Select a specific model version (or live) first.");
+      return;
+    }
+    const resolvedOddsMode = oddsMode === "all" ? "full" : oddsMode;
+    setRunningSeason(true);
+    setRunSeasonMsg("Running season picks. This may take a while...");
+    try {
+      const res = await fetch("/api/simulator/run-season", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          season: Number(selectedSeason),
+          modelVersion: selectedModelVersion,
+          oddsMode: resolvedOddsMode,
+          strictGates: gateMode === "strict",
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setRunSeasonMsg(json?.error ?? "Failed to run season picks.");
+        return;
+      }
+      setRunSeasonMsg(
+        `Run complete: ${json.ok}/${json.dates} dates succeeded` +
+          (json.failed ? ` (${json.failed} failed)` : ""),
+      );
+      const qp = new URLSearchParams();
+      if (selectedModelVersion !== "all") qp.set("modelVersion", selectedModelVersion);
+      if (oddsMode !== "all") qp.set("oddsMode", oddsMode);
+      if (gateMode !== "all") qp.set("gateMode", gateMode);
+      const qs = qp.toString() ? `?${qp.toString()}` : "";
+      const refreshed = await fetch(`/api/simulator${qs}`).then((r) => r.json());
+      setData(refreshed);
+    } catch {
+      setRunSeasonMsg("Failed to run season picks.");
+    } finally {
+      setRunningSeason(false);
+    }
+  };
 
   const stakeNum = parseFloat(stake) || 10;
   const seasons = data?.seasons ?? [];
+  const currentSeason = getCurrentSeason();
+  const seasonOptions = Array.from(new Set<number>([...seasons, currentSeason])).sort((a, b) => a - b);
 
   if (loading) {
     return (
@@ -147,22 +200,10 @@ export default function SimulatorPage() {
     );
   }
 
-  if (!data || data.days.length === 0) {
-    return (
-      <div className="card">
-        <p style={{ marginBottom: "0.4rem" }}>
-          No graded pick data found for model `{selectedModelVersion}`.
-        </p>
-        <p className="muted" style={{ margin: 0, fontSize: "0.85rem" }}>
-          This usually means that version generated little/no canonical picks, not a simulator error.
-        </p>
-      </div>
-    );
-  }
-
+  const allDays = data?.days ?? [];
   const seasonFilteredDays = selectedSeason === "all"
-    ? data.days
-    : data.days.filter((d) => d.season === parseInt(selectedSeason));
+    ? allDays
+    : allDays.filter((d) => d.season === parseInt(selectedSeason));
 
   const filteredDays = seasonFilteredDays.map((d) => ({
     ...d,
@@ -232,13 +273,13 @@ export default function SimulatorPage() {
     <>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem", flexWrap: "wrap", gap: "0.5rem" }}>
         <h1 style={{ margin: 0, fontSize: "1.4rem", fontWeight: 800 }}>Bet Simulator</h1>
-        <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.65rem", flexWrap: "wrap", justifyContent: "flex-end" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
             <label className="muted" style={{ fontSize: "0.85rem" }}>Model (season coverage)</label>
             <select
               value={selectedModelVersion}
               onChange={(e) => setSelectedModelVersion(e.target.value)}
-              style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem" }}
+              style={{ padding: "0.35rem 0.45rem", fontSize: "0.85rem" }}
             >
               <option value="all">all canonical runs</option>
               <option value="live">
@@ -262,10 +303,10 @@ export default function SimulatorPage() {
             <select
               value={selectedSeason}
               onChange={(e) => setSelectedSeason(e.target.value)}
-              style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem" }}
+              style={{ padding: "0.35rem 0.45rem", fontSize: "0.85rem" }}
             >
               <option value="all">All Seasons</option>
-              {seasons.map((s) => (
+              {seasonOptions.map((s) => (
                 <option key={s} value={String(s)}>{s}-{String(s + 1).slice(2)}</option>
               ))}
             </select>
@@ -276,7 +317,7 @@ export default function SimulatorPage() {
               type="number"
               value={stake}
               onChange={(e) => setStake(e.target.value)}
-              style={{ width: 80, padding: "0.4rem 0.5rem", fontSize: "0.9rem" }}
+              style={{ width: 72, padding: "0.35rem 0.45rem", fontSize: "0.85rem" }}
               min="1"
               step="5"
             />
@@ -287,51 +328,80 @@ export default function SimulatorPage() {
               type="number"
               value={minParlayLegs}
               onChange={(e) => setMinParlayLegs(e.target.value)}
-              style={{ width: 80, padding: "0.4rem 0.5rem", fontSize: "0.9rem" }}
+              style={{ width: 72, padding: "0.35rem 0.45rem", fontSize: "0.85rem" }}
               min="1"
               step="1"
             />
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
-            <span className="muted" style={{ fontSize: "0.85rem" }}>Picks:</span>
-            {(["game", "player", "all"] as const).map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => setPickType(t)}
-                style={{
-                  padding: "0.35rem 0.5rem",
-                  fontSize: "0.85rem",
-                  border: "1px solid var(--border)",
-                  borderRadius: 4,
-                  background: pickType === t ? "var(--accent-muted)" : "transparent",
-                  cursor: "pointer",
-                }}
-              >
-                {t === "game" ? "Game" : t === "player" ? "Player" : "All"}
-              </button>
-            ))}
+          <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+            <label className="muted" style={{ fontSize: "0.85rem" }}>Picks</label>
+            <select
+              value={pickType}
+              onChange={(e) => setPickType(e.target.value as "game" | "player" | "all")}
+              style={{ padding: "0.35rem 0.45rem", fontSize: "0.85rem" }}
+            >
+              <option value="game">Game</option>
+              <option value="player">Player</option>
+              <option value="all">All</option>
+            </select>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
-            <span className="muted" style={{ fontSize: "0.85rem" }}>ML vote:</span>
-            {(["all", "ml_only", "no_ml"] as const).map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => setMlFilter(t)}
-                style={{
-                  padding: "0.35rem 0.5rem",
-                  fontSize: "0.85rem",
-                  border: "1px solid var(--border)",
-                  borderRadius: 4,
-                  background: mlFilter === t ? "var(--accent-muted)" : "transparent",
-                  cursor: "pointer",
-                }}
-              >
-                {t === "all" ? "All" : t === "ml_only" ? "ML Only" : "No ML"}
-              </button>
-            ))}
+          <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+            <label className="muted" style={{ fontSize: "0.85rem" }}>ML vote</label>
+            <select
+              value={mlFilter}
+              onChange={(e) => setMlFilter(e.target.value as "all" | "ml_only" | "no_ml")}
+              style={{ padding: "0.35rem 0.45rem", fontSize: "0.85rem" }}
+            >
+              <option value="all">All</option>
+              <option value="ml_only">ML only</option>
+              <option value="no_ml">No ML</option>
+            </select>
           </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+            <label className="muted" style={{ fontSize: "0.85rem" }}>Odds mode</label>
+            <select
+              value={oddsMode}
+              onChange={(e) => setOddsMode(e.target.value as "all" | "full" | "require" | "ignore")}
+              style={{ padding: "0.35rem 0.45rem", fontSize: "0.85rem" }}
+            >
+              <option value="all">All runs</option>
+              <option value="full">full</option>
+              <option value="require">require</option>
+              <option value="ignore">ignore</option>
+            </select>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+            <label className="muted" style={{ fontSize: "0.85rem" }}>Gates</label>
+            <select
+              value={gateMode}
+              onChange={(e) => setGateMode(e.target.value as "all" | "legacy" | "strict")}
+              style={{ padding: "0.35rem 0.45rem", fontSize: "0.85rem" }}
+            >
+              <option value="all">All runs</option>
+              <option value="legacy">legacy</option>
+              <option value="strict">strict</option>
+            </select>
+          </div>
+          <button
+            type="button"
+            onClick={runSeasonWithFilters}
+            disabled={runningSeason || selectedSeason === "all" || selectedModelVersion === "all"}
+            style={{
+              padding: "0.4rem 0.65rem",
+              fontSize: "0.85rem",
+              border: "1px solid var(--border)",
+              borderRadius: 4,
+              background: "var(--accent-muted)",
+              cursor:
+                runningSeason || selectedSeason === "all" || selectedModelVersion === "all"
+                  ? "not-allowed"
+                  : "pointer",
+              opacity:
+                runningSeason || selectedSeason === "all" || selectedModelVersion === "all" ? 0.6 : 1,
+            }}
+          >
+            {runningSeason ? "Running..." : "Run season picks"}
+          </button>
           {mlFilter !== "all" && pickType === "game" && (
             <span className="muted" style={{ fontSize: "0.75rem" }}>
               ML vote applies to player-point picks; use Player or All.
@@ -342,12 +412,29 @@ export default function SimulatorPage() {
 
       <div className="muted" style={{ marginBottom: "1rem", fontSize: "0.85rem" }}>
         {filteredDays.length} days, {totalPicks} graded picks, {totalHits} hits ({totalPicks > 0 ? (totalHits / totalPicks * 100).toFixed(1) : "0.0"}%)
-        {selectedSeason !== "all" && <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>(out of {data.days.length} total days)</span>}
+        {selectedSeason !== "all" && <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>(out of {allDays.length} total days)</span>}
         {pickType !== "all" && <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>• {pickType} picks only</span>}
         {mlFilter !== "all" && <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>• {mlFilter === "ml_only" ? "ML vote involved" : "ML vote not involved"}</span>}
         {selectedModelVersion !== "all" && <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>• model {selectedModelVersion}</span>}
+        {oddsMode !== "all" && <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>• oddsMode {oddsMode}</span>}
+        {gateMode !== "all" && <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>• gates {gateMode}</span>}
         <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>• canonical latest run</span>
       </div>
+      {runSeasonMsg && (
+        <div className="muted" style={{ marginBottom: "0.8rem", fontSize: "0.85rem" }}>
+          {runSeasonMsg}
+        </div>
+      )}
+      {allDays.length === 0 && (
+        <div className="card" style={{ marginBottom: "0.8rem", padding: "0.75rem" }}>
+          <p style={{ marginBottom: "0.35rem" }}>
+            No graded pick data found for model `{selectedModelVersion}` with current filters.
+          </p>
+          <p className="muted" style={{ margin: 0, fontSize: "0.85rem" }}>
+            You can still run season picks above; results will populate here after completion.
+          </p>
+        </div>
+      )}
 
       {/* Summary cards */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem", marginBottom: "1.5rem" }}>

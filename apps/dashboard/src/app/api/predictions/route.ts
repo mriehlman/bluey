@@ -672,6 +672,8 @@ export async function GET(req: Request) {
   const dateStr = url.searchParams.get("date");
   const refreshLedger = url.searchParams.get("refreshLedger") === "1";
   const includeDebugPlays = url.searchParams.get("debugPlays") === "1";
+  const gateModeRaw = (url.searchParams.get("gateMode") ?? "legacy").toLowerCase();
+  const gateMode: "legacy" | "strict" = gateModeRaw === "strict" ? "strict" : "legacy";
 
   if (!dateStr) {
     const today = new Date().toISOString().slice(0, 10);
@@ -1014,6 +1016,7 @@ export async function GET(req: Request) {
       includeDebugPlays,
       calibrationArtifacts,
       sourceReliabilitySnapshot,
+      strictActionabilityGatesEnabled: gateMode === "strict",
       // Ledger refresh (e.g. backfill) should capture all pick types for simulator filtering
       overrideExcludeFamilies: refreshLedger ? [] : undefined,
     });
@@ -1188,6 +1191,7 @@ export async function GET(req: Request) {
     date: dateStr,
     season,
     modelVersion: activeModelVersionInfo?.name ?? "live",
+    gateMode,
     dayBetSummary,
     ...(includeDebugPlays ? { gateDiagnostics } : {}),
     ...(didAutoSync ? { autoSynced: true } : {}),

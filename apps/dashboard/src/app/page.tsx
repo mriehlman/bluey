@@ -116,6 +116,7 @@ interface GamePrediction {
 interface PredictionData {
   date: string;
   modelVersion?: string;
+  gateMode?: "legacy" | "strict";
   season?: number;
   dayBetSummary?: { hits: number; total: number; hitRate: number | null };
   seasonToDate?: {
@@ -216,6 +217,7 @@ export function PredictionsPage() {
   const [syncResult, setSyncResult] = useState<{ ok: boolean; message: string; steps?: { step: string; ok: boolean; message?: string }[] } | null>(null);
   const [pickType, setPickType] = useState<"game" | "player" | "all">("game");
   const [mlFilter, setMlFilter] = useState<"all" | "ml_only" | "no_ml">("all");
+  const [gateMode, setGateMode] = useState<"legacy" | "strict">("legacy");
   const [calendarMonth, setCalendarMonth] = useState(() => {
     const d = new Date();
     return { year: d.getFullYear(), month: d.getMonth() };
@@ -243,8 +245,11 @@ export function PredictionsPage() {
   const fetchPredictions = useCallback(async (targetDate: string, refreshLedger?: boolean) => {
     setLoading(true);
     try {
-      const qs = refreshLedger ? `&refreshLedger=1` : "";
-      const res = await fetch(`/api/predictions?date=${targetDate}${qs}`);
+      const qp = new URLSearchParams();
+      qp.set("date", targetDate);
+      qp.set("gateMode", gateMode);
+      if (refreshLedger) qp.set("refreshLedger", "1");
+      const res = await fetch(`/api/predictions?${qp.toString()}`);
       const text = await res.text();
       let json: PredictionData | null = null;
       try {
@@ -267,7 +272,7 @@ export function PredictionsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [gateMode]);
 
   useEffect(() => {
     fetchPredictions(date);
@@ -310,14 +315,14 @@ export function PredictionsPage() {
     const monthStr = `${calendarMonth.year}-${String(calendarMonth.month + 1).padStart(2, "0")}`;
     const modelVersion = data?.modelVersion ?? "live";
     fetch(
-      `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&modelVersion=${encodeURIComponent(modelVersion)}`,
+      `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&modelVersion=${encodeURIComponent(modelVersion)}&gateMode=${gateMode}`,
     )
       .then((r) => r.json())
       .then((json: { dates?: string[] }) => {
         setPerfectDates(new Set(json.dates ?? []));
       })
       .catch(() => setPerfectDates(new Set()));
-  }, [calendarMonth.year, calendarMonth.month, pickType, mlFilter, data?.modelVersion]);
+  }, [calendarMonth.year, calendarMonth.month, pickType, mlFilter, gateMode, data?.modelVersion]);
 
   const runSync = useCallback(async () => {
     setSyncing(true);
@@ -337,7 +342,7 @@ export function PredictionsPage() {
         const monthStr = `${calendarMonth.year}-${String(calendarMonth.month + 1).padStart(2, "0")}`;
         const modelVersion = data?.modelVersion ?? "live";
         fetch(
-          `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&modelVersion=${encodeURIComponent(modelVersion)}`,
+          `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&modelVersion=${encodeURIComponent(modelVersion)}&gateMode=${gateMode}`,
         )
           .then((r) => r.json())
           .then((j: { dates?: string[] }) => setPerfectDates(new Set(j.dates ?? [])))
@@ -348,7 +353,7 @@ export function PredictionsPage() {
     } finally {
       setSyncing(false);
     }
-  }, [date, fetchPredictions, calendarMonth.year, calendarMonth.month, pickType, mlFilter, data?.modelVersion]);
+  }, [date, fetchPredictions, calendarMonth.year, calendarMonth.month, pickType, mlFilter, gateMode, data?.modelVersion]);
 
   const switchModelVersion = useCallback(async (next: string) => {
     setSwitchingModelVersion(true);
@@ -584,6 +589,11 @@ export function PredictionsPage() {
             {mlFilter !== "all" && (
               <span className="muted" style={{ fontSize: "0.9rem", fontWeight: 400 }}>
                 {" "}({mlFilter === "ml_only" ? "ml only" : "no ml"})
+              </span>
+            )}
+            {gateMode === "strict" && (
+              <span className="muted" style={{ fontSize: "0.9rem", fontWeight: 400 }}>
+                {" "}(strict gates)
               </span>
             )}
             {dayHitSummary.total > 0 && (
@@ -1139,6 +1149,27 @@ export function PredictionsPage() {
               }}
             >
               {t === "all" ? "All" : t === "ml_only" ? "ML" : "No ML"}
+            </button>
+          ))}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.5rem" }}>
+          <span className="muted" style={{ fontSize: "0.8rem" }}>Gates:</span>
+          {(["legacy", "strict"] as const).map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setGateMode(t)}
+              style={{
+                flex: 1,
+                padding: "0.3rem 0.4rem",
+                fontSize: "0.72rem",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                background: gateMode === t ? "var(--accent-muted)" : "transparent",
+                cursor: "pointer",
+              }}
+            >
+              {t === "legacy" ? "Legacy" : "Strict"}
             </button>
           ))}
         </div>
