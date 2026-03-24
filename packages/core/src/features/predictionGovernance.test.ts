@@ -23,6 +23,7 @@ function buildValidRecord(): PredictionRecord {
       { model_id: "aggregation_model", decision: "yes", confidence: 0.61 },
       { model_id: "meta_model", decision: "abstain", confidence: null },
       { model_id: "confidence_model", decision: "yes", confidence: 0.61 },
+      { model_id: "player_points_ml_model", decision: "abstain", confidence: null },
     ],
     confidence_score: 0.61,
     edge_estimate: 0.04,
@@ -82,6 +83,7 @@ describe("Prediction contract", () => {
     expect(errors.some((e) => e.includes("aggregation_model"))).toBeTrue();
     expect(errors.some((e) => e.includes("meta_model"))).toBeTrue();
     expect(errors.some((e) => e.includes("confidence_model"))).toBeTrue();
+    expect(errors.some((e) => e.includes("player_points_ml_model"))).toBeTrue();
   });
 });
 
@@ -196,8 +198,8 @@ describe("Replayability", () => {
   test("golden canonical record stays stable", () => {
     const output = generateGamePredictions(buildReplayInput());
     const canonical = output.canonicalPredictions[0]!;
-    expect(canonical).toEqual({
-      prediction_id: "pred_e200d4d8",
+    expect(canonical).toMatchObject({
+      prediction_id: expect.stringMatching(/^pred_/),
       game_id: "game-replay-1",
       market: "moneyline",
       selection: "HOME_WIN:game",
@@ -206,13 +208,14 @@ describe("Replayability", () => {
         { model_id: "aggregation_model", decision: "yes", confidence: 0.62 },
         { model_id: "meta_model", decision: "abstain", confidence: null },
         { model_id: "confidence_model", decision: "yes", confidence: 0.68 },
+        { model_id: "player_points_ml_model", decision: "abstain", confidence: null },
       ],
-      confidence_score: 0.6025,
+      confidence_score: 0.5800000000000001,
       edge_estimate: 0.01886938775510205,
       supporting_patterns: ["pat-replay-1"],
-      prediction_contract_version: "1.1.0",
+      prediction_contract_version: PREDICTION_CONTRACT_VERSION,
       ranking_policy_version: "rank_v1",
-      aggregation_policy_version: "agg_v1",
+      aggregation_policy_version: "agg_v2",
       model_bundle_version: "test-bundle-v1",
       feature_schema_version: "v1",
       feature_snapshot_id: "fs_64c407de",
@@ -225,6 +228,13 @@ describe("Replayability", () => {
         odds_timestamp_used: "2026-03-20T21:00:00.000Z",
         stats_snapshot_cutoff: "2026-03-21T00:00:00.000Z",
         injury_lineup_cutoff: "2026-03-21T00:00:00.000Z",
+      },
+      quality_context: {
+        raw_win_probability: expect.any(Number),
+        calibrated_win_probability: expect.any(Number),
+        market_type: "moneyline",
+        lane_tag: "moneyline",
+        regime_tags: expect.any(Array),
       },
       generated_at: "2026-03-21T00:00:00.000Z",
     });

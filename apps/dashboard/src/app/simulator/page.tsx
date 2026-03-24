@@ -8,6 +8,7 @@ interface Pick {
   outcomeType?: string;
   odds: number;
   hit: boolean;
+  mlInvolved?: boolean;
   meta: number | null;
   posterior: number;
 }
@@ -25,10 +26,27 @@ function filterPicksByType<T extends { outcomeType?: string }>(picks: T[], pickT
   });
 }
 
+function filterPicksByMl<T extends { mlInvolved?: boolean }>(
+  picks: T[],
+  mlFilter: "all" | "ml_only" | "no_ml",
+): T[] {
+  if (mlFilter === "all") return picks;
+  return picks.filter((p) => (mlFilter === "ml_only" ? !!p.mlInvolved : !p.mlInvolved));
+}
+
 interface Day {
   date: string;
   season: number;
   picks: Pick[];
+}
+
+interface ModelVersionOption {
+  name: string;
+  isActive: boolean;
+  coverage?: {
+    gradedDates: number;
+    gradedPicks: number;
+  };
 }
 
 function americanToDecimal(american: number): number {
@@ -48,14 +66,58 @@ function flatBetPayout(odds: number, stake: number, hit: boolean): number {
 
 export default function SimulatorPage() {
   const [data, setData] = useState<{ days: Day[]; seasons: number[] } | null>(null);
+  const [modelVersions, setModelVersions] = useState<ModelVersionOption[]>([]);
+  const [selectedModelVersion, setSelectedModelVersion] = useState<string>("all");
+  const [liveCoverage, setLiveCoverage] = useState<{ gradedDates: number; gradedPicks: number }>({
+    gradedDates: 0,
+    gradedPicks: 0,
+  });
   const [loading, setLoading] = useState(true);
   const [stake, setStake] = useState("10");
   const [selectedSeason, setSelectedSeason] = useState<string>(() => String(getCurrentSeason()));
   const [parlaySort, setParlaySort] = useState<{ col: string; asc: boolean }>({ col: "date", asc: true });
   const [pickType, setPickType] = useState<"game" | "player" | "all">("game");
+  const [mlFilter, setMlFilter] = useState<"all" | "ml_only" | "no_ml">("all");
+  const [minParlayLegs, setMinParlayLegs] = useState("1");
 
   useEffect(() => {
-    fetch("/api/simulator")
+    fetch("/api/model-versions")
+      .then((r) => r.json())
+      .then((json: {
+        versions?: Array<{
+          name: string;
+          isActive: boolean;
+          coverage?: { gradedDates: number; gradedPicks: number };
+        }>;
+        liveCoverage?: { gradedDates: number; gradedPicks: number };
+      }) => {
+        const versions = (json.versions ?? []).map((v) => ({
+          name: v.name,
+          isActive: v.isActive,
+          coverage: v.coverage,
+        }));
+        setModelVersions(versions);
+        setLiveCoverage(json.liveCoverage ?? { gradedDates: 0, gradedPicks: 0 });
+        const active = versions.find((v) => v.isActive);
+        const firstUsable = versions.find((v) => (v.coverage?.gradedPicks ?? 0) > 0);
+        if (active && (active.coverage?.gradedPicks ?? 0) > 0) {
+          setSelectedModelVersion(active.name);
+        } else if (firstUsable) {
+          setSelectedModelVersion(firstUsable.name);
+        } else if ((json.liveCoverage?.gradedPicks ?? 0) > 0) {
+          setSelectedModelVersion("live");
+        }
+      })
+      .catch(() => setModelVersions([]));
+  }, []);
+
+  useEffect(() => {
+    setLoading(true);
+    const qs =
+      selectedModelVersion === "all"
+        ? ""
+        : `?modelVersion=${encodeURIComponent(selectedModelVersion)}`;
+    fetch(`/api/simulator${qs}`)
       .then((r) => r.json())
       .then((d) => {
         setData(d);
@@ -69,7 +131,7 @@ export default function SimulatorPage() {
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, []);
+  }, [selectedModelVersion]);
 
   const stakeNum = parseFloat(stake) || 10;
   const seasons = data?.seasons ?? [];
@@ -86,7 +148,16 @@ export default function SimulatorPage() {
   }
 
   if (!data || data.days.length === 0) {
-    return <div className="card"><p>No graded pick data found.</p></div>;
+    return (
+      <div className="card">
+        <p style={{ marginBottom: "0.4rem" }}>
+          No graded pick data found for model `{selectedModelVersion}`.
+        </p>
+        <p className="muted" style={{ margin: 0, fontSize: "0.85rem" }}>
+          This usually means that version generated little/no canonical picks, not a simulator error.
+        </p>
+      </div>
+    );
   }
 
   const seasonFilteredDays = selectedSeason === "all"
@@ -95,7 +166,7 @@ export default function SimulatorPage() {
 
   const filteredDays = seasonFilteredDays.map((d) => ({
     ...d,
-    picks: filterPicksByType(d.picks, pickType),
+    picks: filterPicksByMl(filterPicksByType(d.picks, pickType), mlFilter),
   }));
 
   const allPicks = filteredDays.flatMap((d) => d.picks);
@@ -119,22 +190,21 @@ export default function SimulatorPage() {
 
   // Parlay simulation
   let parlayRunning = 0;
-  let parlayStaked = 0;
-  let parlayWins = 0;
   const parlayByDay = filteredDays.map((day) => {
     if (day.picks.length === 0) return { date: day.date, legs: 0, hit: false, odds: 1, pnl: 0, cumulative: parlayRunning };
     const combinedDecimal = day.picks.reduce((acc, p) => acc * americanToDecimal(p.odds), 1);
     const allHit = day.picks.every((p) => p.hit);
-    parlayStaked += stakeNum;
     const pnl = allHit ? stakeNum * (combinedDecimal - 1) : -stakeNum;
-    if (allHit) parlayWins++;
     parlayRunning += pnl;
     return { date: day.date, legs: day.picks.length, hit: allHit, odds: combinedDecimal, pnl, cumulative: parlayRunning };
   });
-  const parlayTotalPnl = parlayRunning;
-  const parlayRoi = parlayStaked > 0 ? (parlayTotalPnl / parlayStaked) * 100 : 0;
+  const minParlayLegsNum = Math.max(1, Number.parseInt(minParlayLegs, 10) || 1);
+  const parlayRows = parlayByDay.filter((d) => d.legs >= minParlayLegsNum);
+  const filteredParlayWins = parlayRows.filter((d) => d.hit).length;
+  const filteredParlayStaked = parlayRows.length * stakeNum;
+  const filteredParlayTotalPnl = parlayRows.reduce((sum, d) => sum + d.pnl, 0);
+  const filteredParlayRoi = filteredParlayStaked > 0 ? (filteredParlayTotalPnl / filteredParlayStaked) * 100 : 0;
 
-  const parlayRows = parlayByDay.filter((d) => d.legs > 0);
   const sortedParlayRows = [...parlayRows].sort((a, b) => {
     const mul = parlaySort.asc ? 1 : -1;
     switch (parlaySort.col) {
@@ -164,6 +234,30 @@ export default function SimulatorPage() {
         <h1 style={{ margin: 0, fontSize: "1.4rem", fontWeight: 800 }}>Bet Simulator</h1>
         <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+            <label className="muted" style={{ fontSize: "0.85rem" }}>Model (season coverage)</label>
+            <select
+              value={selectedModelVersion}
+              onChange={(e) => setSelectedModelVersion(e.target.value)}
+              style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem" }}
+            >
+              <option value="all">all canonical runs</option>
+              <option value="live">
+                live (no snapshot) [season: {liveCoverage.gradedDates}d/{liveCoverage.gradedPicks}p]
+              </option>
+              {modelVersions.map((v) => (
+                <option
+                  key={v.name}
+                  value={v.name}
+                  disabled={(v.coverage?.gradedPicks ?? 0) === 0}
+                >
+                  {v.name}
+                  {v.isActive ? " (active)" : ""}
+                  {` [season: ${v.coverage?.gradedDates ?? 0}d/${v.coverage?.gradedPicks ?? 0}p]`}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
             <label className="muted" style={{ fontSize: "0.85rem" }}>Season</label>
             <select
               value={selectedSeason}
@@ -187,6 +281,17 @@ export default function SimulatorPage() {
               step="5"
             />
           </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+            <label className="muted" style={{ fontSize: "0.85rem" }}>Min legs</label>
+            <input
+              type="number"
+              value={minParlayLegs}
+              onChange={(e) => setMinParlayLegs(e.target.value)}
+              style={{ width: 80, padding: "0.4rem 0.5rem", fontSize: "0.9rem" }}
+              min="1"
+              step="1"
+            />
+          </div>
           <div style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
             <span className="muted" style={{ fontSize: "0.85rem" }}>Picks:</span>
             {(["game", "player", "all"] as const).map((t) => (
@@ -207,6 +312,31 @@ export default function SimulatorPage() {
               </button>
             ))}
           </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+            <span className="muted" style={{ fontSize: "0.85rem" }}>ML vote:</span>
+            {(["all", "ml_only", "no_ml"] as const).map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setMlFilter(t)}
+                style={{
+                  padding: "0.35rem 0.5rem",
+                  fontSize: "0.85rem",
+                  border: "1px solid var(--border)",
+                  borderRadius: 4,
+                  background: mlFilter === t ? "var(--accent-muted)" : "transparent",
+                  cursor: "pointer",
+                }}
+              >
+                {t === "all" ? "All" : t === "ml_only" ? "ML Only" : "No ML"}
+              </button>
+            ))}
+          </div>
+          {mlFilter !== "all" && pickType === "game" && (
+            <span className="muted" style={{ fontSize: "0.75rem" }}>
+              ML vote applies to player-point picks; use Player or All.
+            </span>
+          )}
         </div>
       </div>
 
@@ -214,6 +344,9 @@ export default function SimulatorPage() {
         {filteredDays.length} days, {totalPicks} graded picks, {totalHits} hits ({totalPicks > 0 ? (totalHits / totalPicks * 100).toFixed(1) : "0.0"}%)
         {selectedSeason !== "all" && <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>(out of {data.days.length} total days)</span>}
         {pickType !== "all" && <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>• {pickType} picks only</span>}
+        {mlFilter !== "all" && <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>• {mlFilter === "ml_only" ? "ML vote involved" : "ML vote not involved"}</span>}
+        {selectedModelVersion !== "all" && <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>• model {selectedModelVersion}</span>}
+        <span style={{ marginLeft: "0.5rem", opacity: 0.7 }}>• canonical latest run</span>
       </div>
 
       {/* Summary cards */}
@@ -243,26 +376,28 @@ export default function SimulatorPage() {
 
         {/* Parlay summary */}
         <div className="card" style={{ padding: "1rem" }}>
-          <h3 style={{ margin: "0 0 0.75rem", fontSize: "1rem" }}>Daily Parlay (all picks)</h3>
+          <h3 style={{ margin: "0 0 0.75rem", fontSize: "1rem" }}>
+            Daily Parlay (all picks, min legs {minParlayLegsNum})
+          </h3>
           <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem", fontSize: "0.9rem" }}>
             <div style={{ display: "flex", justifyContent: "space-between" }}>
               <span className="muted">Days bet</span>
-              <span>{parlayByDay.filter((d) => d.legs > 0).length} ({parlayWins} won)</span>
+              <span>{parlayRows.length} ({filteredParlayWins} won)</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between" }}>
               <span className="muted">Total staked</span>
-              <span>${parlayStaked.toFixed(2)}</span>
+              <span>${filteredParlayStaked.toFixed(2)}</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between" }}>
               <span className="muted">Total P&L</span>
-              <span style={{ fontWeight: 800, fontSize: "1.1rem", color: parlayTotalPnl >= 0 ? "var(--success)" : "var(--error)" }}>
-                {parlayTotalPnl >= 0 ? "+" : ""}${parlayTotalPnl.toFixed(2)}
+              <span style={{ fontWeight: 800, fontSize: "1.1rem", color: filteredParlayTotalPnl >= 0 ? "var(--success)" : "var(--error)" }}>
+                {filteredParlayTotalPnl >= 0 ? "+" : ""}${filteredParlayTotalPnl.toFixed(2)}
               </span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between" }}>
               <span className="muted">ROI</span>
-              <span style={{ fontWeight: 700, color: parlayRoi >= 0 ? "var(--success)" : "var(--error)" }}>
-                {parlayRoi >= 0 ? "+" : ""}{parlayRoi.toFixed(1)}%
+              <span style={{ fontWeight: 700, color: filteredParlayRoi >= 0 ? "var(--success)" : "var(--error)" }}>
+                {filteredParlayRoi >= 0 ? "+" : ""}{filteredParlayRoi.toFixed(1)}%
               </span>
             </div>
           </div>

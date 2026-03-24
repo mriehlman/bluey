@@ -472,6 +472,23 @@ model SuggestedPlayLedger {
   estimatedProb    Float?
   modelEdge        Float?
   ev               Float?
+  rawWinProbability Float?
+  calibratedWinProbability Float?
+  impliedMarketProbability Float?
+  edgeVsMarket    Float?
+  expectedValueScore Float?
+  marketType      String?
+  marketSubType   String?
+  selectionSide   String?
+  lineSnapshot    Float?
+  priceSnapshot   Float?
+  laneTag         String?
+  regimeTags      String[]
+  sourceReliabilityScore Float?
+  uncertaintyScore Float?
+  uncertaintyPenaltyApplied Float?
+  adjustedEdgeScore Float?
+  actionabilityVersion String?
   closePriceAmerican Int?
   closeImpliedProb Float?
   clvDeltaProb     Float?
@@ -606,11 +623,34 @@ model CanonicalPrediction {
   runId                      String?
   runStartedAt               DateTime?
   runContext                 Json?
+  voteWeightingVersion       String?
   gameId                     String
   market                     String
   selection                  String
   confidenceScore            Float
   edgeEstimate               Float
+  rawWinProbability          Float?
+  calibratedWinProbability   Float?
+  impliedMarketProbability   Float?
+  edgeVsMarket               Float?
+  expectedValueScore         Float?
+  marketType                 String?
+  marketSubType              String?
+  selectionSide              String?
+  lineSnapshot               Float?
+  priceSnapshot              Float?
+  laneTag                    String?
+  regimeTags                 String[]
+  sourceReliabilityScore     Float?
+  uncertaintyScore           Float?
+  uncertaintyPenaltyApplied  Float?
+  adjustedEdgeScore          Float?
+  weightedSupportScore       Float?
+  weightedOppositionScore    Float?
+  weightedConsensusScore     Float?
+  weightedDisagreementPenalty Float?
+  voteWeightBreakdown        Json?
+  dominantSourceFamily       String?
   predictionContractVersion  String
   rankingPolicyVersion       String
   aggregationPolicyVersion   String
@@ -628,6 +668,33 @@ model CanonicalPrediction {
   @@index([gameId, generatedAt])
   @@index([runId, generatedAt])
   @@index([predictionContractVersion, rankingPolicyVersion, aggregationPolicyVersion])
+}
+
+model PredictionCalibration {
+  id           String   @id
+  laneTag      String
+  marketFamily String
+  minSample    Int
+  sampleSize   Int
+  bins         Json
+  createdAt    DateTime @default(now())
+
+  @@index([laneTag, marketFamily, createdAt])
+}
+
+model PickSourceReliability {
+  id           String   @id
+  windowKey    String
+  sourceFamily String
+  marketFamily String
+  laneTag      String?
+  sampleSize   Int
+  wins         Int
+  hitRate      Float
+  asOfDate     DateTime @db.Date
+  createdAt    DateTime @default(now())
+
+  @@index([windowKey, sourceFamily, marketFamily, createdAt])
 }
 
 model CanonicalPredictionRejection {

@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@bluey/db";
+import type { GameContext } from "@prisma/client";
 import { getEasternDateFromUtc } from "@/lib/format";
 import { GAME_EVENT_CATALOG } from "@bluey/core/features/gameEventCatalog";
 import type { GameEventContext } from "@bluey/core/features/gameEventCatalog";
-import { LEDGER_TUNING } from "@bluey/core/config/tuning";
+import { LEDGER_TUNING, PICK_QUALITY_TUNING } from "@bluey/core/config/tuning";
 import {
   generateGamePredictions,
+  evaluatePlayerPointsMlVote,
   parsePlayerOutcomeRequirement,
   loadLatestFeatureBins,
   loadMetaModel,
@@ -18,6 +20,7 @@ import {
   type GamePlayerContext,
   type PlayerInfo,
 } from "@bluey/core/features/predictionEngine";
+import { loadCalibrationArtifacts, loadSourceReliabilitySnapshot } from "@bluey/core/features/pickQuality";
 import {
   loadEarlyInjuriesForDate,
   buildTeamAliasLookup,
@@ -286,6 +289,7 @@ async function loadActiveModelVersionFromDb() {
 }
 
 let suggestedPlayLedgerAvailableCache: boolean | null = null;
+let suggestedPlayLedgerColumnsEnsured = false;
 type WagerSummary = {
   bets: number;
   settledBets: number;
@@ -682,6 +686,8 @@ export async function GET(req: Request) {
   const maxBetPicksPerGame = Math.max(1, LEDGER_TUNING.maxBetPicksPerGame);
   const allowFallbackOddsForLedger = LEDGER_TUNING.allowFallbackOddsForLedger;
   const fallbackAmericanOdds = LEDGER_TUNING.fallbackAmericanOdds;
+  const calibrationArtifacts = await loadCalibrationArtifacts();
+  const sourceReliabilitySnapshot = await loadSourceReliabilitySnapshot();
   const seasonBetSummary = await getSeasonBetHitSummary(dateStr, season);
   const seasonV2Hits = seasonBetSummary.hits;
   const seasonV2Total = seasonBetSummary.total;
@@ -979,6 +985,10 @@ export async function GET(req: Request) {
     const isFinal = hasCompletedScore(game);
     const gameOutcomeMap = outcomesByGame.get(game.id);
     const gamePlayerCtx = playerContextByGame.get(game.id);
+    const effectiveGamePlayerCtx = gamePlayerCtx ?? {
+      homeTopScorer: null, homeTopRebounder: null, homeTopPlaymaker: null,
+      awayTopScorer: null, awayTopRebounder: null, awayTopPlaymaker: null,
+    };
     const propsForGame = playerPropsByGame.get(game.id) ?? [];
 
     const engineOdds = consensus
@@ -997,14 +1007,13 @@ export async function GET(req: Request) {
       deployedV2Patterns,
       featureBins,
       metaModel: activeMetaModel,
-      gamePlayerContext: gamePlayerCtx ?? {
-        homeTopScorer: null, homeTopRebounder: null, homeTopPlaymaker: null,
-        awayTopScorer: null, awayTopRebounder: null, awayTopPlaymaker: null,
-      },
+      gamePlayerContext: effectiveGamePlayerCtx,
       propsForGame,
       maxBetPicksPerGame,
       fallbackAmericanOdds,
       includeDebugPlays,
+      calibrationArtifacts,
+      sourceReliabilitySnapshot,
       // Ledger refresh (e.g. backfill) should capture all pick types for simulator filtering
       overrideExcludeFamilies: refreshLedger ? [] : undefined,
     });
@@ -1096,6 +1105,14 @@ export async function GET(req: Request) {
     const suggestedBetPicks = engineOutput.suggestedBetPicks.map((p) => ({
       ...p,
       result: evaluateOutcome(p.outcomeType, p.playerTarget),
+      mlInvolved:
+        evaluatePlayerPointsMlVote({
+          outcomeType: p.outcomeType,
+          playerTarget: p.playerTarget,
+          marketPick: p.marketPick ?? null,
+          gameContext: gameEventContext.context as GameContext,
+          gamePlayerCtx: effectiveGamePlayerCtx,
+        }).decision !== "abstain",
     }));
     const suggestedPlays = engineOutput.suggestedPlays.map((p) => ({
       ...p,
@@ -1231,6 +1248,23 @@ async function upsertSuggestedPlayLedger(args: {
       edge: number;
       metaScore: number | null;
       votes: number;
+      mlInvolved?: boolean;
+      rawWinProbability?: number;
+      calibratedWinProbability?: number;
+      impliedMarketProbability?: number | null;
+      edgeVsMarket?: number | null;
+      expectedValueScore?: number | null;
+      marketType?: string;
+      marketSubType?: string | null;
+      selectionSide?: string;
+      lineSnapshot?: number | null;
+      priceSnapshot?: number | null;
+      laneTag?: string;
+      regimeTags?: string[];
+      sourceReliabilityScore?: number | null;
+      uncertaintyScore?: number;
+      uncertaintyPenaltyApplied?: number;
+      adjustedEdgeScore?: number | null;
       result: OutcomeEval | null;
       playerTarget: V2PlayerTarget | null;
       marketPick?: SuggestedMarketPick | null;
@@ -1243,6 +1277,29 @@ async function upsertSuggestedPlayLedger(args: {
     args.fallbackAmericanOdds !== 0
     ? args.fallbackAmericanOdds
     : -110;
+  if (!suggestedPlayLedgerColumnsEnsured) {
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "mlInvolved" boolean NOT NULL DEFAULT FALSE`,
+    );
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "rawWinProbability" double precision`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "calibratedWinProbability" double precision`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "impliedMarketProbability" double precision`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "edgeVsMarket" double precision`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "expectedValueScore" double precision`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "marketType" text`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "marketSubType" text`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "selectionSide" text`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "lineSnapshot" double precision`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "priceSnapshot" double precision`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "laneTag" text`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "regimeTags" text[]`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "sourceReliabilityScore" double precision`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "uncertaintyScore" double precision`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "uncertaintyPenaltyApplied" double precision`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "adjustedEdgeScore" double precision`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "actionabilityVersion" text`);
+    suggestedPlayLedgerColumnsEnsured = true;
+  }
   const valueRows: string[] = [];
   for (const game of args.games) {
     const playsForLedger = game.suggestedBetPicks ?? [];
@@ -1273,9 +1330,15 @@ async function upsertSuggestedPlayLedger(args: {
           `'${sqlEsc(play.outcomeType)}',${sqlStr(play.displayLabel)},${sqlNum(play.playerTarget?.id ?? null)},${sqlStr(targetName)},` +
           `${sqlStr(marketPick?.market ?? null)},${sqlNum(marketPick?.line ?? null)},${sqlNum(priceAmerican)},${sqlNum(marketPick?.impliedProb ?? null)},` +
           `${sqlNum(marketPick?.impliedProb ?? null)},${sqlNum(marketPick?.estimatedProb ?? null)},${sqlNum(marketPick?.edge ?? null)},${sqlNum(marketPick?.ev ?? null)},` +
+          `${sqlNum(play.rawWinProbability ?? null)},${sqlNum(play.calibratedWinProbability ?? null)},${sqlNum(play.impliedMarketProbability ?? null)},` +
+          `${sqlNum(play.edgeVsMarket ?? null)},${sqlNum(play.expectedValueScore ?? null)},${sqlStr(play.marketType ?? null)},${sqlStr(play.marketSubType ?? null)},` +
+          `${sqlStr(play.selectionSide ?? null)},${sqlNum(play.lineSnapshot ?? null)},${sqlNum(play.priceSnapshot ?? null)},${sqlStr(play.laneTag ?? null)},` +
+          `${play.regimeTags?.length ? `'${sqlEsc(`{${play.regimeTags.map((t) => `"${t.replaceAll('"', '\\"')}"`).join(",")}}`)}'::text[]` : "NULL"},` +
+          `${sqlNum(play.sourceReliabilityScore ?? null)},${sqlNum(play.uncertaintyScore ?? null)},${sqlNum(play.uncertaintyPenaltyApplied ?? null)},` +
+          `${sqlNum(play.adjustedEdgeScore ?? null)},'${PICK_QUALITY_TUNING.enableStrictActionabilityGates ? "strict_v1" : "legacy_v1"}',` +
           `NULL,NULL,NULL,NULL,NULL,` +
           `${sqlNum(play.posteriorHitRate)},${sqlNum(play.metaScore)},${sqlNum(play.confidence)},${Math.max(1, play.votes ?? 1)},` +
-          `${sqlNum(stake)},${isActionable ? "TRUE" : "FALSE"},'${settledResult}',${sqlBool(settledHit)},${sqlNum(payout)},${sqlNum(profit)},NOW(),NOW())`,
+          `${sqlNum(stake)},${isActionable ? "TRUE" : "FALSE"},${play.mlInvolved ? "TRUE" : "FALSE"},'${settledResult}',${sqlBool(settledHit)},${sqlNum(payout)},${sqlNum(profit)},NOW(),NOW())`,
       );
     }
   }
@@ -1285,7 +1348,7 @@ async function upsertSuggestedPlayLedger(args: {
   if (valueRows.length === 0) return;
   await prisma.$executeRawUnsafe(
     `INSERT INTO "SuggestedPlayLedger"
-      ("id","date","season","gameId","dedupKey","outcomeType","displayLabel","targetPlayerId","targetPlayerName","market","line","priceAmerican","impliedProb","betImpliedProb","estimatedProb","modelEdge","ev","closePriceAmerican","closeImpliedProb","clvDeltaProb","clvDeltaCents","clvStatus","posteriorHitRate","metaScore","confidence","votes","stake","isActionable","settledResult","settledHit","payout","profit","capturedAt","updatedAt")
+      ("id","date","season","gameId","dedupKey","outcomeType","displayLabel","targetPlayerId","targetPlayerName","market","line","priceAmerican","impliedProb","betImpliedProb","estimatedProb","modelEdge","ev","rawWinProbability","calibratedWinProbability","impliedMarketProbability","edgeVsMarket","expectedValueScore","marketType","marketSubType","selectionSide","lineSnapshot","priceSnapshot","laneTag","regimeTags","sourceReliabilityScore","uncertaintyScore","uncertaintyPenaltyApplied","adjustedEdgeScore","actionabilityVersion","closePriceAmerican","closeImpliedProb","clvDeltaProb","clvDeltaCents","clvStatus","posteriorHitRate","metaScore","confidence","votes","stake","isActionable","mlInvolved","settledResult","settledHit","payout","profit","capturedAt","updatedAt")
      VALUES ${valueRows.join(",")}
      ON CONFLICT ("date","gameId","dedupKey") DO UPDATE SET
        "displayLabel" = EXCLUDED."displayLabel",
@@ -1299,6 +1362,23 @@ async function upsertSuggestedPlayLedger(args: {
        "estimatedProb" = EXCLUDED."estimatedProb",
        "modelEdge" = EXCLUDED."modelEdge",
        "ev" = EXCLUDED."ev",
+      "rawWinProbability" = EXCLUDED."rawWinProbability",
+      "calibratedWinProbability" = EXCLUDED."calibratedWinProbability",
+      "impliedMarketProbability" = EXCLUDED."impliedMarketProbability",
+      "edgeVsMarket" = EXCLUDED."edgeVsMarket",
+      "expectedValueScore" = EXCLUDED."expectedValueScore",
+      "marketType" = EXCLUDED."marketType",
+      "marketSubType" = EXCLUDED."marketSubType",
+      "selectionSide" = EXCLUDED."selectionSide",
+      "lineSnapshot" = EXCLUDED."lineSnapshot",
+      "priceSnapshot" = EXCLUDED."priceSnapshot",
+      "laneTag" = EXCLUDED."laneTag",
+      "regimeTags" = EXCLUDED."regimeTags",
+      "sourceReliabilityScore" = EXCLUDED."sourceReliabilityScore",
+      "uncertaintyScore" = EXCLUDED."uncertaintyScore",
+      "uncertaintyPenaltyApplied" = EXCLUDED."uncertaintyPenaltyApplied",
+      "adjustedEdgeScore" = EXCLUDED."adjustedEdgeScore",
+      "actionabilityVersion" = EXCLUDED."actionabilityVersion",
       "closePriceAmerican" = EXCLUDED."closePriceAmerican",
       "closeImpliedProb" = EXCLUDED."closeImpliedProb",
       "clvDeltaProb" = EXCLUDED."clvDeltaProb",
@@ -1310,6 +1390,7 @@ async function upsertSuggestedPlayLedger(args: {
        "votes" = EXCLUDED."votes",
        "stake" = EXCLUDED."stake",
        "isActionable" = EXCLUDED."isActionable",
+       "mlInvolved" = EXCLUDED."mlInvolved",
        "settledResult" = EXCLUDED."settledResult",
        "settledHit" = EXCLUDED."settledHit",
        "payout" = EXCLUDED."payout",

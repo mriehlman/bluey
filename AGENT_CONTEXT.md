@@ -1,6 +1,6 @@
 # Bluey Agent Context (Rolling)
 
-Last updated: 2026-03-21
+Last updated: 2026-03-22
 Owner: Any agent that changes structure, workflows, or core behavior.
 
 ## Purpose
@@ -107,6 +107,14 @@ Minimum update checklist:
 - 2026-03-21: Promoted canonical predictions to DB system-of-record with deterministic prediction IDs, ranking/aggregation policy versions, persisted rejection diagnostics, and source-time snapshot metadata.
 - 2026-03-21: Added dashboard governance lineage read path (API + UI) for canonical predictions and rejections, including per-prediction version/snapshot inspection with read-only constraints.
 - 2026-03-21: Extended governance lineage with run grouping, compare/diff support, export actions, prominent version chips, and summary-vs-detail payload separation for dashboard performance.
+- 2026-03-21: Added player-points ML governance vote (`player_points_ml_model`) as an additive signal in canonical prediction aggregation, with abstain outside points outcomes and updated contract/policy versions.
+- 2026-03-21: Added isolated game-winner ML experimentation lane (`ml:game-winner`) with leakage-safe pregame feature set, confidence-slice metrics, threshold search, and rolling/filter diagnostics.
+- 2026-03-21: Added isolated game-total O/U ML experimentation lane (`ml:game-total`) with pregame environment/market features, confidence-slice metrics, threshold search, and rolling/filter diagnostics.
+- 2026-03-21: Added totals comparison harness (`ml:game-total:compare`) with locked `totals_benchmark_v1`, controlled add-on variants, stability-first ranking, and replace/keep benchmark decision output.
+- 2026-03-21: Added forward totals paper-trade workflow (`ml:game-total:forward`, `ml:game-total:resolve`, `ml:game-total:forward-report`) with frozen strategy configs, persistent pick contract, duplicate-safe daily generation, resolution from final scores, and forward-only guardrailed recommendations.
+- 2026-03-21: Added overlap/consensus forward analysis command (`ml:game-total:forward-overlap-report`) with unique vs overlap performance splits, pairwise strategy agreement/conflict stats, date filters (`--since`, `--until`), sample guardrails (`--minSample`), and optional JSON output (`--json`).
+- 2026-03-22: Added additive pick-quality framework v1 (market-relative fields, calibration artifacts, uncertainty scoring, source reliability snapshots, lane/regime tags, strict-gate config switch), plus new CLI workflows (`build:prediction-calibration`, `build:source-reliability`, `backfill:pick-quality`, `report:pick-quality`).
+- 2026-03-22: Added dynamic vote weighting v1 behind config (`enableDynamicVoteWeighting`) with centralized source-family normalization/weighting module, family-level anti-domination, disagreement penalty, and additive vote-weight diagnostics on canonical quality context.
 
 ## Quick Start Commands (Current)
 

@@ -33,12 +33,30 @@ import { buildGameContext } from "@bluey/core/features/buildGameContext";
 import { buildGameEvents } from "@bluey/core/features/buildGameEvents";
 import { predictGames, predictPlayers } from "@bluey/core/features/predictGames";
 import { resolvePredictionLogs, reportPredictionAccuracy } from "@bluey/core/features/predictionAccuracy";
+import {
+  backfillPickQualityFields,
+  buildPredictionCalibrators,
+  reportPickQuality,
+  reportVoteWeightingComparison,
+  reportVoteWeightInputAudit,
+  reportVoteWeightingThresholds,
+  runVoteWeightingDual,
+  buildSourceReliabilitySnapshot,
+} from "@bluey/core/features/pickQualityOps";
 import { dailyPicks } from "@bluey/core/features/dailyPicks";
 import { runBacktest, backtestExisting, analyzePattern, quickValidate } from "@bluey/core/backtest/backtest";
 import { analyzeSuggestedPlayLedger } from "@bluey/core/backtest/suggestedPlayLedger";
 import { updateSuggestedPlayClv } from "@bluey/core/backtest/updateClvSnapshots";
 import { backfillSuggestedLedger } from "@bluey/core/backtest/backfillSuggestedLedger";
 import { runPlayerPointsModel } from "@bluey/core/ml/playerPointsModel";
+import { runGameWinnerModel } from "@bluey/core/ml/gameWinnerModel";
+import { runGameTotalModel, runGameTotalCompare } from "@bluey/core/ml/gameTotalModel";
+import {
+  runGameTotalForward,
+  runGameTotalForwardOverlapReport,
+  runGameTotalForwardResolve,
+  runGameTotalForwardReport,
+} from "@bluey/core/ml/gameTotalForward";
 import {
   snapshotModelVersion,
   listModelVersions,
@@ -307,6 +325,42 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     // Step 3: Run predictions
     console.log("\nStep 3/3: Running predictions...\n");
     await predictGames(["--date", dateStr]);
+  },
+
+  "predict:all": async (args) => {
+    const flags = parseFlags(args);
+    const since = flags.since;
+    const until = flags.until;
+    const whereClauses: string[] = [];
+    if (since) whereClauses.push(`date >= '${since}'::date`);
+    if (until) whereClauses.push(`date <= '${until}'::date`);
+    const whereSql = whereClauses.length ? `WHERE ${whereClauses.join(" AND ")}` : "";
+
+    const rows = await prisma.$queryRawUnsafe<Array<{ d: string }>>(
+      `SELECT to_char(date, 'YYYY-MM-DD') AS d
+       FROM "Game"
+       ${whereSql}
+       GROUP BY date
+       ORDER BY date ASC`,
+    );
+    const dates = rows.map((r) => String(r.d)).filter(Boolean);
+    console.log(`\n=== Re-running canonical predictions for ${dates.length} dates ===\n`);
+
+    let ok = 0;
+    let failed = 0;
+    for (let i = 0; i < dates.length; i++) {
+      const d = dates[i]!;
+      console.log(`[${i + 1}/${dates.length}] predictGames --date ${d}`);
+      try {
+        await predictGames(["--date", d]);
+        ok += 1;
+      } catch (err) {
+        failed += 1;
+        console.error(`Failed ${d}:`, (err as Error).message);
+      }
+    }
+
+    console.log(`\n=== predict:all complete | success=${ok} failed=${failed} ===`);
   },
 
   "sync:backfill": async (args) => {
@@ -779,9 +833,54 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   "report:accuracy": async (args) => {
     await reportPredictionAccuracy(args);
   },
+  "build:prediction-calibration": async (args) => {
+    await buildPredictionCalibrators(args);
+  },
+  "build:source-reliability": async (args) => {
+    await buildSourceReliabilitySnapshot(args);
+  },
+  "backfill:pick-quality": async (args) => {
+    await backfillPickQualityFields(args);
+  },
+  "report:pick-quality": async (args) => {
+    await reportPickQuality(args);
+  },
+  "run:vote-weighting-dual": async (args) => {
+    await runVoteWeightingDual(args);
+  },
+  "report:vote-weighting-comparison": async (args) => {
+    await reportVoteWeightingComparison(args);
+  },
+  "report:vote-weighting-thresholds": async (args) => {
+    await reportVoteWeightingThresholds(args);
+  },
+  "report:vote-weight-input-audit": async (args) => {
+    await reportVoteWeightInputAudit(args);
+  },
 
   "ml:player-points": async (args) => {
     await runPlayerPointsModel(args);
+  },
+  "ml:game-winner": async (args) => {
+    await runGameWinnerModel(args);
+  },
+  "ml:game-total": async (args) => {
+    await runGameTotalModel(args);
+  },
+  "ml:game-total:compare": async (args) => {
+    await runGameTotalCompare(args);
+  },
+  "ml:game-total:forward": async (args) => {
+    await runGameTotalForward(args);
+  },
+  "ml:game-total:resolve": async (args) => {
+    await runGameTotalForwardResolve(args);
+  },
+  "ml:game-total:forward-report": async (args) => {
+    await runGameTotalForwardReport(args);
+  },
+  "ml:game-total:forward-overlap-report": async (args) => {
+    await runGameTotalForwardOverlapReport(args);
   },
 
 };

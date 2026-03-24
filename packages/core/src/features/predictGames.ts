@@ -10,7 +10,7 @@ import {
 import { GAME_EVENT_CATALOG } from "./gameEventCatalog";
 import type { GameEventContext } from "./gameEventCatalog";
 import type { GameContext, PlayerGameContext } from "@prisma/client";
-import { LEDGER_TUNING } from "../config/tuning";
+import { LEDGER_TUNING, PICK_QUALITY_TUNING } from "../config/tuning";
 import {
   generateGamePredictions,
   loadLatestFeatureBins,
@@ -21,6 +21,7 @@ import {
 } from "./predictionEngine";
 import { assertPredictionRecord, type PredictionRecord } from "./predictionContract";
 import { loadActiveModelVersion } from "../patterns/modelVersion";
+import { loadCalibrationArtifacts, loadSourceReliabilitySnapshot } from "./pickQuality";
 
 function getSeasonForDate(date: Date): number {
   return date.getMonth() >= 9 ? date.getFullYear() : date.getFullYear() - 1;
@@ -66,6 +67,75 @@ async function ensureCanonicalPredictionTables(): Promise<void> {
     `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "runContext" jsonb`,
   );
   await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "voteWeightingVersion" text`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "rawWinProbability" double precision`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "calibratedWinProbability" double precision`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "impliedMarketProbability" double precision`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "edgeVsMarket" double precision`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "expectedValueScore" double precision`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "marketType" text`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "marketSubType" text`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "selectionSide" text`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "lineSnapshot" double precision`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "priceSnapshot" double precision`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "laneTag" text`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "regimeTags" text[]`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "sourceReliabilityScore" double precision`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "uncertaintyScore" double precision`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "uncertaintyPenaltyApplied" double precision`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "adjustedEdgeScore" double precision`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "weightedSupportScore" double precision`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "weightedOppositionScore" double precision`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "weightedConsensusScore" double precision`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "weightedDisagreementPenalty" double precision`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "voteWeightBreakdown" jsonb`,
+  );
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "CanonicalPrediction" ADD COLUMN IF NOT EXISTS "dominantSourceFamily" text`,
+  );
+  await prisma.$executeRawUnsafe(
     `CREATE INDEX IF NOT EXISTS "CanonicalPrediction_runId_generatedAt_idx"
      ON "CanonicalPrediction" ("runId","generatedAt")`,
   );
@@ -96,15 +166,37 @@ async function persistCanonicalPredictions(input: {
   runContext: Record<string, unknown>;
 }): Promise<void> {
   for (const record of input.records) {
+    const q = record.quality_context;
+    const regimeTagsLiteral = q?.regime_tags?.length
+      ? `{${q.regime_tags.map((t) => `"${t.replaceAll('"', '\\"')}"`).join(",")}}`
+      : null;
     await prisma.$executeRawUnsafe(
       `INSERT INTO "CanonicalPrediction"
-      ("predictionId","runId","runStartedAt","runContext","gameId","market","selection","confidenceScore","edgeEstimate",
+      ("predictionId","runId","runStartedAt","runContext","voteWeightingVersion","gameId","market","selection","confidenceScore","edgeEstimate",
+       "rawWinProbability","calibratedWinProbability","impliedMarketProbability","edgeVsMarket","expectedValueScore",
+       "marketType","marketSubType","selectionSide","lineSnapshot","priceSnapshot","laneTag","regimeTags",
+       "sourceReliabilityScore","uncertaintyScore","uncertaintyPenaltyApplied","adjustedEdgeScore",
+       "weightedSupportScore","weightedOppositionScore","weightedConsensusScore","weightedDisagreementPenalty","voteWeightBreakdown","dominantSourceFamily",
        "predictionContractVersion","rankingPolicyVersion","aggregationPolicyVersion",
        "modelBundleVersion","featureSchemaVersion","featureSnapshotId","featureSnapshotPayload",
        "supportingPatterns","modelVotes","generatedAt","updatedAt")
       VALUES
-      ('${sqlEsc(record.prediction_id)}','${sqlEsc(input.runId)}','${sqlEsc(input.runStartedAtIso)}'::timestamptz,'${sqlEsc(JSON.stringify(input.runContext))}'::jsonb,'${sqlEsc(record.game_id)}','${sqlEsc(record.market)}',
+      ('${sqlEsc(record.prediction_id)}','${sqlEsc(input.runId)}','${sqlEsc(input.runStartedAtIso)}'::timestamptz,'${sqlEsc(JSON.stringify(input.runContext))}'::jsonb,${record.vote_weighting_version ? `'${sqlEsc(record.vote_weighting_version)}'` : "NULL"},'${sqlEsc(record.game_id)}','${sqlEsc(record.market)}',
        '${sqlEsc(record.selection)}',${record.confidence_score},${record.edge_estimate},
+       ${q?.raw_win_probability ?? "NULL"},${q?.calibrated_win_probability ?? "NULL"},${q?.implied_market_probability ?? "NULL"},
+       ${q?.edge_vs_market ?? "NULL"},${q?.expected_value_score ?? "NULL"},
+       ${q?.market_type ? `'${sqlEsc(q.market_type)}'` : "NULL"},
+       ${q?.market_sub_type ? `'${sqlEsc(q.market_sub_type)}'` : "NULL"},
+       ${q?.selection_side ? `'${sqlEsc(q.selection_side)}'` : "NULL"},
+       ${q?.line_snapshot ?? "NULL"},${q?.price_snapshot ?? "NULL"},
+       ${q?.lane_tag ? `'${sqlEsc(q.lane_tag)}'` : "NULL"},
+       ${regimeTagsLiteral ? `'${sqlEsc(regimeTagsLiteral)}'::text[]` : "NULL"},
+       ${q?.source_reliability_score ?? "NULL"},${q?.uncertainty_score ?? "NULL"},
+       ${q?.uncertainty_penalty_applied ?? "NULL"},${q?.adjusted_edge_score ?? "NULL"},
+       ${q?.weighted_support_score ?? "NULL"},${q?.weighted_opposition_score ?? "NULL"},
+       ${q?.weighted_consensus_score ?? "NULL"},${q?.weighted_disagreement_penalty ?? "NULL"},
+       ${q?.vote_weight_breakdown ? `'${sqlEsc(JSON.stringify(q.vote_weight_breakdown))}'::jsonb` : "NULL"},
+       ${q?.dominant_source_family ? `'${sqlEsc(q.dominant_source_family)}'` : "NULL"},
        '${sqlEsc(record.prediction_contract_version)}','${sqlEsc(record.ranking_policy_version)}',
        '${sqlEsc(record.aggregation_policy_version)}','${sqlEsc(record.model_bundle_version)}',
        '${sqlEsc(record.feature_schema_version)}','${sqlEsc(record.feature_snapshot_id)}',
@@ -116,8 +208,31 @@ async function persistCanonicalPredictions(input: {
         "runId" = EXCLUDED."runId",
         "runStartedAt" = EXCLUDED."runStartedAt",
         "runContext" = EXCLUDED."runContext",
+        "voteWeightingVersion" = EXCLUDED."voteWeightingVersion",
         "confidenceScore" = EXCLUDED."confidenceScore",
         "edgeEstimate" = EXCLUDED."edgeEstimate",
+        "rawWinProbability" = EXCLUDED."rawWinProbability",
+        "calibratedWinProbability" = EXCLUDED."calibratedWinProbability",
+        "impliedMarketProbability" = EXCLUDED."impliedMarketProbability",
+        "edgeVsMarket" = EXCLUDED."edgeVsMarket",
+        "expectedValueScore" = EXCLUDED."expectedValueScore",
+        "marketType" = EXCLUDED."marketType",
+        "marketSubType" = EXCLUDED."marketSubType",
+        "selectionSide" = EXCLUDED."selectionSide",
+        "lineSnapshot" = EXCLUDED."lineSnapshot",
+        "priceSnapshot" = EXCLUDED."priceSnapshot",
+        "laneTag" = EXCLUDED."laneTag",
+        "regimeTags" = EXCLUDED."regimeTags",
+        "sourceReliabilityScore" = EXCLUDED."sourceReliabilityScore",
+        "uncertaintyScore" = EXCLUDED."uncertaintyScore",
+        "uncertaintyPenaltyApplied" = EXCLUDED."uncertaintyPenaltyApplied",
+        "adjustedEdgeScore" = EXCLUDED."adjustedEdgeScore",
+        "weightedSupportScore" = EXCLUDED."weightedSupportScore",
+        "weightedOppositionScore" = EXCLUDED."weightedOppositionScore",
+        "weightedConsensusScore" = EXCLUDED."weightedConsensusScore",
+        "weightedDisagreementPenalty" = EXCLUDED."weightedDisagreementPenalty",
+        "voteWeightBreakdown" = EXCLUDED."voteWeightBreakdown",
+        "dominantSourceFamily" = EXCLUDED."dominantSourceFamily",
         "featureSnapshotPayload" = EXCLUDED."featureSnapshotPayload",
         "supportingPatterns" = EXCLUDED."supportingPatterns",
         "modelVotes" = EXCLUDED."modelVotes",
@@ -163,12 +278,24 @@ export async function predictGames(args: string[] = []): Promise<void> {
 
   const targetDate = new Date(dateStr + "T00:00:00Z");
   const season = Number(flags.season) || getSeasonForDate(targetDate);
+  const dynamicVoteWeightingEnabled =
+    flags.dynamicVoteWeighting == null
+      ? undefined
+      : flags.dynamicVoteWeighting === "true";
+  const voteWeightingStrength =
+    flags.voteWeightingStrength == null ? undefined : Number(flags.voteWeightingStrength);
+  const voteWeightingVersion: "legacy" | "weighted_v1" =
+    (dynamicVoteWeightingEnabled ?? PICK_QUALITY_TUNING.enableDynamicVoteWeighting)
+      ? "weighted_v1"
+      : "legacy";
   const runId = crypto.randomUUID();
   const runStartedAtIso = new Date().toISOString();
   const runContext: Record<string, unknown> = {
     date: dateStr,
     season,
     flags,
+    voteWeightingVersion,
+    voteWeightingStrength: voteWeightingStrength ?? PICK_QUALITY_TUNING.voteWeightingStrength,
   };
   const canonicalRecords: PredictionRecord[] = [];
   const rejectionArtifact: Array<{
@@ -239,6 +366,8 @@ export async function predictGames(args: string[] = []): Promise<void> {
     metaModel = await loadMetaModel();
     runContext.modelVersionName = null;
   }
+  const calibrationArtifacts = await loadCalibrationArtifacts();
+  const sourceReliabilitySnapshot = await loadSourceReliabilitySnapshot();
 
   const tokenizedTodayCount = await prisma.gameFeatureToken.count({
     where: { gameId: { in: games.map((g) => g.id) } },
@@ -530,6 +659,11 @@ export async function predictGames(args: string[] = []): Promise<void> {
         maxBetPicksPerGame: Math.max(1, LEDGER_TUNING.maxBetPicksPerGame),
         fallbackAmericanOdds: LEDGER_TUNING.fallbackAmericanOdds,
         modelBundleVersion: modelVersionName ?? undefined,
+        dynamicVoteWeightingEnabled,
+        voteWeightingStrength,
+        voteWeightingVersion,
+        calibrationArtifacts,
+        sourceReliabilitySnapshot,
         sourceTimestamps: {
           oddsTimestampUsed: consensusOdds?.fetchedAt?.toISOString?.() ?? null,
           statsSnapshotCutoff: targetDate.toISOString(),

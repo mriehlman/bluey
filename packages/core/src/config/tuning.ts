@@ -86,6 +86,24 @@ export const PREDICTION_TUNING = {
   excludeFamilies: [] as const,
 } as const;
 
+export const PICK_QUALITY_TUNING = {
+  // Keep legacy behavior unless explicitly enabled.
+  enableStrictActionabilityGates: false,
+  enableDynamicVoteWeighting: false,
+  // Scales separation around neutral vote weights (1.0 = baseline behavior).
+  voteWeightingStrength: 1.0,
+  calibrationMinSample: 40,
+  sourceReliabilityMinSample: 40,
+  uncertaintyPenaltyScale: 0.18,
+  strictGateByFamily: {
+    PLAYER: { minCalibratedEdge: 0.015, maxUncertaintyScore: 0.72 },
+    TOTAL: { minCalibratedEdge: 0.01, maxUncertaintyScore: 0.74 },
+    SPREAD: { minCalibratedEdge: 0.01, maxUncertaintyScore: 0.74 },
+    MONEYLINE: { minCalibratedEdge: 0.012, maxUncertaintyScore: 0.7 },
+    OTHER: { minCalibratedEdge: 0.01, maxUncertaintyScore: 0.75 },
+  },
+} as const;
+
 export const LEDGER_TUNING = {
   stake: 10,
   bankrollStart: 1000,

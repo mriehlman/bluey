@@ -5,6 +5,7 @@ import type { FeatureBinDef } from "../features/v2PregameMatching";
 import type { DeployedPatternV2 } from "../features/v2PregameMatching";
 
 export type ModelVersionSnapshot = {
+  name?: string;
   deployedPatterns: DeployedPatternV2[];
   featureBins: Record<string, FeatureBinDef>;
   metaModel: MetaModel;
@@ -261,6 +262,7 @@ export async function loadActiveModelVersion(): Promise<ModelVersionSnapshot | n
   const tuning = active.tuningConfig as unknown as typeof PREDICTION_TUNING;
 
   return {
+    name: active.name,
     deployedPatterns: patterns,
     featureBins: bins,
     metaModel: meta,

@@ -31,29 +31,32 @@ export async function buildGameEvents(args: string[] = []): Promise<void> {
       console.log(`  Cleared ${deleted.count} existing GameEvent rows`);
     }
 
-    const games = await prisma.game.findMany({
-      where: { season },
-      include: {
-        homeTeam: true,
-        awayTeam: true,
-        context: true,
-        playerContexts: true,
-        playerStats: true,
-        odds: true,
-      },
-      orderBy: { date: "asc" },
-    });
-
-    console.log(`  Found ${games.length} games for season ${season}`);
+    const totalGames = await prisma.game.count({ where: { season } });
+    const batchSize = 100;
+    console.log(`  Found ${totalGames} games for season ${season}`);
 
     let eventCount = 0;
     let gamesWithContext = 0;
 
-    for (let gi = 0; gi < games.length; gi++) {
-      const game = games[gi];
+    for (let offset = 0; offset < totalGames; offset += batchSize) {
+      const games = await prisma.game.findMany({
+        where: { season },
+        include: {
+          homeTeam: true,
+          awayTeam: true,
+          context: true,
+          playerContexts: true,
+          playerStats: true,
+          odds: true,
+        },
+        orderBy: [{ date: "asc" }, { id: "asc" }],
+        skip: offset,
+        take: batchSize,
+      });
+      for (const game of games) {
 
-      if (!game.context) continue;
-      gamesWithContext++;
+        if (!game.context) continue;
+        gamesWithContext++;
 
       const consensusOdds = game.odds.find((o) => o.source === "consensus") ?? game.odds[0] ?? null;
 
@@ -90,24 +93,22 @@ export async function buildGameEvents(args: string[] = []): Promise<void> {
         }
       }
 
-      if (eventBatch.length > 0) {
-        const result = await prisma.gameEvent.createMany({
-          data: eventBatch.map((e) => ({
-            gameId: e.gameId,
-            season: e.season,
-            eventKey: e.eventKey,
-            type: e.type,
-            side: e.side,
-            meta: e.meta as any,
-          })),
-          skipDuplicates: true,
-        });
-        eventCount += result.count;
+        if (eventBatch.length > 0) {
+          const result = await prisma.gameEvent.createMany({
+            data: eventBatch.map((e) => ({
+              gameId: e.gameId,
+              season: e.season,
+              eventKey: e.eventKey,
+              type: e.type,
+              side: e.side,
+              meta: e.meta as any,
+            })),
+            skipDuplicates: true,
+          });
+          eventCount += result.count;
+        }
       }
-
-      if ((gi + 1) % 100 === 0) {
-        console.log(`  Processed ${gi + 1}/${games.length} games (${eventCount} events)`);
-      }
+      console.log(`  Processed ${Math.min(offset + games.length, totalGames)}/${totalGames} games (${eventCount} events)`);
     }
 
     console.log(`\n  Season ${season} complete: ${gamesWithContext} games with context, ${eventCount} GameEvent rows created`);

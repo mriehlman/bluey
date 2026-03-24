@@ -15,8 +15,20 @@ import {
   payoutFromAmerican,
 } from "./productionPickSelection";
 import { scoreMetaModel, isLowSpecificityPattern, type MetaModel, type GameContextSignals } from "../patterns/metaModelCore";
-import { PREDICTION_TUNING } from "../config/tuning";
+import { PICK_QUALITY_TUNING, PREDICTION_TUNING } from "../config/tuning";
 import type { GameContext } from "@prisma/client";
+import {
+  buildPickQualityContext,
+  calibrateProbability,
+  computeSourceReliabilityScore,
+  deriveLaneTag,
+  deriveMarketFamily,
+  marketFamilyFromBetFamily,
+  sourceFamilyFromModelId,
+  type CalibrationArtifact,
+  type SourceReliabilitySnapshot,
+} from "./pickQuality";
+import { computeWeightedVotes, normalizeVoteSourceFromModelId, type SourceReliabilityMap } from "./voteWeighting";
 import {
   AGGREGATION_POLICY_VERSION,
   createFeatureSnapshotId,
@@ -89,6 +101,11 @@ export type SuggestedMarketPick = {
   edge: number;
   ev: number;
   label: string;
+  marketType: string;
+  marketSubType: string | null;
+  selectionSide: "home" | "away" | "over" | "under" | "player_over" | "other";
+  lineSnapshot: number | null;
+  priceSnapshot: number | null;
 };
 
 export type SuggestedPlay = {
@@ -101,6 +118,42 @@ export type SuggestedPlay = {
   votes: number;
   playerTarget: V2PlayerTarget | null;
   marketPick: SuggestedMarketPick | null;
+  rawWinProbability: number;
+  calibratedWinProbability: number;
+  impliedMarketProbability: number | null;
+  edgeVsMarket: number | null;
+  expectedValueScore: number | null;
+  marketType: string;
+  marketSubType: string | null;
+  selectionSide: "home" | "away" | "over" | "under" | "player_over" | "other";
+  lineSnapshot: number | null;
+  priceSnapshot: number | null;
+  laneTag: string;
+  regimeTags: string[];
+  sourceReliabilityScore: number | null;
+  uncertaintyScore: number;
+  uncertaintyPenaltyApplied: number;
+  adjustedEdgeScore: number | null;
+  weightedSupportScore?: number;
+  weightedOppositionScore?: number;
+  weightedConsensusScore?: number;
+  weightedDisagreementPenalty?: number;
+  voteWeightBreakdown?: Array<{
+    modelId: string;
+    sourceFamily: string;
+    decision: "yes" | "no" | "abstain";
+    confidence: number | null;
+    baseWeight?: number;
+    reliabilityWeight?: number;
+    sampleConfidenceWeight?: number;
+    uncertaintyDiscount?: number;
+    laneFitWeight?: number;
+    preStrengthVoteWeight?: number;
+    voteWeightingStrength?: number;
+    finalVoteWeight: number;
+    weightedContribution: number;
+  }>;
+  dominantSourceFamily?: string | null;
 };
 
 type GateStageStats = {
@@ -140,6 +193,12 @@ export type PredictionInput = {
     statsSnapshotCutoff?: string | null;
     injuryLineupCutoff?: string | null;
   };
+  dynamicVoteWeightingEnabled?: boolean;
+  voteWeightingStrength?: number;
+  voteWeightingVersion?: "legacy" | "weighted_v1";
+  calibrationArtifacts?: CalibrationArtifact[];
+  sourceReliabilitySnapshot?: SourceReliabilitySnapshot | null;
+  strictActionabilityGatesEnabled?: boolean;
 };
 
 export type ModelPick = {
@@ -152,6 +211,15 @@ export type ModelPick = {
   agreementCount: number;
   playerTarget: V2PlayerTarget | null;
   marketPick: SuggestedMarketPick | null;
+  rawWinProbability: number;
+  calibratedWinProbability: number;
+  impliedMarketProbability: number | null;
+  edgeVsMarket: number | null;
+  expectedValueScore: number | null;
+  laneTag: string;
+  uncertaintyScore: number;
+  adjustedEdgeScore: number | null;
+  weightedConsensusScore?: number;
 };
 
 export type PredictionOutput = {
@@ -478,6 +546,11 @@ function selectBestMarketBackedPick(args: {
       edge: est - implied,
       ev,
       label: labelForMarketPick(baseOutcome === "HOME_WIN" ? "Home" : "Away", market, 0, price),
+      marketType: "moneyline",
+      marketSubType: market,
+      selectionSide: baseOutcome === "HOME_WIN" ? "home" : "away",
+      lineSnapshot: 0,
+      priceSnapshot: price,
     };
   }
 
@@ -516,6 +589,16 @@ function selectBestMarketBackedPick(args: {
       edge: est - implied,
       ev,
       label: `${baseOutcome.replaceAll("_", " ")} @ ${price > 0 ? `+${price}` : `${price}`}`,
+      marketType: "spread",
+      marketSubType: market,
+      selectionSide:
+        baseOutcome === "HOME_COVERED"
+          ? "home"
+          : baseOutcome === "AWAY_COVERED"
+            ? "away"
+            : "other",
+      lineSnapshot: spread,
+      priceSnapshot: price,
     };
   }
 
@@ -547,6 +630,11 @@ function selectBestMarketBackedPick(args: {
       edge: est - implied,
       ev,
       label: `${market === "total_under" ? "Under" : "Over"} ${total} @ ${price > 0 ? `+${price}` : `${price}`}`,
+      marketType: "total",
+      marketSubType: market,
+      selectionSide: market === "total_under" ? "under" : "over",
+      lineSnapshot: total,
+      priceSnapshot: price,
     };
   }
 
@@ -613,6 +701,11 @@ function selectBestMarketBackedPick(args: {
           c.line ?? 0,
           c.overPrice ?? 0,
         ),
+        marketType: "player_prop",
+        marketSubType: c.market,
+        selectionSide: "player_over",
+        lineSnapshot: c.line ?? 0,
+        priceSnapshot: c.overPrice ?? 0,
       };
     }
   }
@@ -661,7 +754,139 @@ function clamp01(n: number): number {
   return Math.max(0, Math.min(1, n));
 }
 
+function buildVoteReliabilityMap(input: SourceReliabilitySnapshot | null): SourceReliabilityMap {
+  const map: SourceReliabilityMap = {};
+  if (!input) return map;
+  for (const row of input.rows) {
+    const rawSourceFamily = String(row.sourceFamily ?? "").trim();
+    const sf = rawSourceFamily ? normalizeVoteSourceFromModelId(rawSourceFamily) : "";
+    const mf = String(row.marketFamily ?? "global").trim() || "global";
+    const laneTag = row.laneTag ?? null;
+    if (!sf) continue;
+    map[`${sf}::${mf}`] = {
+      hitRate: Number(row.hitRate),
+      sampleSize: Number(row.sampleSize),
+      laneKey: laneTag ?? undefined,
+    };
+    if (laneTag) {
+      map[`${sf}::${laneTag}`] = {
+        hitRate: Number(row.hitRate),
+        sampleSize: Number(row.sampleSize),
+        laneKey: laneTag,
+      };
+    }
+  }
+  return map;
+}
+
+function parsePlayerPointsThreshold(outcomeType: string): number | null {
+  const base = outcomeType.replace(/:.*$/, "");
+  if (
+    base === "PLAYER_30_PLUS" ||
+    base === "HOME_TOP_SCORER_30_PLUS" ||
+    base === "AWAY_TOP_SCORER_30_PLUS"
+  ) return 30;
+  if (base === "PLAYER_40_PLUS") return 40;
+  if (base === "HOME_TOP_SCORER_25_PLUS" || base === "AWAY_TOP_SCORER_25_PLUS") return 25;
+  return null;
+}
+
+function inferPlayerSide(args: {
+  playerId: number;
+  gamePlayerCtx: GamePlayerContext;
+}): "home" | "away" | null {
+  const { playerId, gamePlayerCtx } = args;
+  const homeIds = [
+    gamePlayerCtx.homeTopScorer?.id,
+    gamePlayerCtx.homeTopRebounder?.id,
+    gamePlayerCtx.homeTopPlaymaker?.id,
+  ];
+  if (homeIds.includes(playerId)) return "home";
+  const awayIds = [
+    gamePlayerCtx.awayTopScorer?.id,
+    gamePlayerCtx.awayTopRebounder?.id,
+    gamePlayerCtx.awayTopPlaymaker?.id,
+  ];
+  if (awayIds.includes(playerId)) return "away";
+  return null;
+}
+
+function buildPlayerPointsMlVote(args: {
+  outcomeType: string;
+  playerTarget: V2PlayerTarget | null;
+  marketPick: SuggestedMarketPick | null;
+  gameContext: GameContext;
+  gamePlayerCtx: GamePlayerContext;
+}): ModelVote {
+  const threshold = parsePlayerPointsThreshold(args.outcomeType);
+  if (threshold == null) {
+    return { model_id: "player_points_ml_model", decision: "abstain", confidence: null };
+  }
+  if (!args.playerTarget || args.playerTarget.stat !== "ppg") {
+    return { model_id: "player_points_ml_model", decision: "abstain", confidence: null };
+  }
+
+  const side = inferPlayerSide({ playerId: args.playerTarget.id, gamePlayerCtx: args.gamePlayerCtx });
+  const lineupCertainty = side === "home"
+    ? args.gameContext.homeLineupCertainty
+    : side === "away"
+      ? args.gameContext.awayLineupCertainty
+      : null;
+  const lateScratchRisk = side === "home"
+    ? args.gameContext.homeLateScratchRisk
+    : side === "away"
+      ? args.gameContext.awayLateScratchRisk
+      : null;
+  const offeredThreshold = args.marketPick?.line != null ? Math.floor(args.marketPick.line) + 1 : null;
+  const projectedPoints = args.playerTarget.statValue;
+
+  // Distilled signal from the standalone points model lane: edge vs threshold first,
+  // then adjust for market line and lineup volatility.
+  let probability = 0.5 + (projectedPoints - threshold) * 0.07;
+  if (offeredThreshold != null) {
+    probability += (threshold - offeredThreshold) * 0.03;
+  }
+  if (lineupCertainty != null) {
+    probability += (lineupCertainty - 0.75) * 0.2;
+  }
+  if (lateScratchRisk != null) {
+    probability -= lateScratchRisk * 0.25;
+  }
+  probability = clamp01(Math.max(0.05, Math.min(0.95, probability)));
+
+  if (probability >= 0.53) {
+    return {
+      model_id: "player_points_ml_model",
+      decision: "yes",
+      confidence: clamp01(0.5 + (probability - 0.5)),
+    };
+  }
+  if (probability <= 0.47) {
+    return {
+      model_id: "player_points_ml_model",
+      decision: "no",
+      confidence: clamp01(0.5 + (0.5 - probability)),
+    };
+  }
+  return { model_id: "player_points_ml_model", decision: "abstain", confidence: null };
+}
+
+export function evaluatePlayerPointsMlVote(args: {
+  outcomeType: string;
+  playerTarget: V2PlayerTarget | null;
+  marketPick: SuggestedMarketPick | null;
+  gameContext: GameContext;
+  gamePlayerCtx: GamePlayerContext;
+}): ModelVote {
+  return buildPlayerPointsMlVote(args);
+}
+
 function buildModelVotes(args: {
+  outcomeType: string;
+  playerTarget: V2PlayerTarget | null;
+  marketPick: SuggestedMarketPick | null;
+  gameContext: GameContext;
+  gamePlayerCtx: GamePlayerContext;
   confidence: number;
   posteriorHitRate: number;
   modelProbability: number;
@@ -695,6 +920,13 @@ function buildModelVotes(args: {
       decision: args.confidence >= 0.5 ? "yes" : "no",
       confidence: clamp01(args.confidence),
     },
+    player_points_ml_model: buildPlayerPointsMlVote({
+      outcomeType: args.outcomeType,
+      playerTarget: args.playerTarget,
+      marketPick: args.marketPick,
+      gameContext: args.gameContext,
+      gamePlayerCtx: args.gamePlayerCtx,
+    }),
   };
   const votes: ModelVote[] = REQUIRED_MODEL_VOTE_IDS.map((id) => voteById[id]);
   return votes;
@@ -704,6 +936,19 @@ function aggregateVotes(votes: ModelVote[]): {
   pass: boolean;
   confidence: number;
   reason: string | null;
+  weightedSupportScore?: number;
+  weightedOppositionScore?: number;
+  weightedConsensusScore?: number;
+  weightedDisagreementPenalty?: number;
+  voteWeightBreakdown?: Array<{
+    modelId: string;
+    sourceFamily: string;
+    decision: "yes" | "no" | "abstain";
+    confidence: number | null;
+    finalVoteWeight: number;
+    weightedContribution: number;
+  }>;
+  dominantSourceFamily?: string | null;
 } {
   const activeVotes = votes.filter((vote) => vote.decision !== "abstain");
   const abstains = votes.length - activeVotes.length;
@@ -730,6 +975,107 @@ function aggregateVotes(votes: ModelVote[]): {
   };
 }
 
+function aggregateVotesDynamic(args: {
+  votes: ModelVote[];
+  laneTag: string;
+  regimeTags: string[];
+  uncertaintyScore: number;
+  sourceReliabilityMap: SourceReliabilityMap;
+  voteWeightingStrength: number;
+}): {
+  pass: boolean;
+  confidence: number;
+  reason: string | null;
+  weightedSupportScore: number;
+  weightedOppositionScore: number;
+  weightedConsensusScore: number;
+  weightedDisagreementPenalty: number;
+  voteWeightBreakdown: Array<{
+    modelId: string;
+    sourceFamily: string;
+    decision: "yes" | "no" | "abstain";
+    confidence: number | null;
+    baseWeight: number;
+    reliabilityWeight: number;
+    sampleConfidenceWeight: number;
+    uncertaintyDiscount: number;
+    laneFitWeight: number;
+    preStrengthVoteWeight: number;
+    voteWeightingStrength: number;
+    finalVoteWeight: number;
+    weightedContribution: number;
+  }>;
+  dominantSourceFamily: string | null;
+} {
+  const activeVotes = args.votes.filter((vote) => vote.decision !== "abstain");
+  const abstains = args.votes.length - activeVotes.length;
+  if (activeVotes.length < 2) {
+    return {
+      pass: false,
+      confidence: 0,
+      reason: "insufficient_non_abstain_votes",
+      weightedSupportScore: 0,
+      weightedOppositionScore: 0,
+      weightedConsensusScore: 0,
+      weightedDisagreementPenalty: 0,
+      voteWeightBreakdown: [],
+      dominantSourceFamily: null,
+    };
+  }
+  const highConfidenceNo = activeVotes.some(
+    (vote) => vote.decision === "no" && (vote.confidence ?? 0) >= 0.75,
+  );
+  if (highConfidenceNo) {
+    return {
+      pass: false,
+      confidence: 0,
+      reason: "high_confidence_no_veto",
+      weightedSupportScore: 0,
+      weightedOppositionScore: 0,
+      weightedConsensusScore: 0,
+      weightedDisagreementPenalty: 0,
+      voteWeightBreakdown: [],
+      dominantSourceFamily: null,
+    };
+  }
+  const weighted = computeWeightedVotes({
+    votes: args.votes,
+    laneTag: args.laneTag,
+    regimeTags: args.regimeTags,
+    uncertaintyScore: args.uncertaintyScore,
+    sourceReliabilityMap: args.sourceReliabilityMap,
+    sampleThreshold: PICK_QUALITY_TUNING.sourceReliabilityMinSample,
+    voteWeightingStrength: args.voteWeightingStrength,
+  });
+  const abstainPenalty = args.votes.length > 0 ? (abstains / args.votes.length) * 0.1 : 0;
+  const confidence = clamp01(weighted.weightedConsensusScore - abstainPenalty);
+  return {
+    pass: confidence >= 0.55,
+    confidence,
+    reason: confidence >= 0.55 ? null : "confidence_below_aggregation_threshold",
+    weightedSupportScore: weighted.weightedSupportScore,
+    weightedOppositionScore: weighted.weightedOppositionScore,
+    weightedConsensusScore: weighted.weightedConsensusScore,
+    weightedDisagreementPenalty: weighted.weightedDisagreementPenalty,
+    voteWeightBreakdown: weighted.voteWeightBreakdown.map((r) => ({
+      modelId: r.modelId,
+      sourceFamily: r.sourceFamily,
+      decision: r.decision,
+      confidence: r.confidence,
+      baseWeight: r.baseWeight,
+      reliabilityWeight: r.reliabilityWeight,
+      sampleConfidenceWeight: r.sampleConfidenceWeight,
+      uncertaintyDiscount: r.uncertaintyDiscount,
+      laneFitWeight: r.laneFitWeight,
+      preStrengthVoteWeight: r.preStrengthVoteWeight,
+      voteWeightingStrength: r.voteWeightingStrength,
+      finalVoteWeight: r.finalVoteWeight,
+      weightedContribution: r.weightedContribution,
+    })),
+    dominantSourceFamily: weighted.dominantSourceFamily,
+  };
+}
+
 // ── Main engine ─────────────────────────────────────────────────────────────────
 
 export function generateGamePredictions(input: PredictionInput): PredictionOutput {
@@ -749,9 +1095,16 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
     predictionGeneratedAtIso,
     modelBundleVersion,
     sourceTimestamps,
+    dynamicVoteWeightingEnabled = PICK_QUALITY_TUNING.enableDynamicVoteWeighting,
+    voteWeightingStrength = PICK_QUALITY_TUNING.voteWeightingStrength,
+    voteWeightingVersion = (dynamicVoteWeightingEnabled ? "weighted_v1" : "legacy"),
+    calibrationArtifacts = [],
+    sourceReliabilitySnapshot = null,
+    strictActionabilityGatesEnabled = PICK_QUALITY_TUNING.enableStrictActionabilityGates,
   } = input;
 
   const gateDiagnostics = includeDebugPlays ? newGateDiagnostics() : undefined;
+  const voteReliabilityMap = buildVoteReliabilityMap(sourceReliabilitySnapshot);
 
   const gameCtxSignals: GameContextSignals = {
     restAdvantage: (gameContext.homeRestDays ?? 1) - (gameContext.awayRestDays ?? 1),
@@ -891,6 +1244,46 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
         gameOdds: odds,
         defaultMarketPrice: fallbackAmericanOdds,
       });
+      const laneTag = deriveLaneTag(r.outcomeType, marketPick?.market ?? null);
+      const marketFamily = deriveMarketFamily(marketPick?.marketType ?? "other", r.outcomeType);
+      const calibrated = calibrateProbability({
+        rawProbability: modelProbability,
+        laneTag,
+        marketFamily,
+        artifacts: calibrationArtifacts,
+        minSample: PICK_QUALITY_TUNING.calibrationMinSample,
+      });
+      const sourceFamilies = [
+        "pattern_logic",
+        "aggregation_vote",
+        "confidence_vote",
+        ...(metaScore != null ? ["meta_model"] : []),
+        ...(parsePlayerPointsThreshold(r.outcomeType) != null ? ["ml_vote"] : []),
+      ];
+      const sourceReliabilityScore = computeSourceReliabilityScore({
+        sourceFamilies,
+        marketFamily,
+        snapshot: sourceReliabilitySnapshot,
+        minSample: PICK_QUALITY_TUNING.sourceReliabilityMinSample,
+      });
+      const activeVotesProxy = 3 + (metaScore != null ? 1 : 0) + (parsePlayerPointsThreshold(r.outcomeType) != null ? 1 : 0);
+      const yesVotesProxy = [r.bestPosterior, modelProbability, confidence, metaScore ?? 0.5].filter((p) => p >= 0.5).length;
+      const quality = buildPickQualityContext({
+        outcomeType: r.outcomeType,
+        market: marketPick?.market ?? null,
+        marketSubType: marketPick?.marketSubType ?? null,
+        rawWinProbability: modelProbability,
+        calibratedWinProbability: calibrated.calibratedProbability,
+        marketPriceAmerican: marketPick?.overPrice ?? null,
+        lineSnapshot: marketPick?.lineSnapshot ?? marketPick?.line ?? null,
+        gameContext,
+        season,
+        sourceReliabilityScore,
+        supportCount: r.bestN,
+        activeVotes: activeVotesProxy,
+        yesVotes: yesVotesProxy,
+        uncertaintyPenaltyScale: PICK_QUALITY_TUNING.uncertaintyPenaltyScale,
+      });
       const outcomeLabel = r.outcomeType.replace(/:.*$/, "").replaceAll("_", " ");
       const targetLabel = r.playerTarget ? ` (${r.playerTarget.name})` : "";
       return {
@@ -906,6 +1299,22 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
         playerTarget: r.playerTarget,
         marketPick,
         supportingPatterns: [...r.supportingPatternIds],
+        rawWinProbability: quality.rawWinProbability,
+        calibratedWinProbability: quality.calibratedWinProbability,
+        impliedMarketProbability: quality.impliedMarketProbability,
+        edgeVsMarket: quality.edgeVsMarket,
+        expectedValueScore: quality.expectedValueScore,
+        marketType: quality.marketType,
+        marketSubType: quality.marketSubType,
+        selectionSide: quality.selectionSide,
+        lineSnapshot: quality.lineSnapshot,
+        priceSnapshot: quality.priceSnapshot,
+        laneTag: quality.laneTag,
+        regimeTags: quality.regimeTags,
+        sourceReliabilityScore: quality.sourceReliabilityScore,
+        uncertaintyScore: quality.uncertaintyScore,
+        uncertaintyPenaltyApplied: quality.uncertaintyPenaltyApplied,
+        adjustedEdgeScore: quality.adjustedEdgeScore,
       };
     })
     .sort(
@@ -929,6 +1338,14 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
       agreementCount: p.agreementCount,
       playerTarget: p.playerTarget,
       marketPick: p.marketPick,
+      rawWinProbability: p.rawWinProbability,
+      calibratedWinProbability: p.calibratedWinProbability,
+      impliedMarketProbability: p.impliedMarketProbability,
+      edgeVsMarket: p.edgeVsMarket,
+      expectedValueScore: p.expectedValueScore,
+      laneTag: p.laneTag,
+      uncertaintyScore: p.uncertaintyScore,
+      adjustedEdgeScore: p.adjustedEdgeScore,
     }));
 
   // Bettable path: filter to actionable outcomes for market-based picks
@@ -965,18 +1382,36 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
       : rankedSuggestedPlays;
 
   const qualitySuggestedPlays = familyFilteredPlays.filter((p) => {
+    const family = betFamilyForOutcome(p.outcomeType);
+    const strictCfg = PICK_QUALITY_TUNING.strictGateByFamily[family];
     const evalResult = evaluateSuggestedPlayQualityGate({
       ...p,
       requireMarketLine: false,
+      strictGateEnabled: strictActionabilityGatesEnabled,
+      calibratedWinProbability: p.calibratedWinProbability,
+      impliedMarketProbability: p.impliedMarketProbability,
+      edgeVsMarket: p.adjustedEdgeScore ?? p.edgeVsMarket,
+      uncertaintyScore: p.uncertaintyScore,
+      strictMinCalibratedEdge: strictCfg.minCalibratedEdge,
+      strictMaxUncertaintyScore: strictCfg.maxUncertaintyScore,
     });
     if (gateDiagnostics) recordGateEval(gateDiagnostics.quality, evalResult);
     return evalResult.pass;
   });
 
   const bettableSuggestedPlays = qualitySuggestedPlays.filter((p) => {
+    const family = betFamilyForOutcome(p.outcomeType);
+    const strictCfg = PICK_QUALITY_TUNING.strictGateByFamily[family];
     const evalResult = evaluateSuggestedPlayQualityGate({
       ...p,
       requireMarketLine: true,
+      strictGateEnabled: strictActionabilityGatesEnabled,
+      calibratedWinProbability: p.calibratedWinProbability,
+      impliedMarketProbability: p.impliedMarketProbability,
+      edgeVsMarket: p.adjustedEdgeScore ?? p.edgeVsMarket,
+      uncertaintyScore: p.uncertaintyScore,
+      strictMinCalibratedEdge: strictCfg.minCalibratedEdge,
+      strictMaxUncertaintyScore: strictCfg.maxUncertaintyScore,
     });
     if (gateDiagnostics) recordGateEval(gateDiagnostics.bettable, evalResult);
     return evalResult.pass;
@@ -998,13 +1433,34 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
     .map((p) => {
       const market = inferPredictionMarket(p.outcomeType, p.marketPick);
       const modelVotes = buildModelVotes({
+        outcomeType: p.outcomeType,
+        playerTarget: p.playerTarget,
+        marketPick: p.marketPick,
+        gameContext,
+        gamePlayerCtx,
         confidence: p.confidence,
         posteriorHitRate: p.posteriorHitRate,
         modelProbability: p.modelProbability,
         metaScore: p.metaScore,
       });
-      const aggregation = aggregateVotes(modelVotes);
+      const aggregation = dynamicVoteWeightingEnabled
+        ? aggregateVotesDynamic({
+            votes: modelVotes,
+            laneTag: p.laneTag,
+            regimeTags: p.regimeTags,
+            uncertaintyScore: p.uncertaintyScore,
+            sourceReliabilityMap: voteReliabilityMap,
+            voteWeightingStrength,
+          })
+        : aggregateVotes(modelVotes);
       if (!aggregation.pass) return null;
+      const sourceFamilies = modelVotes.map((v) => sourceFamilyFromModelId(v.model_id));
+      const sourceReliabilityScore = computeSourceReliabilityScore({
+        sourceFamilies,
+        marketFamily: marketFamilyFromBetFamily(betFamilyForOutcome(p.outcomeType)),
+        snapshot: sourceReliabilitySnapshot,
+        minSample: PICK_QUALITY_TUNING.sourceReliabilityMinSample,
+      });
       return {
         prediction_id: createPredictionId({
           gameId: gameContext.gameId,
@@ -1015,6 +1471,7 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
           rankingPolicyVersion: RANKING_POLICY_VERSION,
           aggregationPolicyVersion: AGGREGATION_POLICY_VERSION,
           featureSnapshotId,
+          voteWeightingVersion,
         }),
         game_id: gameContext.gameId,
         market,
@@ -1030,6 +1487,45 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
         feature_schema_version: FEATURE_SCHEMA_VERSION,
         feature_snapshot_id: featureSnapshotId,
         feature_snapshot_payload: featureSnapshotPayload,
+        vote_weighting_version: voteWeightingVersion,
+        quality_context: {
+          raw_win_probability: p.rawWinProbability,
+          calibrated_win_probability: p.calibratedWinProbability,
+          implied_market_probability: p.impliedMarketProbability,
+          edge_vs_market: p.edgeVsMarket,
+          expected_value_score: p.expectedValueScore,
+          market_type: p.marketType,
+          market_sub_type: p.marketSubType,
+          selection_side: p.selectionSide,
+          line_snapshot: p.lineSnapshot,
+          price_snapshot: p.priceSnapshot,
+          lane_tag: p.laneTag,
+          regime_tags: p.regimeTags,
+          source_reliability_score: sourceReliabilityScore,
+          uncertainty_score: p.uncertaintyScore,
+          uncertainty_penalty_applied: p.uncertaintyPenaltyApplied,
+          adjusted_edge_score: p.adjustedEdgeScore,
+          weighted_support_score: aggregation.weightedSupportScore,
+          weighted_opposition_score: aggregation.weightedOppositionScore,
+          weighted_consensus_score: aggregation.weightedConsensusScore,
+          weighted_disagreement_penalty: aggregation.weightedDisagreementPenalty,
+          vote_weight_breakdown: aggregation.voteWeightBreakdown?.map((row) => ({
+            model_id: row.modelId,
+            source_family: row.sourceFamily,
+            decision: row.decision,
+            confidence: row.confidence,
+            base_weight: row.baseWeight,
+            reliability_weight: row.reliabilityWeight,
+            sample_confidence_weight: row.sampleConfidenceWeight,
+            uncertainty_discount: row.uncertaintyDiscount,
+            lane_fit_weight: row.laneFitWeight,
+            pre_strength_vote_weight: row.preStrengthVoteWeight,
+            vote_weighting_strength: row.voteWeightingStrength,
+            final_vote_weight: row.finalVoteWeight,
+            weighted_contribution: row.weightedContribution,
+          })),
+          dominant_source_family: aggregation.dominantSourceFamily ?? null,
+        },
         generated_at: generatedAt,
       };
     })

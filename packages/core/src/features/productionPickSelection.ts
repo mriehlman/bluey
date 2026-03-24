@@ -16,7 +16,10 @@ export type GateRejectReason =
   | "ev_below_min"
   | "ev_too_negative"
   | "edge_too_low"
-  | "odds_too_negative";
+  | "odds_too_negative"
+  | "calibrated_edge_below_min"
+  | "uncertainty_above_max"
+  | "missing_market_snapshot";
 
 function parseTotalThresholdOutcome(
   outcomeType: string,
@@ -145,6 +148,13 @@ export function evaluateSuggestedPlayQualityGate(play: {
   playerTarget?: { stat: "ppg" | "rpg" | "apg"; statValue: number } | null;
   marketPick?: SuggestedMarketPickLike | null;
   requireMarketLine?: boolean;
+  strictGateEnabled?: boolean;
+  calibratedWinProbability?: number | null;
+  impliedMarketProbability?: number | null;
+  edgeVsMarket?: number | null;
+  uncertaintyScore?: number | null;
+  strictMinCalibratedEdge?: number | null;
+  strictMaxUncertaintyScore?: number | null;
 }): { pass: boolean; reason?: GateRejectReason } {
   const family = betFamilyForOutcome(play.outcomeType);
   const gates = gateThresholdsForFamily(family);
@@ -170,6 +180,22 @@ export function evaluateSuggestedPlayQualityGate(play: {
     if (play.marketPick.ev < -0.01) return { pass: false, reason: "ev_too_negative" };
     if (play.marketPick.overPrice < PREDICTION_TUNING.maxNegativeAmericanOdds) {
       return { pass: false, reason: "odds_too_negative" };
+    }
+  }
+
+  if (play.strictGateEnabled) {
+    if (play.impliedMarketProbability == null && requireMarketLine) {
+      return { pass: false, reason: "missing_market_snapshot" };
+    }
+    if (play.strictMinCalibratedEdge != null && play.edgeVsMarket != null) {
+      if (play.edgeVsMarket < play.strictMinCalibratedEdge) {
+        return { pass: false, reason: "calibrated_edge_below_min" };
+      }
+    }
+    if (play.strictMaxUncertaintyScore != null && play.uncertaintyScore != null) {
+      if (play.uncertaintyScore > play.strictMaxUncertaintyScore) {
+        return { pass: false, reason: "uncertainty_above_max" };
+      }
     }
   }
   return { pass: true };

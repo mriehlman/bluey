@@ -5,16 +5,17 @@ export type PredictionMarket =
   | "player_prop"
   | "other";
 
-export const PREDICTION_CONTRACT_VERSION = "1.1.0";
+export const PREDICTION_CONTRACT_VERSION = "1.3.0";
 export const FEATURE_SCHEMA_VERSION = "v1";
 export const DEFAULT_MODEL_BUNDLE_VERSION = "unversioned";
 export const RANKING_POLICY_VERSION = "rank_v1";
-export const AGGREGATION_POLICY_VERSION = "agg_v1";
+export const AGGREGATION_POLICY_VERSION = "agg_v2";
 export const REQUIRED_MODEL_VOTE_IDS = [
   "pattern_match_model",
   "aggregation_model",
   "meta_model",
   "confidence_model",
+  "player_points_ml_model",
 ] as const;
 
 export type ModelVoteDecision = "yes" | "no" | "abstain";
@@ -53,6 +54,45 @@ export type PredictionRecord = {
   feature_schema_version: string;
   feature_snapshot_id: string;
   feature_snapshot_payload: FeatureSnapshotPayload;
+  vote_weighting_version?: "legacy" | "weighted_v1";
+  quality_context?: {
+    raw_win_probability: number;
+    calibrated_win_probability: number;
+    implied_market_probability: number | null;
+    edge_vs_market: number | null;
+    expected_value_score: number | null;
+    market_type: string;
+    market_sub_type: string | null;
+    selection_side: string;
+    line_snapshot: number | null;
+    price_snapshot: number | null;
+    lane_tag: string;
+    regime_tags: string[];
+    source_reliability_score: number | null;
+    uncertainty_score: number;
+    uncertainty_penalty_applied: number;
+    adjusted_edge_score: number | null;
+    weighted_support_score?: number;
+    weighted_opposition_score?: number;
+    weighted_consensus_score?: number;
+    weighted_disagreement_penalty?: number;
+    vote_weight_breakdown?: Array<{
+      model_id: string;
+      source_family: string;
+      decision: string;
+      confidence: number | null;
+      base_weight?: number;
+      reliability_weight?: number;
+      sample_confidence_weight?: number;
+      uncertainty_discount?: number;
+      lane_fit_weight?: number;
+      pre_strength_vote_weight?: number;
+      vote_weighting_strength?: number;
+      final_vote_weight: number;
+      weighted_contribution: number;
+    }>;
+    dominant_source_family?: string | null;
+  };
   generated_at: string;
 };
 
@@ -105,8 +145,9 @@ export function createPredictionId(input: {
   rankingPolicyVersion: string;
   aggregationPolicyVersion: string;
   featureSnapshotId: string;
+  voteWeightingVersion?: "legacy" | "weighted_v1";
 }): string {
-  const payload = [
+  const core = [
     input.gameId,
     input.market,
     input.selection,
@@ -116,6 +157,7 @@ export function createPredictionId(input: {
     input.aggregationPolicyVersion,
     input.featureSnapshotId,
   ].join("|");
+  const payload = input.voteWeightingVersion ? `${core}|vw:${input.voteWeightingVersion}` : core;
   return `pred_${hashString(payload)}`;
 }
 

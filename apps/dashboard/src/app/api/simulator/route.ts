@@ -10,23 +10,81 @@ interface LedgerRow {
   posteriorHitRate: number;
   metaScore: number | null;
   settledHit: boolean;
+  mlInvolved: boolean;
   homeCode: string | null;
   awayCode: string | null;
 }
 
-export async function GET() {
-  const picks = await prisma.$queryRaw<LedgerRow[]>`
+function sqlEsc(value: string): string {
+  return value.replaceAll("'", "''");
+}
+
+export async function GET(req: Request) {
+  const url = new URL(req.url);
+  const modelVersion = url.searchParams.get("modelVersion") ?? "all";
+  const modelVersionFilter =
+    modelVersion === "all"
+      ? ""
+      : modelVersion === "live"
+        ? `AND COALESCE(cp."runContext"->>'modelVersionName', 'live') = 'live'`
+        : `AND cp."runContext"->>'modelVersionName' = '${sqlEsc(modelVersion)}'`;
+
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "mlInvolved" boolean NOT NULL DEFAULT FALSE`,
+  );
+  const picks = await prisma.$queryRawUnsafe<LedgerRow[]>(
+    `
+    WITH latest_run_per_date AS (
+      SELECT DISTINCT ON (g."date"::date)
+        g."date"::date AS "gameDate",
+        cp."runId" AS "runId"
+      FROM "CanonicalPrediction" cp
+      JOIN "Game" g ON g."id" = cp."gameId"
+      WHERE cp."runId" IS NOT NULL
+        ${modelVersionFilter}
+      ORDER BY g."date"::date, cp."runStartedAt" DESC NULLS LAST, cp."generatedAt" DESC
+    ),
+    canonical_latest AS (
+      SELECT
+        g."date"::date AS "gameDate",
+        g."season" AS "season",
+        cp."gameId" AS "gameId",
+        cp."selection" AS "outcomeType"
+      FROM "CanonicalPrediction" cp
+      JOIN "Game" g ON g."id" = cp."gameId"
+      JOIN latest_run_per_date lr
+        ON lr."gameDate" = g."date"::date
+       AND lr."runId" = cp."runId"
+    )
     SELECT
-      s."date", s."season", s."outcomeType", s."displayLabel", s."priceAmerican",
-      s."posteriorHitRate", s."metaScore", s."settledHit",
-      ht."code" as "homeCode", at2."code" as "awayCode"
-    FROM "SuggestedPlayLedger" s
-    JOIN "Game" g ON g."id" = s."gameId"
+      s."date",
+      cl."season" AS "season",
+      s."outcomeType",
+      s."displayLabel",
+      s."priceAmerican",
+      s."posteriorHitRate",
+      s."metaScore",
+      s."settledHit",
+      COALESCE(s."mlInvolved", FALSE) as "mlInvolved",
+      ht."code" as "homeCode",
+      at2."code" as "awayCode"
+    FROM canonical_latest cl
+    JOIN "Game" g ON g."id" = cl."gameId"
     LEFT JOIN "Team" ht ON ht."id" = g."homeTeamId"
     LEFT JOIN "Team" at2 ON at2."id" = g."awayTeamId"
-    WHERE s."settledHit" IS NOT NULL
+    JOIN LATERAL (
+      SELECT s.*
+      FROM "SuggestedPlayLedger" s
+      WHERE s."date" = cl."gameDate"
+        AND s."gameId" = cl."gameId"
+        AND s."outcomeType" = cl."outcomeType"
+        AND s."settledHit" IS NOT NULL
+      ORDER BY s."confidence" DESC NULLS LAST, s."updatedAt" DESC
+      LIMIT 1
+    ) s ON TRUE
     ORDER BY s."date" ASC
-  `;
+  `,
+  );
 
   const seasons = [...new Set(picks.map((p) => p.season))].sort((a, b) => a - b);
 
@@ -46,10 +104,11 @@ export async function GET() {
       outcomeType: p.outcomeType,
       odds: p.priceAmerican ?? -110,
       hit: p.settledHit,
+      mlInvolved: Boolean(p.mlInvolved),
       meta: p.metaScore,
       posterior: p.posteriorHitRate,
     })),
   }));
 
-  return NextResponse.json({ days, seasons });
+  return NextResponse.json({ days, seasons, modelVersion });
 }

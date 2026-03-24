@@ -52,6 +52,7 @@ interface SuggestedPick {
     ev: number;
     label: string;
   } | null;
+  mlInvolved?: boolean;
   playerTarget?: PlayerTarget | null;
   result?: PredictionResult | null;
 }
@@ -114,6 +115,7 @@ interface GamePrediction {
 
 interface PredictionData {
   date: string;
+  modelVersion?: string;
   season?: number;
   dayBetSummary?: { hits: number; total: number; hitRate: number | null };
   seasonToDate?: {
@@ -154,6 +156,15 @@ interface PredictionData {
   message?: string;
 }
 
+interface ModelVersionOption {
+  name: string;
+  isActive: boolean;
+  coverage?: {
+    gradedDates: number;
+    gradedPicks: number;
+  };
+}
+
 function getLocalDateString(d: Date = new Date()) {
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, "0");
@@ -184,6 +195,15 @@ function filterPicks<T extends { outcomeType: string }>(
   return picks.filter((p) => (filter === "player" ? isPlayerPick(p.outcomeType) : !isPlayerPick(p.outcomeType)));
 }
 
+function filterPicksByMl<T extends { mlInvolved?: boolean }>(
+  picks: T[] | undefined,
+  filter: "all" | "ml_only" | "no_ml",
+): T[] {
+  if (!picks) return [];
+  if (filter === "all") return picks;
+  return picks.filter((p) => (filter === "ml_only" ? !!p.mlInvolved : !p.mlInvolved));
+}
+
 export function PredictionsPage() {
   const [date, setDate] = useState(() => getLocalDateString());
   const [data, setData] = useState<PredictionData | null>(null);
@@ -195,11 +215,18 @@ export function PredictionsPage() {
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<{ ok: boolean; message: string; steps?: { step: string; ok: boolean; message?: string }[] } | null>(null);
   const [pickType, setPickType] = useState<"game" | "player" | "all">("game");
+  const [mlFilter, setMlFilter] = useState<"all" | "ml_only" | "no_ml">("all");
   const [calendarMonth, setCalendarMonth] = useState(() => {
     const d = new Date();
     return { year: d.getFullYear(), month: d.getMonth() };
   });
   const [perfectDates, setPerfectDates] = useState<Set<string>>(new Set());
+  const [modelVersions, setModelVersions] = useState<ModelVersionOption[]>([]);
+  const [liveCoverage, setLiveCoverage] = useState<{ gradedDates: number; gradedPicks: number }>({
+    gradedDates: 0,
+    gradedPicks: 0,
+  });
+  const [switchingModelVersion, setSwitchingModelVersion] = useState(false);
 
   const toggleParlayLeg = (key: string, gameLabel: string, pickLabel: string, americanOdds: number) => {
     setParlayLegs((prev) => {
@@ -249,6 +276,29 @@ export function PredictionsPage() {
   }, [date, fetchPredictions]);
 
   useEffect(() => {
+    fetch("/api/model-versions")
+      .then((r) => r.json())
+      .then((json: {
+        versions?: Array<{
+          name: string;
+          isActive: boolean;
+          coverage?: { gradedDates: number; gradedPicks: number };
+        }>;
+        liveCoverage?: { gradedDates: number; gradedPicks: number };
+      }) => {
+        setModelVersions(
+          (json.versions ?? []).map((v) => ({
+            name: v.name,
+            isActive: v.isActive,
+            coverage: v.coverage,
+          })),
+        );
+        setLiveCoverage(json.liveCoverage ?? { gradedDates: 0, gradedPicks: 0 });
+      })
+      .catch(() => setModelVersions([]));
+  }, []);
+
+  useEffect(() => {
     const d = parseDateInput(date);
     setCalendarMonth((m) => {
       if (m.year === d.getFullYear() && m.month === d.getMonth()) return m;
@@ -258,13 +308,16 @@ export function PredictionsPage() {
 
   useEffect(() => {
     const monthStr = `${calendarMonth.year}-${String(calendarMonth.month + 1).padStart(2, "0")}`;
-    fetch(`/api/perfect-dates?month=${monthStr}&filter=${pickType}`)
+    const modelVersion = data?.modelVersion ?? "live";
+    fetch(
+      `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&modelVersion=${encodeURIComponent(modelVersion)}`,
+    )
       .then((r) => r.json())
       .then((json: { dates?: string[] }) => {
         setPerfectDates(new Set(json.dates ?? []));
       })
       .catch(() => setPerfectDates(new Set()));
-  }, [calendarMonth.year, calendarMonth.month, pickType]);
+  }, [calendarMonth.year, calendarMonth.month, pickType, mlFilter, data?.modelVersion]);
 
   const runSync = useCallback(async () => {
     setSyncing(true);
@@ -282,7 +335,10 @@ export function PredictionsPage() {
         fetchPredictions(date, true);
         // Refresh perfect dates so calendar shows updated badges
         const monthStr = `${calendarMonth.year}-${String(calendarMonth.month + 1).padStart(2, "0")}`;
-        fetch(`/api/perfect-dates?month=${monthStr}&filter=${pickType}`)
+        const modelVersion = data?.modelVersion ?? "live";
+        fetch(
+          `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&modelVersion=${encodeURIComponent(modelVersion)}`,
+        )
           .then((r) => r.json())
           .then((j: { dates?: string[] }) => setPerfectDates(new Set(j.dates ?? [])))
           .catch(() => {});
@@ -292,7 +348,37 @@ export function PredictionsPage() {
     } finally {
       setSyncing(false);
     }
-  }, [date, fetchPredictions, calendarMonth.year, calendarMonth.month, pickType]);
+  }, [date, fetchPredictions, calendarMonth.year, calendarMonth.month, pickType, mlFilter, data?.modelVersion]);
+
+  const switchModelVersion = useCallback(async (next: string) => {
+    setSwitchingModelVersion(true);
+    try {
+      const payload =
+        next === "live"
+          ? { action: "deactivate" }
+          : { action: "activate", name: next };
+      const res = await fetch("/api/model-versions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error((json as { error?: string }).error ?? "Failed to switch model version");
+      }
+      setModelVersions((prev) =>
+        prev.map((v) => ({ ...v, isActive: next !== "live" && v.name === next })),
+      );
+      await fetchPredictions(date);
+    } catch (err) {
+      setSyncResult({
+        ok: false,
+        message: err instanceof Error ? err.message : "Failed to switch model version",
+      });
+    } finally {
+      setSwitchingModelVersion(false);
+    }
+  }, [date, fetchPredictions]);
 
   const changeDate = (delta: number) => {
     setDate((prev) => {
@@ -465,7 +551,7 @@ export function PredictionsPage() {
 
   const filteredGames = data?.games.map((g) => ({
     ...g,
-    suggestedBetPicks: filterPicks(g.suggestedBetPicks, pickType),
+    suggestedBetPicks: filterPicksByMl(filterPicks(g.suggestedBetPicks, pickType), mlFilter),
     suggestedPlays: filterPicks(g.suggestedPlays, pickType),
     discoveryV2Matches: filterPicks(g.discoveryV2Matches, pickType),
   })) ?? [];
@@ -491,7 +577,15 @@ export function PredictionsPage() {
         {!loading && data ? (
           <h1 style={{ margin: 0, fontSize: "1.4rem", fontWeight: 800 }}>
             {data.games.length} Games, {totalPicks} Picks
+            <span className="muted" style={{ marginLeft: "0.5rem", fontSize: "0.85rem", fontWeight: 400 }}>
+              model: {data.modelVersion ?? "live"}
+            </span>
             {pickType !== "all" && <span className="muted" style={{ fontSize: "0.9rem", fontWeight: 400 }}> ({pickType})</span>}
+            {mlFilter !== "all" && (
+              <span className="muted" style={{ fontSize: "0.9rem", fontWeight: 400 }}>
+                {" "}({mlFilter === "ml_only" ? "ml only" : "no ml"})
+              </span>
+            )}
             {dayHitSummary.total > 0 && (
               <span style={{
                 color: dayHitSummary.hits === dayHitSummary.total ? "#a855f7" : (dayHitSummary.hitRate ?? 0) >= 0.5 ? "var(--success)" : "var(--error)",
@@ -511,11 +605,16 @@ export function PredictionsPage() {
         ) : (
           <h1 style={{ margin: 0, fontSize: "1.4rem", fontWeight: 800, opacity: 0.4 }}>&nbsp;</h1>
         )}
+        {!loading && data && totalPicks === 0 && perfectDates.has(date) && (
+          <div className="muted" style={{ marginTop: "0.35rem", fontSize: "0.78rem" }}>
+            This date is marked perfect for graded ledger picks under current filters, but no picks are currently visible.
+          </div>
+        )}
       </div>
 
-      <div style={{ display: "flex", gap: "1rem", alignItems: "flex-start" }}>
+      <div className="predictions-layout">
       {/* Games column */}
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div className="predictions-main">
       {loading && (
         <div className="card" style={{ opacity: 0.8 }}>
           <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
@@ -537,7 +636,7 @@ export function PredictionsPage() {
       )}
 
       {!loading && data && filteredGames.length > 0 && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: "0.75rem", alignItems: "start" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "0.75rem", alignItems: "start" }}>
           {[...filteredGames].sort((a, b) => (b.suggestedBetPicks?.length ?? 0) - (a.suggestedBetPicks?.length ?? 0)).map((game) => {
             const homeLabel = game.homeTeam.code ?? game.homeTeam.name ?? `Team ${game.homeTeam.id}`;
             const awayLabel = game.awayTeam.code ?? game.awayTeam.name ?? `Team ${game.awayTeam.id}`;
@@ -890,7 +989,7 @@ export function PredictionsPage() {
       </div>
 
       {/* Sidebar: Date + Parlay */}
-      <div style={{ width: 300, flexShrink: 0, display: "flex", flexDirection: "column", gap: "1rem", alignSelf: "flex-start", position: "sticky", top: "1rem" }}>
+      <div className="predictions-sidebar">
       {/* Date picker + Sync card */}
       <div className="card" style={{ padding: "1rem" }}>
         <h3 style={{ margin: "0 0 0.75rem", fontSize: "0.95rem" }}>Date & Sync</h3>
@@ -950,11 +1049,18 @@ export function PredictionsPage() {
                     style={{
                       padding: "0.35rem",
                       border: "1px solid",
-                      borderColor: isPerfect ? "#a855f7" : isSelected ? "var(--accent)" : "var(--border)",
+                      borderColor: isSelected ? "var(--accent)" : isPerfect ? "#a855f7" : "var(--border)",
                       borderRadius: 4,
-                      background: isPerfect ? "rgba(168, 85, 247, 0.12)" : isSelected ? "var(--accent-muted)" : isToday ? "var(--bg-elevated)" : "transparent",
-                      color: isPerfect ? "#a855f7" : isSelected ? "var(--accent)" : "inherit",
-                      fontWeight: isToday ? 700 : isPerfect ? 600 : 400,
+                      background: isSelected
+                        ? "var(--accent-muted)"
+                        : isPerfect
+                          ? "rgba(168, 85, 247, 0.12)"
+                          : isToday
+                            ? "var(--bg-elevated)"
+                            : "transparent",
+                      color: isSelected ? "var(--accent)" : isPerfect ? "#a855f7" : "inherit",
+                      boxShadow: isSelected ? "0 0 0 1px var(--accent)" : "none",
+                      fontWeight: isSelected ? 700 : isToday ? 700 : isPerfect ? 600 : 400,
                       cursor: "pointer",
                       fontSize: "0.75rem",
                     }}
@@ -969,6 +1075,31 @@ export function PredictionsPage() {
         <button type="button" onClick={() => setDate(getLocalDateString())} className="btn-today" style={{ width: "100%", marginBottom: "0.5rem", fontSize: "0.8rem" }}>
           Today
         </button>
+        <div style={{ marginBottom: "0.5rem" }}>
+          <div className="muted" style={{ fontSize: "0.8rem", marginBottom: "0.25rem" }}>
+            Model version <span style={{ opacity: 0.75 }}>(season coverage)</span>
+          </div>
+          <select
+            value={data?.modelVersion ?? "live"}
+            onChange={(e) => switchModelVersion(e.target.value)}
+            disabled={switchingModelVersion}
+            style={{ width: "100%", padding: "0.35rem 0.4rem", fontSize: "0.78rem" }}
+          >
+            <option value="live">
+              live (no snapshot) [season: {liveCoverage.gradedDates}d/{liveCoverage.gradedPicks}p]
+            </option>
+            {modelVersions.map((v) => (
+              <option key={v.name} value={v.name}>
+                {v.name}
+                {v.isActive ? " (active)" : ""}
+                {` [season: ${v.coverage?.gradedDates ?? 0}d/${v.coverage?.gradedPicks ?? 0}p]`}
+              </option>
+            ))}
+          </select>
+          <div className="muted" style={{ fontSize: "0.72rem", marginTop: "0.25rem" }}>
+            Coverage is graded season totals, not picks for selected date.
+          </div>
+        </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.5rem" }}>
           <span className="muted" style={{ fontSize: "0.8rem" }}>Picks:</span>
           {(["game", "player", "all"] as const).map((t) => (
@@ -990,6 +1121,32 @@ export function PredictionsPage() {
             </button>
           ))}
         </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.5rem" }}>
+          <span className="muted" style={{ fontSize: "0.8rem" }}>ML vote:</span>
+          {(["all", "ml_only", "no_ml"] as const).map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setMlFilter(t)}
+              style={{
+                flex: 1,
+                padding: "0.3rem 0.4rem",
+                fontSize: "0.72rem",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                background: mlFilter === t ? "var(--accent-muted)" : "transparent",
+                cursor: "pointer",
+              }}
+            >
+              {t === "all" ? "All" : t === "ml_only" ? "ML" : "No ML"}
+            </button>
+          ))}
+        </div>
+        {mlFilter !== "all" && pickType === "game" && (
+          <div className="muted" style={{ fontSize: "0.72rem", marginBottom: "0.5rem" }}>
+            ML vote applies to player-point picks. Switch Picks to Player or All.
+          </div>
+        )}
         <button
           type="button"
           onClick={runSync}
@@ -1019,7 +1176,7 @@ export function PredictionsPage() {
                 style={{ fontSize: "0.7rem", padding: "0.2rem 0.5rem" }}
                 onClick={() => {
                   const legs: typeof parlayLegs = [];
-                  for (const game of data.games) {
+                  for (const game of filteredGames) {
                     const hl = game.homeTeam.code ?? game.homeTeam.name ?? `Team ${game.homeTeam.id}`;
                     const al = game.awayTeam.code ?? game.awayTeam.name ?? `Team ${game.awayTeam.id}`;
                     const ml = `${al} @ ${hl}`;
@@ -1105,6 +1262,41 @@ export function PredictionsPage() {
         )}
       </div>
       </div>
+      <style jsx>{`
+        .predictions-layout {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 300px;
+          gap: 1rem;
+          align-items: start;
+        }
+
+        .predictions-main {
+          min-width: 0;
+        }
+
+        .predictions-sidebar {
+          width: 300px;
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 1rem;
+          align-self: start;
+          position: sticky;
+          top: 1rem;
+        }
+
+        @media (max-width: 1100px) {
+          .predictions-layout {
+            grid-template-columns: minmax(0, 1fr);
+          }
+
+          .predictions-sidebar {
+            width: 100%;
+            position: static;
+            top: auto;
+          }
+        }
+      `}</style>
       </div>
     </>
   );
@@ -1143,6 +1335,10 @@ export default function LandingPage() {
   const appleAvailable = !!providers?.apple;
   const devAvailable = !!providers?.["dev-login"];
   const hasProvider = googleAvailable || appleAvailable || devAvailable;
+  const callbackUrl =
+    typeof window !== "undefined"
+      ? `${window.location.origin}/predictions`
+      : "/predictions";
 
   return (
     <div className="auth-landing">
@@ -1161,7 +1357,7 @@ export default function LandingPage() {
               <button
                 type="button"
                 className="auth-primary-btn"
-                onClick={() => signIn("google")}
+                onClick={() => signIn("google", { callbackUrl })}
               >
                 Continue with Google
               </button>
@@ -1170,7 +1366,7 @@ export default function LandingPage() {
               <button
                 type="button"
                 className="auth-secondary-btn"
-                onClick={() => signIn("apple")}
+                onClick={() => signIn("apple", { callbackUrl })}
               >
                 Continue with Apple
               </button>
@@ -1179,7 +1375,7 @@ export default function LandingPage() {
               <button
                 type="button"
                 className="auth-secondary-btn"
-                onClick={() => signIn("dev-login", { callbackUrl: "/predictions" })}
+                onClick={() => signIn("dev-login", { callbackUrl })}
               >
                 Continue in Dev Mode
               </button>
