@@ -53,6 +53,7 @@ export const DISCOVERY_DEFAULTS = {
   minForwardPosteriorDiscovery: 0.52,
   minValEdge: 0,
   minForwardEdgeDiscovery: 0,
+  minPlayerOutcomePropCoverage: 0.15,
   maxConditionOverlap: 0.8,
   priorStrength: 25,
   recencyHalfLifeDays: 90,
@@ -112,14 +113,14 @@ export const PICK_QUALITY_TUNING = {
   uncertaintyPenaltyScale: 0.18,
   strictGateByFamily: {
     PLAYER: { minCalibratedEdge: 0.015, maxUncertaintyScore: 0.72 },
-    TOTAL: { minCalibratedEdge: 0.01, maxUncertaintyScore: 0.74 },
-    SPREAD: { minCalibratedEdge: 0.01, maxUncertaintyScore: 0.74 },
+    TOTAL: { minCalibratedEdge: 0.012, maxUncertaintyScore: 0.7 },
+    SPREAD: { minCalibratedEdge: 0.012, maxUncertaintyScore: 0.7 },
     MONEYLINE: {
-      minCalibratedEdge: 0.012,
+      minCalibratedEdge: 0.015,
       // Tighter uncertainty cap to avoid shaky coin-flip style ML picks.
-      maxUncertaintyScore: 0.52,
-      // Allow borderline plus-money dogs (e.g. +570 ~ 0.149) while still blocking extreme longshots.
-      minMoneylineImpliedProbability: 0.145,
+      maxUncertaintyScore: 0.48,
+      // Block more low-probability longshots in strict mode.
+      minMoneylineImpliedProbability: 0.18,
       // Leave unset to hard-block extreme longshots in strict mode.
       minMoneylineLongshotEdgeOverride: undefined,
     },

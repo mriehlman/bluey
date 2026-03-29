@@ -26,6 +26,8 @@ export async function backfillSuggestedLedger(args: string[] = []): Promise<void
   const from = flags.from ?? "2023-10-01";
   const to = flags.to ?? new Date().toISOString().slice(0, 10);
   const baseUrl = flags["base-url"] ?? "http://localhost:3000";
+  const gateModeRaw = (flags["gate-mode"] ?? "legacy").toLowerCase();
+  const gateMode = gateModeRaw === "strict" ? "strict" : "legacy";
   const delayMs = Math.max(0, Number(flags["delay-ms"] ?? 0));
   const stopOnError = (flags["stop-on-error"] ?? "false") === "true";
   const dryRun = (flags["dry-run"] ?? "false") === "true";
@@ -41,6 +43,7 @@ export async function backfillSuggestedLedger(args: string[] = []): Promise<void
   console.log("\n=== Backfill SuggestedPlayLedger ===\n");
   console.log(`Range: ${from} -> ${to}`);
   console.log(`Dates found in Game table: ${dates.length}`);
+  console.log(`Gate mode: ${gateMode}`);
   console.log(`Base URL: ${baseUrl}`);
   console.log(`Delay: ${delayMs}ms`);
   console.log(`Dry run: ${dryRun}\n`);
@@ -52,7 +55,7 @@ export async function backfillSuggestedLedger(args: string[] = []): Promise<void
 
   for (let i = 0; i < dates.length; i++) {
     const d = dates[i];
-    const url = `${baseUrl}/api/predictions?date=${encodeURIComponent(d)}&refreshLedger=1`;
+    const url = `${baseUrl}/api/predictions?date=${encodeURIComponent(d)}&refreshLedger=1&gateMode=${gateMode}`;
 
     if (dryRun) {
       console.log(`[${i + 1}/${dates.length}] DRY ${d}`);

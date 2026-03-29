@@ -273,7 +273,7 @@ export function PredictionsPage() {
       qp.set("date", targetDate);
       qp.set("gateMode", gateMode);
       if (refreshLedger) qp.set("refreshLedger", "1");
-      const res = await fetch(`/api/predictions?${qp.toString()}`);
+      const res = await fetch(`/api/predictions?${qp.toString()}`, { cache: "no-store" });
       const text = await res.text();
       let json: PredictionData | null = null;
       try {
@@ -305,7 +305,7 @@ export function PredictionsPage() {
   }, [date, fetchPredictions]);
 
   useEffect(() => {
-    fetch("/api/model-versions")
+    fetch("/api/model-versions", { cache: "no-store" })
       .then((r) => r.json())
       .then((json: {
         versions?: Array<{
@@ -340,6 +340,7 @@ export function PredictionsPage() {
     const modelVersion = data?.modelVersion ?? "live";
     fetch(
       `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&lane=${laneFilter}&modelVersion=${encodeURIComponent(modelVersion)}&gateMode=${gateMode}`,
+      { cache: "no-store" },
     )
       .then((r) => r.json())
       .then((json: { dates?: string[] }) => {
@@ -367,6 +368,7 @@ export function PredictionsPage() {
         const modelVersion = data?.modelVersion ?? "live";
         fetch(
           `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&lane=${laneFilter}&modelVersion=${encodeURIComponent(modelVersion)}&gateMode=${gateMode}`,
+          { cache: "no-store" },
         )
           .then((r) => r.json())
           .then((j: { dates?: string[] }) => setPerfectDates(new Set(j.dates ?? [])))

@@ -64,6 +64,21 @@ export async function GET(req: Request) {
   const lastDay = new Date(year, mon, 0).getDate();
   const end = `${year}-${String(mon).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
 
+  // Backward-compatible schema guard: older DBs may not yet have scope columns.
+  try {
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "actionabilityVersion" text`,
+    );
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "modelVersionName" text`,
+    );
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "gateMode" text`,
+    );
+  } catch {
+    // If table is missing entirely, query fallback below will return empty dates.
+  }
+
   // Outcome type filter: base = part before ':', player = PLAYER_* or HOME_TOP_* or AWAY_TOP_*
   const baseExpr = `SPLIT_PART(l."outcomeType"::text, ':', 1)`;
   const typeFilter =
@@ -76,64 +91,53 @@ export async function GET(req: Request) {
     modelVersion === "all"
       ? ""
       : modelVersion === "live"
-        ? `AND COALESCE(cp."runContext"->>'modelVersionName', 'live') = 'live'`
-        : `AND cp."runContext"->>'modelVersionName' = '${sqlEsc(modelVersion)}'`;
+        ? `AND COALESCE(s."modelVersionName", 'live') = 'live'`
+        : `AND s."modelVersionName" = '${sqlEsc(modelVersion)}'`;
   const mlFilterSql =
     mlFilter === "all"
       ? ""
       : mlFilter === "ml_only"
         ? `AND COALESCE(s."mlInvolved", FALSE) = TRUE`
         : `AND COALESCE(s."mlInvolved", FALSE) = FALSE`;
+  const laneExpr = `
+    COALESCE(
+      NULLIF(s."laneTag", ''),
+      CASE
+        WHEN ${baseExpr.replaceAll('l."', 's."')} LIKE '%WIN' THEN 'moneyline'
+        WHEN ${baseExpr.replaceAll('l."', 's."')} LIKE '%COVERED' THEN 'spread'
+        WHEN ${baseExpr.replaceAll('l."', 's."')} LIKE '%OVER%' OR ${baseExpr.replaceAll('l."', 's."')} LIKE '%UNDER%' OR ${baseExpr.replaceAll('l."', 's."')} LIKE 'TOTAL_%' THEN 'total'
+        WHEN ${baseExpr.replaceAll('l."', 's."')} = 'PLAYER_10_PLUS_REBOUNDS' OR ${baseExpr.replaceAll('l."', 's."')} LIKE '%REBOUNDER%' THEN 'player_rebounds'
+        WHEN ${baseExpr.replaceAll('l."', 's."')} = 'PLAYER_10_PLUS_ASSISTS' OR ${baseExpr.replaceAll('l."', 's."')} LIKE '%ASSIST%' OR ${baseExpr.replaceAll('l."', 's."')} LIKE '%PLAYMAKER%' THEN 'player_assists'
+        WHEN ${baseExpr.replaceAll('l."', 's."')} = 'PLAYER_30_PLUS' OR ${baseExpr.replaceAll('l."', 's."')} = 'PLAYER_40_PLUS' OR ${baseExpr.replaceAll('l."', 's."')} LIKE '%SCORER%' THEN 'player_points'
+        WHEN ${baseExpr.replaceAll('l."', 's."')} LIKE 'PLAYER_%' OR ${baseExpr.replaceAll('l."', 's."')} LIKE 'HOME_TOP_%' OR ${baseExpr.replaceAll('l."', 's."')} LIKE 'AWAY_TOP_%' THEN 'other_prop'
+        ELSE 'other'
+      END
+    )
+  `;
   const laneFilterSql =
     lane === "all"
       ? ""
-      : `AND COALESCE(NULLIF(s."laneTag", ''), 'other') = '${sqlEsc(lane)}'`;
-  const gateModeFilter =
-    gateMode === "strict"
-      ? `AND COALESCE((cp."runContext"->>'strictGates')::boolean, FALSE) = TRUE`
-      : `AND COALESCE((cp."runContext"->>'strictGates')::boolean, FALSE) = FALSE`;
+      : `AND ${laneExpr} = '${sqlEsc(lane)}'`;
+  const gateModeExpr = `COALESCE(s."gateMode", CASE WHEN COALESCE(s."actionabilityVersion",'legacy_v1') LIKE 'strict%' THEN 'strict' ELSE 'legacy' END)`;
+  const gateModeFilter = `AND ${gateModeExpr} = '${sqlEsc(gateMode)}'`;
 
   try {
     const rows = await prisma.$queryRawUnsafe<
       Array<{ date: string }>
     >(
-      `WITH latest_run_per_date AS (
-         SELECT DISTINCT ON (g."date"::date)
-           g."date"::date AS "gameDate",
-           cp."runId" AS "runId"
-         FROM "CanonicalPrediction" cp
-         JOIN "Game" g ON g."id" = cp."gameId"
-         WHERE cp."runId" IS NOT NULL
-           AND g."date" >= '${start}'
-           AND g."date" <= '${end}'
-           ${modelVersionFilter}
-           ${gateModeFilter}
-         ORDER BY g."date"::date, cp."runStartedAt" DESC NULLS LAST, cp."generatedAt" DESC
-       ),
-      canonical_games AS (
-        SELECT DISTINCT
-           g."date"::date AS "gameDate",
-          cp."gameId" AS "gameId"
-         FROM "CanonicalPrediction" cp
-         JOIN "Game" g ON g."id" = cp."gameId"
-         JOIN latest_run_per_date lr
-           ON lr."gameDate" = g."date"::date
-          AND lr."runId" = cp."runId"
-       )
-      SELECT TO_CHAR(s."date", 'YYYY-MM-DD') as "date"
-      FROM canonical_games cg
-      JOIN "SuggestedPlayLedger" s
-        ON s."date" = cg."gameDate"
-       AND s."gameId" = cg."gameId"
-       AND s."isActionable" = TRUE
-       AND s."settledHit" IS NOT NULL
-       WHERE 1=1
+      `SELECT TO_CHAR(s."date", 'YYYY-MM-DD') as "date"
+       FROM "SuggestedPlayLedger" s
+       WHERE s."date" >= '${start}'
+         AND s."date" <= '${end}'
+         AND s."settledHit" IS NOT NULL
+         ${modelVersionFilter}
+         ${gateModeFilter}
          ${typeFilter.replaceAll('l."', 's."')}
-        ${mlFilterSql}
-        ${laneFilterSql}
+         ${mlFilterSql}
+         ${laneFilterSql}
        GROUP BY s."date"
-      HAVING BOOL_AND(s."settledHit" = TRUE)
-         AND COUNT(*) > 0`,
+       HAVING BOOL_AND(s."settledHit" = TRUE)
+          AND COUNT(*) > 0`,
     );
 
     const dates = rows.map((r) => r.date).filter(Boolean);

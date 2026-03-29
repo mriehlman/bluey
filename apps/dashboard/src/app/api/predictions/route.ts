@@ -10,7 +10,6 @@ import {
   evaluatePlayerPointsMlVote,
   parsePlayerOutcomeRequirement,
   loadLatestFeatureBins,
-  loadMetaModel,
   payoutFromAmerican,
   type DeployedPatternV2,
   type V2PlayerTarget,
@@ -27,7 +26,7 @@ import {
   computeLineupSignalsFromCounts,
 } from "@bluey/core/features/injuryContext";
 import { syncNbaStatsForDate, syncUpcomingFromNba } from "@bluey/core/ingest/syncNbaStats";
-import { syncOddsForDate } from "@bluey/core/ingest/syncOdds";
+import { syncOddsForDate, syncPlayerPropsForDate } from "@bluey/core/ingest/syncOdds";
 import { syncInjuries } from "@bluey/core/ingest/syncInjuries";
 import { syncLineups } from "@bluey/core/ingest/syncLineups";
 import * as path from "path";
@@ -279,9 +278,10 @@ async function loadActiveModelVersionFromDb() {
     });
     if (!active) return null;
     return {
+      name: active.name ?? null,
       deployedPatterns: active.deployedPatterns as unknown as DeployedPatternV2[],
       featureBins: active.featureBins as unknown as Record<string, any>,
-      metaModel: active.metaModel as unknown as Awaited<ReturnType<typeof loadMetaModel>>,
+      metaModel: active.metaModel as unknown as any,
       tuningConfig: active.tuningConfig as unknown as any,
     };
   } catch {
@@ -291,6 +291,7 @@ async function loadActiveModelVersionFromDb() {
 
 let suggestedPlayLedgerAvailableCache: boolean | null = null;
 let suggestedPlayLedgerColumnsEnsured = false;
+let suggestedPlayLedgerScopeColumnsEnsured = false;
 type WagerSummary = {
   bets: number;
   settledBets: number;
@@ -531,6 +532,49 @@ function buildTargetOutcomeExplanation(
   return `${target.name}, ${actual} ${req.label} (needed ${req.line}+)`;
 }
 
+function evaluatePlayerPropMarketResult(args: {
+  marketPick: SuggestedMarketPick | null | undefined;
+  playerTarget: V2PlayerTarget | null;
+  isFinal: boolean;
+  stats: { playerId: number; points: number; rebounds: number; assists: number; fg3m: number | null }[];
+}): OutcomeEval | null {
+  if (!args.isFinal) return null;
+  const marketPick = args.marketPick ?? null;
+  if (!marketPick || marketPick.marketType !== "player_prop") return null;
+  const side = marketPick.selectionSide === "under" ? "under" : "over";
+  const line = marketPick.line;
+  if (!Number.isFinite(line)) return null;
+  const playerId = args.playerTarget?.id ?? (Number.isFinite(marketPick.playerId) ? marketPick.playerId : null);
+  if (playerId == null) return null;
+  const row = args.stats.find((s) => s.playerId === playerId);
+  if (!row) {
+    return null;
+  }
+  const actual =
+    marketPick.market === "player_points"
+      ? row.points
+      : marketPick.market === "player_rebounds"
+        ? row.rebounds
+        : marketPick.market === "player_assists"
+          ? row.assists
+          : (row.fg3m ?? 0);
+  const hit = side === "under" ? actual < line : actual > line;
+  const suffix =
+    marketPick.market === "player_points"
+      ? "pts"
+      : marketPick.market === "player_rebounds"
+        ? "reb"
+        : marketPick.market === "player_assists"
+          ? "ast"
+          : "3PM";
+  const actor = args.playerTarget?.name ?? marketPick.playerName ?? `Player ${playerId}`;
+  return {
+    hit,
+    scope: "target",
+    explanation: `${actor}, ${actual} ${suffix} vs ${side} ${line}`,
+  };
+}
+
 
 function isMissingTableError(err: unknown): boolean {
   const e = err as { code?: string; meta?: { code?: string } };
@@ -593,6 +637,11 @@ async function autoSyncForDate(dateStr: string): Promise<boolean> {
     await syncOddsForDate(dateStr);
   } catch (e) {
     console.warn("[predictions] Odds sync warning:", String(e).slice(0, 200));
+  }
+  try {
+    await syncPlayerPropsForDate(dateStr);
+  } catch (e) {
+    console.warn("[predictions] Player props sync warning:", String(e).slice(0, 200));
   }
   try {
     await syncInjuries(["--date", dateStr]);
@@ -688,7 +737,7 @@ export async function GET(req: Request) {
 
   const targetDate = new Date(dateStr + "T00:00:00Z");
   const season = getSeasonForDate(targetDate);
-  const metaModel = await loadMetaModel();
+  const metaModel = null;
   const defaultStake = LEDGER_TUNING.stake;
   const bankrollStart = LEDGER_TUNING.bankrollStart;
   const maxBetPicksPerGame = Math.max(1, LEDGER_TUNING.maxBetPicksPerGame);
@@ -696,10 +745,10 @@ export async function GET(req: Request) {
   const fallbackAmericanOdds = LEDGER_TUNING.fallbackAmericanOdds;
   const calibrationArtifacts = await loadCalibrationArtifacts();
   const sourceReliabilitySnapshot = await loadSourceReliabilitySnapshot();
-  const seasonBetSummary = await getSeasonBetHitSummary(dateStr, season);
-  const seasonV2Hits = seasonBetSummary.hits;
-  const seasonV2Total = seasonBetSummary.total;
+  let seasonV2Hits = 0;
+  let seasonV2Total = 0;
   let gateDiagnostics: GateDiagnostics | null = null;
+  let wagerTracking: Awaited<ReturnType<typeof getWagerTrackingSummary>> = null;
 
   let games = await queryGamesForDate(targetDate, dateStr);
   let didAutoSync = false;
@@ -711,13 +760,6 @@ export async function GET(req: Request) {
     games = await queryGamesForDate(targetDate, dateStr);
     didAutoSync = true;
   }
-
-  let wagerTracking = await getWagerTrackingSummary({
-    dateStr,
-    season,
-    stakePerPick: defaultStake,
-    bankrollStart,
-  });
 
   if (games.length === 0) {
     return NextResponse.json({
@@ -757,6 +799,7 @@ export async function GET(req: Request) {
   }
 
   const activeVersion = await loadActiveModelVersionFromDb();
+  const selectedModelVersionName = activeVersion?.name ?? "live";
   let deployedV2Patterns: DeployedPatternV2[];
   let featureBins: Map<string, any>;
   let activeMetaModel = metaModel;
@@ -764,13 +807,30 @@ export async function GET(req: Request) {
   if (activeVersion) {
     deployedV2Patterns = activeVersion.deployedPatterns;
     featureBins = new Map(Object.entries(activeVersion.featureBins));
-    activeMetaModel = activeVersion.metaModel;
+    activeMetaModel = null;
   } else {
     [deployedV2Patterns, featureBins] = await Promise.all([
       loadDeployedV2PatternsSafe(),
       loadFeatureBinsSafe(),
     ]);
   }
+
+  const seasonBetSummary = await getSeasonBetHitSummary(
+    dateStr,
+    season,
+    selectedModelVersionName,
+    gateMode,
+  );
+  seasonV2Hits = seasonBetSummary.hits;
+  seasonV2Total = seasonBetSummary.total;
+  wagerTracking = await getWagerTrackingSummary({
+    dateStr,
+    season,
+    modelVersionName: selectedModelVersionName,
+    gateMode,
+    stakePerPick: defaultStake,
+    bankrollStart,
+  });
 
   const teamIds = [...new Set(games.flatMap((g) => [g.homeTeamId, g.awayTeamId]))];
   const teamSnapshots = await computeTeamSnapshots(season, targetDate, teamIds);
@@ -1113,7 +1173,13 @@ export async function GET(req: Request) {
     }));
     const suggestedBetPicks = engineOutput.suggestedBetPicks.map((p) => ({
       ...p,
-      result: evaluateOutcome(p.outcomeType, p.playerTarget),
+      result:
+        evaluatePlayerPropMarketResult({
+          marketPick: p.marketPick ?? null,
+          playerTarget: p.playerTarget,
+          isFinal,
+          stats: game.playerStats,
+        }) ?? evaluateOutcome(p.outcomeType, p.playerTarget),
       mlInvolved:
         evaluatePlayerPointsMlVote({
           outcomeType: p.outcomeType,
@@ -1167,11 +1233,20 @@ export async function GET(req: Request) {
   })();
 
   try {
-    const shouldUpsert = await shouldUpsertLedgerSnapshot(dateStr, refreshLedger);
+    const ledgerRunId = crypto.randomUUID();
+    const shouldUpsert = await shouldUpsertLedgerSnapshot(
+      dateStr,
+      refreshLedger,
+      selectedModelVersionName,
+      gateMode,
+    );
     if (shouldUpsert) {
       await upsertSuggestedPlayLedger({
         dateStr,
         season,
+        runId: ledgerRunId,
+        modelVersionName: selectedModelVersionName,
+        gateMode,
         games: result,
         defaultStake,
         fallbackAmericanOdds,
@@ -1181,6 +1256,8 @@ export async function GET(req: Request) {
     wagerTracking = await getWagerTrackingSummary({
       dateStr,
       season,
+      modelVersionName: selectedModelVersionName,
+      gateMode,
       stakePerPick: defaultStake,
       bankrollStart,
     });
@@ -1189,14 +1266,10 @@ export async function GET(req: Request) {
     console.error("Failed to upsert SuggestedPlayLedger rows:", err);
   }
 
-  const activeModelVersionInfo = activeVersion
-    ? { name: (await prisma.modelVersion.findFirst({ where: { isActive: true }, select: { name: true } }))?.name ?? null }
-    : null;
-
   return NextResponse.json({
     date: dateStr,
     season,
-    modelVersion: activeModelVersionInfo?.name ?? "live",
+    modelVersion: selectedModelVersionName,
     gateMode,
     dayBetSummary,
     ...(includeDebugPlays ? { gateDiagnostics } : {}),
@@ -1233,6 +1306,9 @@ function sqlBool(v: boolean | null | undefined): string {
 async function upsertSuggestedPlayLedger(args: {
   dateStr: string;
   season: number;
+  runId: string;
+  modelVersionName: string;
+  gateMode: "legacy" | "strict";
   defaultStake: number;
   fallbackAmericanOdds: number;
   allowFallbackOddsForLedger: boolean;
@@ -1308,13 +1384,17 @@ async function upsertSuggestedPlayLedger(args: {
     await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "uncertaintyPenaltyApplied" double precision`);
     await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "adjustedEdgeScore" double precision`);
     await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "actionabilityVersion" text`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "runId" text`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "modelVersionName" text`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "gateMode" text`);
     suggestedPlayLedgerColumnsEnsured = true;
+    suggestedPlayLedgerScopeColumnsEnsured = true;
   }
   const valueRows: string[] = [];
   for (const game of args.games) {
     const playsForLedger = game.suggestedBetPicks ?? [];
     for (const play of playsForLedger) {
-      const dedupKey = ledgerDedupKey(play);
+      const dedupKey = `${args.modelVersionName}|${args.gateMode}|${ledgerDedupKey(play)}`;
       const marketPick = play.marketPick ?? null;
       const settledHit =
         typeof play.result?.hit === "boolean" ? play.result.hit : null;
@@ -1337,6 +1417,7 @@ async function upsertSuggestedPlayLedger(args: {
       const targetName = play.playerTarget?.name ?? marketPick?.playerName ?? null;
       valueRows.push(
         `('${crypto.randomUUID()}','${sqlEsc(args.dateStr)}',${args.season},'${sqlEsc(game.id)}','${sqlEsc(dedupKey)}',` +
+          `${sqlStr(args.runId)},${sqlStr(args.modelVersionName)},${sqlStr(args.gateMode)},` +
           `'${sqlEsc(play.outcomeType)}',${sqlStr(play.displayLabel)},${sqlNum(play.playerTarget?.id ?? null)},${sqlStr(targetName)},` +
           `${sqlStr(marketPick?.market ?? null)},${sqlNum(marketPick?.line ?? null)},${sqlNum(priceAmerican)},${sqlNum(marketPick?.impliedProb ?? null)},` +
           `${sqlNum(marketPick?.impliedProb ?? null)},${sqlNum(marketPick?.estimatedProb ?? null)},${sqlNum(marketPick?.edge ?? null)},${sqlNum(marketPick?.ev ?? null)},` +
@@ -1352,15 +1433,23 @@ async function upsertSuggestedPlayLedger(args: {
       );
     }
   }
+  const gateModeExpr =
+    `COALESCE("gateMode", CASE WHEN COALESCE("actionabilityVersion",'legacy_v1') LIKE 'strict%' THEN 'strict' ELSE 'legacy' END)`;
   await prisma.$executeRawUnsafe(
-    `DELETE FROM "SuggestedPlayLedger" WHERE "date" = '${sqlEsc(args.dateStr)}'`,
+    `DELETE FROM "SuggestedPlayLedger"
+      WHERE "date" = '${sqlEsc(args.dateStr)}'
+        AND COALESCE("modelVersionName",'live') = '${sqlEsc(args.modelVersionName)}'
+        AND ${gateModeExpr} = '${sqlEsc(args.gateMode)}'`,
   );
   if (valueRows.length === 0) return;
   await prisma.$executeRawUnsafe(
     `INSERT INTO "SuggestedPlayLedger"
-      ("id","date","season","gameId","dedupKey","outcomeType","displayLabel","targetPlayerId","targetPlayerName","market","line","priceAmerican","impliedProb","betImpliedProb","estimatedProb","modelEdge","ev","rawWinProbability","calibratedWinProbability","impliedMarketProbability","edgeVsMarket","expectedValueScore","marketType","marketSubType","selectionSide","lineSnapshot","priceSnapshot","laneTag","regimeTags","sourceReliabilityScore","uncertaintyScore","uncertaintyPenaltyApplied","adjustedEdgeScore","actionabilityVersion","closePriceAmerican","closeImpliedProb","clvDeltaProb","clvDeltaCents","clvStatus","posteriorHitRate","metaScore","confidence","votes","stake","isActionable","mlInvolved","settledResult","settledHit","payout","profit","capturedAt","updatedAt")
+      ("id","date","season","gameId","dedupKey","runId","modelVersionName","gateMode","outcomeType","displayLabel","targetPlayerId","targetPlayerName","market","line","priceAmerican","impliedProb","betImpliedProb","estimatedProb","modelEdge","ev","rawWinProbability","calibratedWinProbability","impliedMarketProbability","edgeVsMarket","expectedValueScore","marketType","marketSubType","selectionSide","lineSnapshot","priceSnapshot","laneTag","regimeTags","sourceReliabilityScore","uncertaintyScore","uncertaintyPenaltyApplied","adjustedEdgeScore","actionabilityVersion","closePriceAmerican","closeImpliedProb","clvDeltaProb","clvDeltaCents","clvStatus","posteriorHitRate","metaScore","confidence","votes","stake","isActionable","mlInvolved","settledResult","settledHit","payout","profit","capturedAt","updatedAt")
      VALUES ${valueRows.join(",")}
      ON CONFLICT ("date","gameId","dedupKey") DO UPDATE SET
+      "runId" = EXCLUDED."runId",
+      "modelVersionName" = EXCLUDED."modelVersionName",
+      "gateMode" = EXCLUDED."gateMode",
        "displayLabel" = EXCLUDED."displayLabel",
        "targetPlayerId" = EXCLUDED."targetPlayerId",
        "targetPlayerName" = EXCLUDED."targetPlayerName",
@@ -1442,6 +1531,8 @@ function toWagerSummary(rows: Array<{
 async function getWagerTrackingSummary(args: {
   dateStr: string;
   season: number;
+  modelVersionName: string;
+  gateMode: "legacy" | "strict";
   stakePerPick: number;
   bankrollStart: number;
 }): Promise<{
@@ -1451,6 +1542,8 @@ async function getWagerTrackingSummary(args: {
   seasonToDate: WagerSummary & { throughDate: string; bankrollCurrent: number };
 } | null> {
   if (!(await isSuggestedPlayLedgerAvailable())) return null;
+  const gateModeExpr =
+    `COALESCE(l."gateMode", CASE WHEN COALESCE(l."actionabilityVersion",'legacy_v1') LIKE 'strict%' THEN 'strict' ELSE 'legacy' END)`;
   const [dayRows, seasonRows] = await Promise.all([
     prisma.$queryRawUnsafe<
       Array<{
@@ -1470,6 +1563,8 @@ async function getWagerTrackingSummary(args: {
        FROM "SuggestedPlayLedger" l
        WHERE l."isActionable" = TRUE
          AND l."date" = '${sqlEsc(args.dateStr)}'
+         AND COALESCE(l."modelVersionName",'live') = '${sqlEsc(args.modelVersionName)}'
+         AND ${gateModeExpr} = '${sqlEsc(args.gateMode)}'
        GROUP BY COALESCE(l."settledResult", 'PENDING')`,
     ),
     prisma.$queryRawUnsafe<
@@ -1491,6 +1586,8 @@ async function getWagerTrackingSummary(args: {
        WHERE l."isActionable" = TRUE
          AND l."season" = ${args.season}
          AND l."date" <= '${sqlEsc(args.dateStr)}'
+         AND COALESCE(l."modelVersionName",'live') = '${sqlEsc(args.modelVersionName)}'
+         AND ${gateModeExpr} = '${sqlEsc(args.gateMode)}'
        GROUP BY COALESCE(l."settledResult", 'PENDING')`,
     ),
   ]);
@@ -1524,10 +1621,63 @@ async function isSuggestedPlayLedgerAvailable(): Promise<boolean> {
   return exists;
 }
 
-async function hasLedgerRowsForDate(dateStr: string): Promise<boolean> {
+async function hasLedgerRowsForDate(
+  dateStr: string,
+  modelVersionName: string,
+  gateMode: "legacy" | "strict",
+): Promise<boolean> {
   if (!(await isSuggestedPlayLedgerAvailable())) return false;
+  if (!suggestedPlayLedgerScopeColumnsEnsured) {
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "actionabilityVersion" text`,
+    );
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "modelVersionName" text`,
+    );
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "gateMode" text`,
+    );
+    suggestedPlayLedgerScopeColumnsEnsured = true;
+  }
+  const gateModeExpr =
+    `COALESCE("gateMode", CASE WHEN COALESCE("actionabilityVersion",'legacy_v1') LIKE 'strict%' THEN 'strict' ELSE 'legacy' END)`;
   const rows = await prisma.$queryRawUnsafe<Array<{ count: number }>>(
-    `SELECT COUNT(*)::int as "count" FROM "SuggestedPlayLedger" WHERE "date" = '${sqlEsc(dateStr)}'`,
+    `SELECT COUNT(*)::int as "count"
+     FROM "SuggestedPlayLedger"
+     WHERE "date" = '${sqlEsc(dateStr)}'
+       AND COALESCE("modelVersionName",'live') = '${sqlEsc(modelVersionName)}'
+       AND ${gateModeExpr} = '${sqlEsc(gateMode)}'`,
+  );
+  return (rows[0]?.count ?? 0) > 0;
+}
+
+async function hasPendingLedgerRowsForDate(
+  dateStr: string,
+  modelVersionName: string,
+  gateMode: "legacy" | "strict",
+): Promise<boolean> {
+  if (!(await isSuggestedPlayLedgerAvailable())) return false;
+  if (!suggestedPlayLedgerScopeColumnsEnsured) {
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "actionabilityVersion" text`,
+    );
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "modelVersionName" text`,
+    );
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "gateMode" text`,
+    );
+    suggestedPlayLedgerScopeColumnsEnsured = true;
+  }
+  const gateModeExpr =
+    `COALESCE("gateMode", CASE WHEN COALESCE("actionabilityVersion",'legacy_v1') LIKE 'strict%' THEN 'strict' ELSE 'legacy' END)`;
+  const rows = await prisma.$queryRawUnsafe<Array<{ count: number }>>(
+    `SELECT COUNT(*)::int as "count"
+     FROM "SuggestedPlayLedger"
+     WHERE "date" = '${sqlEsc(dateStr)}'
+       AND COALESCE("modelVersionName",'live') = '${sqlEsc(modelVersionName)}'
+       AND ${gateModeExpr} = '${sqlEsc(gateMode)}'
+       AND "settledHit" IS NULL`,
   );
   return (rows[0]?.count ?? 0) > 0;
 }
@@ -1535,10 +1685,14 @@ async function hasLedgerRowsForDate(dateStr: string): Promise<boolean> {
 async function getSeasonBetHitSummary(
   dateStr: string,
   season: number,
+  modelVersionName: string,
+  gateMode: "legacy" | "strict",
 ): Promise<{ hits: number; total: number; hitRate: number | null }> {
   if (!(await isSuggestedPlayLedgerAvailable())) {
     return { hits: 0, total: 0, hitRate: null };
   }
+  const gateModeExpr =
+    `COALESCE(l."gateMode", CASE WHEN COALESCE(l."actionabilityVersion",'legacy_v1') LIKE 'strict%' THEN 'strict' ELSE 'legacy' END)`;
   const rows = await prisma.$queryRawUnsafe<Array<{ settledHit: boolean; count: number }>>(
     `SELECT
        l."settledHit" as "settledHit",
@@ -1547,6 +1701,8 @@ async function getSeasonBetHitSummary(
      WHERE l."isActionable" = TRUE
        AND l."season" = ${season}
        AND l."date" <= '${sqlEsc(dateStr)}'
+       AND COALESCE(l."modelVersionName",'live') = '${sqlEsc(modelVersionName)}'
+       AND ${gateModeExpr} = '${sqlEsc(gateMode)}'
        AND COALESCE(l."settledResult",'PENDING') IN ('HIT','MISS')
      GROUP BY l."settledHit"`,
   );
@@ -1562,12 +1718,16 @@ async function getSeasonBetHitSummary(
 async function shouldUpsertLedgerSnapshot(
   dateStr: string,
   refreshLedger: boolean,
+  modelVersionName: string,
+  gateMode: "legacy" | "strict",
 ): Promise<boolean> {
   if (refreshLedger) return true;
   const today = new Date().toISOString().slice(0, 10);
   if (dateStr >= today) return true; // today/future can change as markets/results update
-  const hasRows = await hasLedgerRowsForDate(dateStr);
-  return !hasRows; // past dates are immutable once captured
+  const hasRows = await hasLedgerRowsForDate(dateStr, modelVersionName, gateMode);
+  if (!hasRows) return true;
+  // Re-grade past days if this model/gate scope still has unresolved rows.
+  return await hasPendingLedgerRowsForDate(dateStr, modelVersionName, gateMode);
 }
 
 async function computePlayerContextFallback(

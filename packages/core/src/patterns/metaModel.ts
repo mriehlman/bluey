@@ -55,6 +55,11 @@ function parseFlags(args: string[]): Record<string, string> {
   return flags;
 }
 
+function getCurrentSeason(): number {
+  const now = new Date();
+  return now.getUTCMonth() >= 9 ? now.getUTCFullYear() : now.getUTCFullYear() - 1;
+}
+
 function mean(values: number[]): number {
   if (values.length === 0) return 0;
   return values.reduce((a, b) => a + b, 0) / values.length;
@@ -326,11 +331,13 @@ async function loadMetaRows(
   statuses: string[],
   fromDate?: Date,
   toDate?: Date,
+  maxSeason?: number,
 ): Promise<MetaRow[]> {
   const statusClause = statuses.map((s) => `'${s.replaceAll("'", "''")}'`).join(",");
   const where: string[] = [`p."status" IN (${statusClause})`];
   if (fromDate) where.push(`h."date" >= '${fromDate.toISOString().slice(0, 10)}'`);
   if (toDate) where.push(`h."date" <= '${toDate.toISOString().slice(0, 10)}'`);
+  if (maxSeason != null && Number.isFinite(maxSeason)) where.push(`g."season" <= ${Math.floor(maxSeason)}`);
 
   const rows = await prisma.$queryRawUnsafe<MetaRow[]>(
     `SELECT
@@ -344,6 +351,7 @@ async function loadMetaRows(
       h."date" as "date"
      FROM "PatternV2Hit" h
      JOIN "PatternV2" p ON p."id" = h."patternId"
+     JOIN "Game" g ON g."id" = h."gameId"
      WHERE ${where.join(" AND ")}`,
   );
   return rows;
@@ -451,12 +459,19 @@ export async function trainMetaModel(args: string[] = []): Promise<void> {
   const calibrationMethod = (flags["calibration-method"] ?? "platt") as CalibrationMethod;
   const fromDate = flags.from ? new Date(`${flags.from}T00:00:00Z`) : undefined;
   const toDate = flags.to ? new Date(`${flags.to}T00:00:00Z`) : undefined;
+  const includeCurrentSeason = flags["include-current-season"] === "true";
+  const maxSeason = includeCurrentSeason ? undefined : getCurrentSeason() - 1;
   if (!["platt", "isotonic", "auto"].includes(calibrationMethod)) {
     throw new Error(`Invalid --calibration-method '${calibrationMethod}'. Use platt|isotonic|auto.`);
   }
 
   console.log("\n=== Train Meta Model ===\n");
-  const rows = await loadMetaRows(statuses, fromDate, toDate);
+  const rows = await loadMetaRows(statuses, fromDate, toDate, maxSeason);
+  if (!includeCurrentSeason) {
+    console.log(`Season filter: excluding current season (using <= ${maxSeason})`);
+  } else {
+    console.log("Season filter: including current season (--include-current-season true)");
+  }
   if (rows.length < 500) {
     throw new Error(`Not enough training rows (${rows.length}). Need at least 500.`);
   }

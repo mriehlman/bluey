@@ -7,7 +7,6 @@ import type { GameEventContext } from "@bluey/core/features/gameEventCatalog";
 import {
   generateGamePredictions,
   loadLatestFeatureBins,
-  loadMetaModel,
   evaluatePlayerPointsMlVote,
   type DeployedPatternV2,
   type PlayerPropRow,
@@ -234,7 +233,7 @@ async function loadArtifacts(modelVersion: string | null): Promise<{
   modelVersionUsed: string;
   deployedPatterns: DeployedPatternV2[];
   featureBins: Map<string, any>;
-  metaModel: Awaited<ReturnType<typeof loadMetaModel>>;
+  metaModel: null;
 }> {
   if (modelVersion && modelVersion !== "live") {
     const snapshot = await prisma.modelVersion.findUnique({
@@ -248,7 +247,7 @@ async function loadArtifacts(modelVersion: string | null): Promise<{
       modelVersionUsed: snapshot.name,
       deployedPatterns: snapshot.deployedPatterns as unknown as DeployedPatternV2[],
       featureBins: new Map(Object.entries(snapshot.featureBins as Record<string, unknown>)),
-      metaModel: snapshot.metaModel as any,
+      metaModel: null,
     };
   }
 
@@ -259,12 +258,12 @@ async function loadArtifacts(modelVersion: string | null): Promise<{
         modelVersionUsed: active.name,
         deployedPatterns: active.deployedPatterns,
         featureBins: new Map(Object.entries(active.featureBins)),
-        metaModel: active.metaModel as any,
+        metaModel: null,
       };
     }
   }
 
-  const [deployedPatterns, featureBins, metaModel] = await Promise.all([
+  const [deployedPatterns, featureBins] = await Promise.all([
     prisma.patternV2.findMany({
       where: { status: "deployed" },
       select: {
@@ -278,14 +277,13 @@ async function loadArtifacts(modelVersion: string | null): Promise<{
       },
     }),
     loadLatestFeatureBins(prisma),
-    loadMetaModel(),
   ]);
 
   return {
     modelVersionUsed: "live",
     deployedPatterns: deployedPatterns as unknown as DeployedPatternV2[],
     featureBins,
-    metaModel,
+    metaModel: null,
   };
 }
 

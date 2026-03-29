@@ -4,12 +4,23 @@ import { outcomeFamily, matchesConditions, isLowSpecificityConditionToken } from
 import { autoSnapshotBeforeDiscovery } from "./modelVersion";
 
 type FeatureBinDef = {
-  kind: "quantile" | "fixed";
+  kind: "quantile" | "fixed" | "hybrid";
   labels: string[];
   edges: number[];
+  hybridLabels?: string[];
 };
 
-type FeatureExtractor = (row: GameWithContextAndOdds) => number | null;
+type FeatureTier = "state" | "context" | "market";
+type FeatureBucketType = "quantile" | "fixed" | "hybrid";
+type FeatureValue = number | string | null;
+type FeatureExtractor = (row: GameWithContextAndOdds) => FeatureValue;
+type FeatureDef = {
+  name: string;
+  tier: FeatureTier;
+  type: FeatureBucketType;
+  compute: FeatureExtractor;
+  fixedDef?: FeatureBinDef;
+};
 
 type GameWithContextAndOdds = Awaited<ReturnType<typeof loadGamesForFeatures>>[number];
 
@@ -50,6 +61,14 @@ type ScoredPattern = CandidatePattern & {
 };
 
 type FamilyBucket = "PLAYER" | "TOTAL" | "SPREAD" | "MONEYLINE" | "OTHER";
+const FAMILY_BUCKETS: FamilyBucket[] = ["PLAYER", "TOTAL", "SPREAD", "MONEYLINE", "OTHER"];
+
+const LEGACY_FEATURES_UNDER_EVALUATION = [
+  "home_ppg",
+  "away_ppg",
+  "home_oppg",
+  "away_oppg",
+] as const;
 
 function parseFlags(args: string[]): Record<string, string> {
   const flags: Record<string, string> = {};
@@ -100,7 +119,32 @@ function fixedBinDef(labels: string[], edges: number[]): FeatureBinDef {
   return { kind: "fixed", labels, edges };
 }
 
-function bucketValue(value: number, def: FeatureBinDef): string {
+function categoricalBinDef(labels: string[]): FeatureBinDef {
+  return { kind: "fixed", labels, edges: [] };
+}
+
+function hybridBinDef(numericDef: FeatureBinDef, semanticLabels: string[]): FeatureBinDef {
+  return {
+    kind: "hybrid",
+    labels: numericDef.labels,
+    edges: numericDef.edges,
+    hybridLabels: semanticLabels,
+  };
+}
+
+function bucketValue(value: number | string, def: FeatureBinDef): string {
+  if (typeof value === "string") {
+    if (def.kind === "hybrid") {
+      if ((def.hybridLabels ?? []).includes(value)) return value;
+      if (def.labels.includes(value)) return value;
+    }
+    if (def.kind === "fixed" && def.labels.includes(value)) return value;
+    return value;
+  }
+  if (!Number.isFinite(value)) return def.labels[0] ?? "UNKNOWN";
+  if (def.edges.length === 0) {
+    return def.labels[0] ?? "UNKNOWN";
+  }
   for (let i = 0; i < def.edges.length; i++) {
     if (value <= def.edges[i]) {
       return def.labels[i] ?? `B${i + 1}`;
@@ -134,9 +178,20 @@ async function loadGamesForFeatures(fromSeason: number, toSeason: number) {
       playerContexts: {
         select: {
           teamId: true,
+          playerId: true,
           ppg: true,
+          rpg: true,
           apg: true,
           last5Ppg: true,
+        },
+      },
+      playerPropOdds: {
+        select: {
+          playerId: true,
+          market: true,
+          line: true,
+          overPrice: true,
+          underPrice: true,
         },
       },
     },
@@ -147,7 +202,7 @@ function getConsensusOdds(row: GameWithContextAndOdds) {
   return row.odds.find((o) => o.source === "consensus") ?? row.odds[0] ?? null;
 }
 
-function featureExtractors(): Record<string, FeatureExtractor> {
+function featureDefinitions(): FeatureDef[] {
   const top3Average = (
     r: GameWithContextAndOdds,
     teamId: number,
@@ -163,7 +218,137 @@ function featureExtractors(): Record<string, FeatureExtractor> {
     return vals.reduce((sum, v) => sum + v, 0) / vals.length;
   };
 
-  return {
+  const topContextStatByTeam = (
+    r: GameWithContextAndOdds,
+    teamId: number,
+    stat: "ppg" | "rpg" | "apg",
+  ): number | null => {
+    const vals = r.playerContexts
+      .filter((pc) => pc.teamId === teamId)
+      .map((pc) => pc[stat])
+      .filter((v) => Number.isFinite(v));
+    if (vals.length === 0) return null;
+    return Math.max(...vals);
+  };
+
+  const topPropLineByTeam = (
+    r: GameWithContextAndOdds,
+    teamId: number,
+    market: "player_points" | "player_rebounds" | "player_assists",
+  ): number | null => {
+    const teamPlayerIds = new Set(
+      r.playerContexts.filter((pc) => pc.teamId === teamId).map((pc) => pc.playerId),
+    );
+    if (teamPlayerIds.size === 0) return null;
+    const byPlayer = new Map<number, { sum: number; n: number }>();
+    for (const prop of r.playerPropOdds) {
+      if (prop.market !== market || prop.line == null || !Number.isFinite(prop.line)) continue;
+      if (!teamPlayerIds.has(prop.playerId)) continue;
+      if (prop.overPrice == null || prop.underPrice == null) continue;
+      const prev = byPlayer.get(prop.playerId) ?? { sum: 0, n: 0 };
+      byPlayer.set(prop.playerId, { sum: prev.sum + prop.line, n: prev.n + 1 });
+    }
+    if (byPlayer.size === 0) return null;
+    let best: number | null = null;
+    for (const row of byPlayer.values()) {
+      if (row.n <= 0) continue;
+      const avg = row.sum / row.n;
+      if (!Number.isFinite(avg)) continue;
+      if (best == null || avg > best) best = avg;
+    }
+    return best;
+  };
+
+  const rankToStrength = (rank: number | null | undefined): number | null => {
+    if (rank == null || !Number.isFinite(rank)) return null;
+    return (31 - rank) / 30;
+  };
+
+  const roleDependencyByTeam = (r: GameWithContextAndOdds, teamId: number): number | null => {
+    const players = r.playerContexts
+      .filter((pc) => pc.teamId === teamId && Number.isFinite(pc.ppg))
+      .map((pc) => pc.ppg)
+      .sort((a, b) => b - a)
+      .slice(0, 3);
+    if (players.length < 2) return null;
+    const denom = players.reduce((sum, v) => sum + v, 0);
+    if (denom <= 0) return null;
+    return players[0] / denom;
+  };
+
+  const creationBurdenByTeam = (r: GameWithContextAndOdds, teamId: number, astFromContext: number | null | undefined): number | null => {
+    const topScorer = top3Average(r, teamId, "ppg");
+    const ast = astFromContext ?? top3Average(r, teamId, "apg");
+    if (topScorer == null || ast == null || ast <= 0) return null;
+    return topScorer / ast;
+  };
+
+  const playmakingResilienceByTeam = (
+    ast: number | null | undefined,
+    oppDefRank: number | null | undefined,
+  ): number | null => {
+    if (ast == null || ast <= 0) return null;
+    const pressure = oppDefRank != null ? (31 - oppDefRank) / 30 : 0.5;
+    return ast / (1 + pressure * 0.6);
+  };
+
+  const injuryLoadByTeam = (
+    outCount: number | null | undefined,
+    doubtfulCount: number | null | undefined,
+    questionableCount: number | null | undefined,
+  ): number | null => {
+    if (
+      outCount == null &&
+      doubtfulCount == null &&
+      questionableCount == null
+    ) {
+      return null;
+    }
+    return (
+      (outCount ?? 0) * 1 +
+      (doubtfulCount ?? 0) * 0.9 +
+      (questionableCount ?? 0) * 0.55
+    );
+  };
+
+  const semanticLineupCertainty = (v: number | null | undefined): string | null => {
+    if (v == null || !Number.isFinite(v)) return null;
+    if (v < 0.6) return "LOW";
+    if (v < 0.82) return "MID";
+    return "HIGH";
+  };
+
+  const semanticRoleDependency = (v: number | null | undefined): string | null => {
+    if (v == null || !Number.isFinite(v)) return null;
+    if (v < 0.36) return "BALANCED";
+    if (v < 0.5) return "STAR_LED";
+    return "EXTREME";
+  };
+
+  const semanticLineValue = (v: number | null | undefined): string | null => {
+    if (v == null || !Number.isFinite(v)) return null;
+    if (v < -0.9) return "UNDERPRICED";
+    if (v > 0.9) return "OVERPRICED";
+    return "FAIR";
+  };
+
+  const semanticInjuryEnvironment = (totalWeightedInjuryLoad: number | null | undefined): string | null => {
+    if (totalWeightedInjuryLoad == null || !Number.isFinite(totalWeightedInjuryLoad)) return null;
+    if (totalWeightedInjuryLoad <= 1.2) return "CLEAN";
+    if (totalWeightedInjuryLoad <= 3.6) return "MIXED";
+    return "CHAOTIC";
+  };
+
+  const seasonPhaseValue = (r: GameWithContextAndOdds): number => {
+    const homeGp = (r.context?.homeWins ?? 0) + (r.context?.homeLosses ?? 0);
+    const awayGp = (r.context?.awayWins ?? 0) + (r.context?.awayLosses ?? 0);
+    const avgGp = (homeGp + awayGp) / 2;
+    if (avgGp <= 20) return 0;
+    if (avgGp <= 60) return 1;
+    return 2;
+  };
+
+  const baseExtractors: Record<string, FeatureExtractor> = {
     home_ppg: (r) => r.context?.homePpg ?? null,
     away_ppg: (r) => r.context?.awayPpg ?? null,
     home_oppg: (r) => r.context?.homeOppg ?? null,
@@ -196,6 +381,8 @@ function featureExtractors(): Record<string, FeatureExtractor> {
       r.context ? (r.context.homeLateScratchRisk ?? 0) - (r.context.awayLateScratchRisk ?? 0) : null,
     home_net_rating: (r) => (r.context ? r.context.homePpg - r.context.homeOppg : null),
     away_net_rating: (r) => (r.context ? r.context.awayPpg - r.context.awayOppg : null),
+    net_rating_delta: (r) =>
+      r.context ? (r.context.homePpg - r.context.homeOppg) - (r.context.awayPpg - r.context.awayOppg) : null,
     spread_home: (r) => getConsensusOdds(r)?.spreadHome ?? null,
     spread_abs: (r) => {
       const s = getConsensusOdds(r)?.spreadHome;
@@ -205,60 +392,51 @@ function featureExtractors(): Record<string, FeatureExtractor> {
     ml_home: (r) => getConsensusOdds(r)?.mlHome ?? null,
     ml_away: (r) => getConsensusOdds(r)?.mlAway ?? null,
     home_creation_burden: (r) => {
-      const topScorer = top3Average(r, r.homeTeamId, "ppg");
-      const ast = r.context?.homeAstPg ?? top3Average(r, r.homeTeamId, "apg");
-      if (topScorer == null || ast == null || ast <= 0) return null;
-      return topScorer / ast;
+      return creationBurdenByTeam(r, r.homeTeamId, r.context?.homeAstPg);
     },
     away_creation_burden: (r) => {
-      const topScorer = top3Average(r, r.awayTeamId, "ppg");
-      const ast = r.context?.awayAstPg ?? top3Average(r, r.awayTeamId, "apg");
-      if (topScorer == null || ast == null || ast <= 0) return null;
-      return topScorer / ast;
+      return creationBurdenByTeam(r, r.awayTeamId, r.context?.awayAstPg);
+    },
+    creation_burden_delta: (r) => {
+      const home = creationBurdenByTeam(r, r.homeTeamId, r.context?.homeAstPg);
+      const away = creationBurdenByTeam(r, r.awayTeamId, r.context?.awayAstPg);
+      if (home == null || away == null) return null;
+      return home - away;
     },
     home_playmaking_resilience: (r) => {
       const ast = r.context?.homeAstPg ?? top3Average(r, r.homeTeamId, "apg");
-      const oppDefRank = r.context?.awayRankDef;
-      if (ast == null || ast <= 0) return null;
-      const pressure = oppDefRank != null ? (31 - oppDefRank) / 30 : 0.5;
-      return ast / (1 + pressure * 0.6);
+      return playmakingResilienceByTeam(ast, r.context?.awayRankDef);
     },
     away_playmaking_resilience: (r) => {
       const ast = r.context?.awayAstPg ?? top3Average(r, r.awayTeamId, "apg");
-      const oppDefRank = r.context?.homeRankDef;
-      if (ast == null || ast <= 0) return null;
-      const pressure = oppDefRank != null ? (31 - oppDefRank) / 30 : 0.5;
-      return ast / (1 + pressure * 0.6);
+      return playmakingResilienceByTeam(ast, r.context?.homeRankDef);
+    },
+    playmaking_resilience_delta: (r) => {
+      const home = playmakingResilienceByTeam(
+        r.context?.homeAstPg ?? top3Average(r, r.homeTeamId, "apg"),
+        r.context?.awayRankDef,
+      );
+      const away = playmakingResilienceByTeam(
+        r.context?.awayAstPg ?? top3Average(r, r.awayTeamId, "apg"),
+        r.context?.homeRankDef,
+      );
+      if (home == null || away == null) return null;
+      return home - away;
     },
     home_role_dependency: (r) => {
-      const players = r.playerContexts
-        .filter((pc) => pc.teamId === r.homeTeamId && Number.isFinite(pc.ppg))
-        .map((pc) => pc.ppg)
-        .sort((a, b) => b - a)
-        .slice(0, 3);
-      if (players.length < 2) return null;
-      const denom = players.reduce((sum, v) => sum + v, 0);
-      if (denom <= 0) return null;
-      return players[0] / denom;
+      return roleDependencyByTeam(r, r.homeTeamId);
     },
     away_role_dependency: (r) => {
-      const players = r.playerContexts
-        .filter((pc) => pc.teamId === r.awayTeamId && Number.isFinite(pc.ppg))
-        .map((pc) => pc.ppg)
-        .sort((a, b) => b - a)
-        .slice(0, 3);
-      if (players.length < 2) return null;
-      const denom = players.reduce((sum, v) => sum + v, 0);
-      if (denom <= 0) return null;
-      return players[0] / denom;
+      return roleDependencyByTeam(r, r.awayTeamId);
+    },
+    role_dependency_delta: (r) => {
+      const home = roleDependencyByTeam(r, r.homeTeamId);
+      const away = roleDependencyByTeam(r, r.awayTeamId);
+      if (home == null || away == null) return null;
+      return home - away;
     },
     season_progress: (r) => {
-      const homeGp = (r.context?.homeWins ?? 0) + (r.context?.homeLosses ?? 0);
-      const awayGp = (r.context?.awayWins ?? 0) + (r.context?.awayLosses ?? 0);
-      const avgGp = (homeGp + awayGp) / 2;
-      if (avgGp <= 20) return 0;
-      if (avgGp <= 60) return 1;
-      return 2;
+      return seasonPhaseValue(r);
     },
     pace_interaction: (r) => {
       const hp = r.context?.homePace;
@@ -298,7 +476,287 @@ function featureExtractors(): Record<string, FeatureExtractor> {
     },
     home_fg3_rate: (r) => r.context?.homeFg3Pct ?? null,
     away_fg3_rate: (r) => r.context?.awayFg3Pct ?? null,
+    home_top_points_line_delta: (r) => {
+      const line = topPropLineByTeam(r, r.homeTeamId, "player_points");
+      const baseline = topContextStatByTeam(r, r.homeTeamId, "ppg");
+      if (line == null || baseline == null) return null;
+      return line - baseline;
+    },
+    away_top_points_line_delta: (r) => {
+      const line = topPropLineByTeam(r, r.awayTeamId, "player_points");
+      const baseline = topContextStatByTeam(r, r.awayTeamId, "ppg");
+      if (line == null || baseline == null) return null;
+      return line - baseline;
+    },
+    home_top_rebounds_line_delta: (r) => {
+      const line = topPropLineByTeam(r, r.homeTeamId, "player_rebounds");
+      const baseline = topContextStatByTeam(r, r.homeTeamId, "rpg");
+      if (line == null || baseline == null) return null;
+      return line - baseline;
+    },
+    away_top_rebounds_line_delta: (r) => {
+      const line = topPropLineByTeam(r, r.awayTeamId, "player_rebounds");
+      const baseline = topContextStatByTeam(r, r.awayTeamId, "rpg");
+      if (line == null || baseline == null) return null;
+      return line - baseline;
+    },
+    home_top_assists_line_delta: (r) => {
+      const line = topPropLineByTeam(r, r.homeTeamId, "player_assists");
+      const baseline = topContextStatByTeam(r, r.homeTeamId, "apg");
+      if (line == null || baseline == null) return null;
+      return line - baseline;
+    },
+    away_top_assists_line_delta: (r) => {
+      const line = topPropLineByTeam(r, r.awayTeamId, "player_assists");
+      const baseline = topContextStatByTeam(r, r.awayTeamId, "apg");
+      if (line == null || baseline == null) return null;
+      return line - baseline;
+    },
+    offense_vs_opp_def: (r) => {
+      const homeOff = rankToStrength(r.context?.homeRankOff);
+      const awayDef = rankToStrength(r.context?.awayRankDef);
+      const awayOff = rankToStrength(r.context?.awayRankOff);
+      const homeDef = rankToStrength(r.context?.homeRankDef);
+      if (homeOff == null || awayDef == null || awayOff == null || homeDef == null) return null;
+      return (homeOff - awayDef) - (awayOff - homeDef);
+    },
+    star_dependency_under_pressure: (r) => {
+      const homeRole = roleDependencyByTeam(r, r.homeTeamId);
+      const awayRole = roleDependencyByTeam(r, r.awayTeamId);
+      const homeOppPressure = rankToStrength(r.context?.awayRankDef);
+      const awayOppPressure = rankToStrength(r.context?.homeRankDef);
+      if (homeRole == null || awayRole == null || homeOppPressure == null || awayOppPressure == null) return null;
+      return homeRole * homeOppPressure - awayRole * awayOppPressure;
+    },
+    injury_fragility: (r) => {
+      const homeLoad = injuryLoadByTeam(
+        r.context?.homeInjuryOutCount,
+        r.context?.homeInjuryDoubtfulCount,
+        r.context?.homeInjuryQuestionableCount,
+      );
+      const awayLoad = injuryLoadByTeam(
+        r.context?.awayInjuryOutCount,
+        r.context?.awayInjuryDoubtfulCount,
+        r.context?.awayInjuryQuestionableCount,
+      );
+      const homeRole = roleDependencyByTeam(r, r.homeTeamId);
+      const awayRole = roleDependencyByTeam(r, r.awayTeamId);
+      const homeCertainty = r.context?.homeLineupCertainty;
+      const awayCertainty = r.context?.awayLineupCertainty;
+      if (
+        homeLoad == null ||
+        awayLoad == null ||
+        homeRole == null ||
+        awayRole == null ||
+        homeCertainty == null ||
+        awayCertainty == null
+      ) {
+        return null;
+      }
+      const homeFragility = homeLoad + homeRole * 2 - homeCertainty * 1.25;
+      const awayFragility = awayLoad + awayRole * 2 - awayCertainty * 1.25;
+      return homeFragility - awayFragility;
+    },
+    shot_creation_stability: (r) => {
+      const homeRes = playmakingResilienceByTeam(
+        r.context?.homeAstPg ?? top3Average(r, r.homeTeamId, "apg"),
+        r.context?.awayRankDef,
+      );
+      const awayRes = playmakingResilienceByTeam(
+        r.context?.awayAstPg ?? top3Average(r, r.awayTeamId, "apg"),
+        r.context?.homeRankDef,
+      );
+      const homeBurden = creationBurdenByTeam(r, r.homeTeamId, r.context?.homeAstPg);
+      const awayBurden = creationBurdenByTeam(r, r.awayTeamId, r.context?.awayAstPg);
+      if (homeRes == null || awayRes == null || homeBurden == null || awayBurden == null) return null;
+      return (homeRes - homeBurden) - (awayRes - awayBurden);
+    },
+    market_overpricing_risk: (r) => {
+      const spread = getConsensusOdds(r)?.spreadHome;
+      const homeTopLine = topPropLineByTeam(r, r.homeTeamId, "player_points");
+      const awayTopLine = topPropLineByTeam(r, r.awayTeamId, "player_points");
+      const homeBaseline = topContextStatByTeam(r, r.homeTeamId, "ppg");
+      const awayBaseline = topContextStatByTeam(r, r.awayTeamId, "ppg");
+      if (
+        spread == null ||
+        homeTopLine == null ||
+        awayTopLine == null ||
+        homeBaseline == null ||
+        awayBaseline == null
+      ) {
+        return null;
+      }
+      const homeGap = homeTopLine - homeBaseline;
+      const awayGap = awayTopLine - awayBaseline;
+      const marketBiasToHome = -spread * 0.15;
+      return (homeGap - awayGap) + marketBiasToHome;
+    },
+    lineup_certainty: (r) => {
+      const hc = r.context?.homeLineupCertainty;
+      const ac = r.context?.awayLineupCertainty;
+      if (hc == null || ac == null) return null;
+      return semanticLineupCertainty(Math.min(hc, ac));
+    },
+    role_dependency_band: (r) => {
+      const home = roleDependencyByTeam(r, r.homeTeamId);
+      const away = roleDependencyByTeam(r, r.awayTeamId);
+      if (home == null || away == null) return null;
+      return semanticRoleDependency(Math.max(home, away));
+    },
+    line_value_state: (r) => {
+      const homeTopLine = topPropLineByTeam(r, r.homeTeamId, "player_points");
+      const awayTopLine = topPropLineByTeam(r, r.awayTeamId, "player_points");
+      const homeBaseline = topContextStatByTeam(r, r.homeTeamId, "ppg");
+      const awayBaseline = topContextStatByTeam(r, r.awayTeamId, "ppg");
+      if (
+        homeTopLine == null ||
+        awayTopLine == null ||
+        homeBaseline == null ||
+        awayBaseline == null
+      ) {
+        return null;
+      }
+      return semanticLineValue((homeTopLine - homeBaseline) - (awayTopLine - awayBaseline));
+    },
+    injury_noise: (r) => {
+      const homeNoise = (r.context?.homeInjuryQuestionableCount ?? 0) + (r.context?.homeInjuryDoubtfulCount ?? 0);
+      const awayNoise = (r.context?.awayInjuryQuestionableCount ?? 0) + (r.context?.awayInjuryDoubtfulCount ?? 0);
+      const lateScratch = (r.context?.homeLateScratchRisk ?? 0) + (r.context?.awayLateScratchRisk ?? 0);
+      const score = homeNoise + awayNoise + lateScratch * 2;
+      if (!Number.isFinite(score)) return null;
+      if (score < 1.5) return "LOW";
+      if (score < 3.5) return "MID";
+      return "HIGH";
+    },
+    team_form_volatility: (r) => {
+      const streakDelta = Math.abs((r.context?.homeStreak ?? 0) - (r.context?.awayStreak ?? 0));
+      const lineupGap = Math.abs((r.context?.homeLineupCertainty ?? 0.75) - (r.context?.awayLineupCertainty ?? 0.75));
+      const score = streakDelta * 0.2 + lineupGap * 2;
+      if (!Number.isFinite(score)) return null;
+      if (score < 0.9) return "LOW";
+      if (score < 1.8) return "MID";
+      return "HIGH";
+    },
+    data_completeness: (r) => {
+      const checks = [
+        r.context?.homePpg,
+        r.context?.awayPpg,
+        r.context?.homeRankOff,
+        r.context?.awayRankOff,
+        r.context?.homeRankDef,
+        r.context?.awayRankDef,
+        r.context?.homeLineupCertainty,
+        r.context?.awayLineupCertainty,
+      ];
+      const available = checks.filter((x) => x != null && Number.isFinite(x)).length;
+      if (available >= 8) return "HIGH";
+      if (available >= 6) return "MID";
+      return "LOW";
+    },
+    market_total_band: (r) => {
+      const total = getConsensusOdds(r)?.totalOver;
+      if (total == null || !Number.isFinite(total)) return null;
+      if (total < 216) return "LOW";
+      if (total <= 232) return "MID";
+      return "HIGH";
+    },
+    spread_band: (r) => {
+      const spread = getConsensusOdds(r)?.spreadHome;
+      if (spread == null || !Number.isFinite(spread)) return null;
+      const abs = Math.abs(spread);
+      if (abs <= 3) return "CLOSE";
+      if (abs <= 8) return "MEDIUM";
+      return "WIDE";
+    },
+    season_phase: (r) => {
+      const phase = seasonPhaseValue(r);
+      if (phase === 0) return "EARLY";
+      if (phase === 1) return "MID";
+      return "LATE";
+    },
+    injury_environment: (r) => {
+      const homeLoad = injuryLoadByTeam(
+        r.context?.homeInjuryOutCount,
+        r.context?.homeInjuryDoubtfulCount,
+        r.context?.homeInjuryQuestionableCount,
+      );
+      const awayLoad = injuryLoadByTeam(
+        r.context?.awayInjuryOutCount,
+        r.context?.awayInjuryDoubtfulCount,
+        r.context?.awayInjuryQuestionableCount,
+      );
+      if (homeLoad == null || awayLoad == null) return null;
+      return semanticInjuryEnvironment(homeLoad + awayLoad);
+    },
+    fg3_rate_delta: (r) => {
+      const h = r.context?.homeFg3Pct;
+      const a = r.context?.awayFg3Pct;
+      if (h == null || a == null) return null;
+      return h - a;
+    },
   };
+
+  const fixedDefs: Record<string, FeatureBinDef> = {
+    spread_abs: fixedBinDef(["LT_3", "RANGE_3_7", "RANGE_7_10", "GT_10"], [3, 7, 10]),
+    spread_home: fixedBinDef(["LE_-10", "-10_TO_-3", "-3_TO_0", "0_TO_3", "3_TO_10", "GE_10"], [-10, -3, 0, 3, 10]),
+    total_line: fixedBinDef(["LT_210", "RANGE_210_220", "RANGE_220_230", "RANGE_230_240", "GE_240"], [210, 220, 230, 240]),
+    home_role_dependency: fixedBinDef(["BALANCED", "STAR_LED", "EXTREME"], [0.36, 0.5]),
+    away_role_dependency: fixedBinDef(["BALANCED", "STAR_LED", "EXTREME"], [0.36, 0.5]),
+    role_dependency_band: categoricalBinDef(["BALANCED", "STAR_LED", "EXTREME"]),
+    season_progress: fixedBinDef(["EARLY", "MID", "LATE"], [0, 1]),
+    rest_advantage_delta: fixedBinDef(["OPP_RESTED", "EVEN", "HOME_RESTED"], [-1, 1]),
+    streak_delta: fixedBinDef(["LOSING_SIDE", "EVEN", "WINNING_SIDE"], [-3, 3]),
+    lineup_certainty: categoricalBinDef(["LOW", "MID", "HIGH"]),
+    line_value_state: categoricalBinDef(["UNDERPRICED", "FAIR", "OVERPRICED"]),
+    market_overpricing_risk: fixedBinDef(["UNDERPRICED", "FAIR", "OVERPRICED"], [-0.9, 0.9]),
+    injury_noise: categoricalBinDef(["LOW", "MID", "HIGH"]),
+    team_form_volatility: categoricalBinDef(["LOW", "MID", "HIGH"]),
+    data_completeness: categoricalBinDef(["LOW", "MID", "HIGH"]),
+    market_total_band: categoricalBinDef(["LOW", "MID", "HIGH"]),
+    spread_band: categoricalBinDef(["CLOSE", "MEDIUM", "WIDE"]),
+    season_phase: categoricalBinDef(["EARLY", "MID", "LATE"]),
+    injury_environment: categoricalBinDef(["CLEAN", "MIXED", "CHAOTIC"]),
+    home_injury_out: fixedBinDef(["0", "1", "2", "3_PLUS"], [0, 1, 2]),
+    away_injury_out: fixedBinDef(["0", "1", "2", "3_PLUS"], [0, 1, 2]),
+    home_injury_questionable: fixedBinDef(["0", "1", "2", "3_PLUS"], [0, 1, 2]),
+    away_injury_questionable: fixedBinDef(["0", "1", "2", "3_PLUS"], [0, 1, 2]),
+  };
+
+  const hybridFeatures = new Set<string>(["market_overpricing_risk"]);
+
+  const inferTier = (name: string): FeatureTier => {
+    if (
+      name.startsWith("spread_") ||
+      name.startsWith("ml_") ||
+      name.includes("market_") ||
+      name.includes("line_") ||
+      name === "total_line" ||
+      name === "market_total_band" ||
+      name === "line_value_state"
+    ) {
+      return "market";
+    }
+    if (
+      name.includes("injury") ||
+      name.includes("lineup") ||
+      name.includes("rest") ||
+      name.includes("streak") ||
+      name.includes("season") ||
+      name.includes("volatility") ||
+      name.includes("completeness")
+    ) {
+      return "context";
+    }
+    return "state";
+  };
+
+  return Object.entries(baseExtractors).map(([name, compute]) => ({
+    name,
+    tier: inferTier(name),
+    type: hybridFeatures.has(name) ? "hybrid" : fixedDefs[name] ? "fixed" : "quantile",
+    compute,
+    fixedDef: fixedDefs[name],
+  }));
 }
 
 export async function buildFeatureBins(args: string[] = []): Promise<void> {
@@ -309,39 +767,40 @@ export async function buildFeatureBins(args: string[] = []): Promise<void> {
   const seasonRange = `${fromSeason}-${toSeason}`;
 
   console.log(`\n=== Build Feature Bins (${seasonRange}) ===\n`);
+  console.log(
+    `Legacy raw scoring features retained for evaluation: ${LEGACY_FEATURES_UNDER_EVALUATION.join(", ")}`,
+  );
   const rows = await loadGamesForFeatures(fromSeason, toSeason);
   if (rows.length === 0) {
     console.log("No games found for requested season range.");
     return;
   }
 
-  const extractors = featureExtractors();
-  const fixedDefs: Record<string, FeatureBinDef> = {
-    spread_abs: fixedBinDef(["LT_3", "RANGE_3_7", "RANGE_7_10", "GT_10"], [3, 7, 10]),
-    spread_home: fixedBinDef(["LE_-10", "-10_TO_-3", "-3_TO_0", "0_TO_3", "3_TO_10", "GE_10"], [-10, -3, 0, 3, 10]),
-    total_line: fixedBinDef(["LT_210", "RANGE_210_220", "RANGE_220_230", "RANGE_230_240", "GE_240"], [210, 220, 230, 240]),
-    home_role_dependency: fixedBinDef(["LOW", "MODERATE", "HIGH", "EXTREME"], [0.33, 0.4, 0.5]),
-    away_role_dependency: fixedBinDef(["LOW", "MODERATE", "HIGH", "EXTREME"], [0.33, 0.4, 0.5]),
-    season_progress: fixedBinDef(["EARLY", "MID", "LATE"], [0, 1]),
-    rest_advantage_delta: fixedBinDef(["OPP_RESTED", "EVEN", "HOME_RESTED"], [-1, 1]),
-    streak_delta: fixedBinDef(["LOSING_SIDE", "EVEN", "WINNING_SIDE"], [-3, 3]),
-  };
+  const defs = featureDefinitions();
 
   const bins: Array<{ featureName: string; def: FeatureBinDef; method: string }> = [];
-  for (const [featureName, extractor] of Object.entries(extractors)) {
-    const values = rows
-      .map(extractor)
-      .filter((v): v is number => v != null && Number.isFinite(v));
+  for (const feature of defs) {
+    const values = rows.map((row) => feature.compute(row)).filter((v): v is FeatureValue => v != null);
     if (values.length === 0) continue;
 
-    if (fixedDefs[featureName]) {
-      bins.push({ featureName, def: fixedDefs[featureName], method: "fixed" });
+    if (feature.fixedDef) {
+      if (feature.type === "hybrid") {
+        const numericValues = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+        const semanticValues = [...new Set(values.filter((v): v is string => typeof v === "string"))];
+        const qDef = quantileBinDef(numericValues, quantiles);
+        const fallbackNumeric = qDef ?? feature.fixedDef;
+        const hybridDef = hybridBinDef(fallbackNumeric, semanticValues);
+        bins.push({ featureName: feature.name, def: hybridDef, method: "hybrid" });
+      } else {
+        bins.push({ featureName: feature.name, def: feature.fixedDef, method: feature.type });
+      }
       continue;
     }
 
-    const qDef = quantileBinDef(values, quantiles);
+    const numericValues = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+    const qDef = quantileBinDef(numericValues, quantiles);
     if (qDef) {
-      bins.push({ featureName, def: qDef, method: "quantile" });
+      bins.push({ featureName: feature.name, def: qDef, method: "quantile" });
     }
   }
 
@@ -389,7 +848,8 @@ export async function buildQuantizedGameFeatures(args: string[] = []): Promise<v
   }
 
   const rows = await loadGamesForFeatures(fromSeason, toSeason);
-  const extractors = featureExtractors();
+  const defs = featureDefinitions();
+  const defByName = new Map(defs.map((d) => [d.name, d]));
 
   const BATCH_SIZE = 500;
   let upserts = 0;
@@ -399,10 +859,10 @@ export async function buildQuantizedGameFeatures(args: string[] = []): Promise<v
       .map((row) => {
         const tokens: string[] = [];
         for (const [featureName, def] of bins.entries()) {
-          const extractor = extractors[featureName];
-          if (!extractor) continue;
-          const value = extractor(row);
-          if (value == null || !Number.isFinite(value)) continue;
+          const featureDef = defByName.get(featureName);
+          if (!featureDef) continue;
+          const value = featureDef.compute(row);
+          if (value == null) continue;
           const bucket = bucketValue(value, def);
           tokens.push(`${featureName}:${bucket}`);
         }
@@ -440,6 +900,64 @@ function conditionFeatureKey(token: string): string {
   const base = token.startsWith("!") ? token.slice(1) : token;
   const idx = base.indexOf(":");
   return idx >= 0 ? base.slice(0, idx) : base;
+}
+
+function outcomeMarketForPlayerProps(outcomeType: string): string | null {
+  const base = outcomeType.replace(/:.*$/, "");
+  if (base === "PLAYER_30_PLUS" || base === "PLAYER_40_PLUS") return "player_points";
+  if (base === "PLAYER_10_PLUS_REBOUNDS") return "player_rebounds";
+  if (base === "PLAYER_10_PLUS_ASSISTS") return "player_assists";
+  if (base.includes("REBOUND")) return "player_rebounds";
+  if (base.includes("ASSIST") || base.includes("PLAYMAKER")) return "player_assists";
+  if (base.includes("SCORER") || base.includes("POINT")) return "player_points";
+  if (base === "PLAYER_5_PLUS_THREES") return "player_threes";
+  if (base === "PLAYER_DOUBLE_DOUBLE") return "player_double_double";
+  if (base === "PLAYER_TRIPLE_DOUBLE") return "player_triple_double";
+  return null;
+}
+
+async function loadPlayerOutcomeMarketCoverage(args: {
+  trainGameIds: string[];
+  outcomeTypes: string[];
+}): Promise<Map<string, number>> {
+  const playerOutcomeToMarket = new Map<string, string>();
+  for (const outcomeType of args.outcomeTypes) {
+    if (outcomeFamily(outcomeType) !== "PLAYER") continue;
+    const market = outcomeMarketForPlayerProps(outcomeType);
+    if (!market) continue;
+    playerOutcomeToMarket.set(outcomeType, market);
+  }
+  if (playerOutcomeToMarket.size === 0 || args.trainGameIds.length === 0) return new Map();
+  const marketSet = [...new Set(playerOutcomeToMarket.values())];
+  const rows = await prisma.playerPropOdds.findMany({
+    where: {
+      gameId: { in: args.trainGameIds },
+      market: { in: marketSet },
+    },
+    select: {
+      gameId: true,
+      market: true,
+      line: true,
+      overPrice: true,
+      underPrice: true,
+    },
+  });
+  const gameMarketCoverage = new Set<string>();
+  for (const row of rows) {
+    if (row.line == null || !Number.isFinite(row.line)) continue;
+    if (row.overPrice == null || row.underPrice == null) continue;
+    gameMarketCoverage.add(`${row.gameId}|${row.market}`);
+  }
+  const coverageByOutcome = new Map<string, number>();
+  const denom = Math.max(1, args.trainGameIds.length);
+  for (const [outcomeType, market] of playerOutcomeToMarket.entries()) {
+    let covered = 0;
+    for (const gameId of args.trainGameIds) {
+      if (gameMarketCoverage.has(`${gameId}|${market}`)) covered += 1;
+    }
+    coverageByOutcome.set(outcomeType, covered / denom);
+  }
+  return coverageByOutcome;
 }
 
 function distinctConditionFeatureCount(conditions: string[]): number {
@@ -484,7 +1002,7 @@ function portabilitySignals(outcomeType: string, conditions: string[]): {
   for (const c of conditions) {
     if (c.startsWith("home_role_dependency:") || c.startsWith("away_role_dependency:")) {
       if (c.endsWith(":EXTREME") || c.endsWith(":Q5")) dependencyRisk += 0.18;
-      if (c.endsWith(":HIGH") || c.endsWith(":Q4")) dependencyRisk += 0.1;
+      if (c.endsWith(":STAR_LED") || c.endsWith(":HIGH") || c.endsWith(":Q4")) dependencyRisk += 0.1;
     }
     if (c.startsWith("home_playmaking_resilience:") || c.startsWith("away_playmaking_resilience:")) {
       if (c.endsWith(":Q5") || c.endsWith(":GE_")) portabilityScore += 0.08;
@@ -749,6 +1267,104 @@ function splitRowsBySeasonLOSO(
   return { mode: "loso", train: losoRows, losoFolds, forward };
 }
 
+type OutcomeSeasonGateConfig = {
+  requestedMinOutcomeTrainSeasons: number;
+  trainSeasons: number[];
+  explicitMinOutcomeTrainSeasons: boolean;
+};
+
+export function resolveAndValidateOutcomeSeasonGate({
+  requestedMinOutcomeTrainSeasons,
+  trainSeasons,
+  explicitMinOutcomeTrainSeasons,
+}: OutcomeSeasonGateConfig): {
+  effectiveMinOutcomeTrainSeasons: number;
+  trainSeasonCount: number;
+  trainSeasonList: number[];
+} {
+  const trainSeasonList = [...new Set(trainSeasons)].sort((a, b) => a - b);
+  const trainSeasonCount = trainSeasonList.length;
+  const requested = Math.max(1, Math.floor(requestedMinOutcomeTrainSeasons));
+  const effectiveMinOutcomeTrainSeasons = requested;
+  if (effectiveMinOutcomeTrainSeasons > trainSeasonCount) {
+    throw new Error(
+      `Invalid discovery config: min-outcome-train-seasons=${effectiveMinOutcomeTrainSeasons} exceeds train split season count=${trainSeasonCount} (train seasons: [${trainSeasonList.join(", ")}]). ` +
+        `${explicitMinOutcomeTrainSeasons ? "Use a lower --min-outcome-train-seasons value or widen train coverage (for example --cv loso)." : "Discovery could not auto-adjust to a compatible split; widen train coverage (for example --cv loso)."}`
+    );
+  }
+  return {
+    effectiveMinOutcomeTrainSeasons,
+    trainSeasonCount,
+    trainSeasonList,
+  };
+}
+
+export function evaluateBroadPatternSafeguard(args: {
+  enabled: boolean;
+  trainCoverage: number;
+  forwardPosterior: number;
+  discoveryScore: number;
+  trainToValPosteriorDrop: number;
+}): {
+  applies: boolean;
+  passed: boolean;
+  failedChecks: string[];
+} {
+  if (!args.enabled || args.trainCoverage <= 0.35) {
+    return { applies: false, passed: true, failedChecks: [] };
+  }
+  const passesForwardPosterior = args.forwardPosterior >= 0.6;
+  const passesDiscoveryScore = args.discoveryScore >= 0.2;
+  const passed = passesForwardPosterior || passesDiscoveryScore;
+  if (passed) return { applies: true, passed: true, failedChecks: [] };
+  const failedChecks: string[] = [];
+  if (!passesForwardPosterior) failedChecks.push("forwardPosterior<0.60");
+  if (!passesDiscoveryScore) failedChecks.push("discoveryScore<0.20");
+  // Diagnostic-only field: not sufficient for passing.
+  if (!(args.trainToValPosteriorDrop <= 0.03)) failedChecks.push("trainToValPosteriorDrop>0.03");
+  return { applies: true, passed: false, failedChecks };
+}
+
+function topConditionFamilies(
+  rows: Array<{ conditions: string[] }>,
+  topN = 8,
+): Array<{ family: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    for (const c of row.conditions ?? []) {
+      const key = conditionFeatureKey(c);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, topN)
+    .map(([family, count]) => ({ family, count }));
+}
+
+const NEW_FEATURE_FAMILIES = new Set<string>([
+  "net_rating_delta",
+  "creation_burden_delta",
+  "playmaking_resilience_delta",
+  "role_dependency_delta",
+  "fg3_rate_delta",
+  "offense_vs_opp_def",
+  "star_dependency_under_pressure",
+  "injury_fragility",
+  "shot_creation_stability",
+  "market_overpricing_risk",
+  "lineup_certainty",
+  "role_dependency_band",
+  "line_value_state",
+  "injury_noise",
+  "team_form_volatility",
+  "data_completeness",
+  "market_total_band",
+  "spread_band",
+  "season_phase",
+  "injury_environment",
+]);
+
 function binaryEntropy(hits: number, total: number): number {
   if (total <= 0) return 0;
   const p = hits / total;
@@ -935,17 +1551,17 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
   const flags = parseFlags(args);
   const objective = (flags.objective ?? DISCOVERY_DEFAULTS.objective ?? "edge").toLowerCase();
   const useHitRateObjective = objective === "hit_rate";
-  const cvMode = (flags["cv"] ?? "default") as "default" | "loso";
+  const requestedCvMode = (flags["cv"] ?? "default") as "default" | "loso";
   const trainSeason = Number(flags["train-season"] ?? DISCOVERY_DEFAULTS.trainSeason);
   const valSeason = Number(flags["val-season"] ?? DISCOVERY_DEFAULTS.valSeason);
   const forwardFrom = Number(flags["forward-from"] ?? DISCOVERY_DEFAULTS.forwardFrom);
   const minLosoFoldsPass = Math.max(1, Number(flags["min-loso-folds-pass"] ?? DISCOVERY_DEFAULTS.minLosoFoldsPass));
-  const maxDepth = Number(flags["tree-depth"] ?? DISCOVERY_DEFAULTS.maxDepth);
-  const minLeaf = Number(flags["min-samples"] ?? DISCOVERY_DEFAULTS.minLeaf);
-  const minTokenSupport = Number(flags["min-token-support"] ?? DISCOVERY_DEFAULTS.minTokenSupport);
-  const minOutcomeSamples = Number(flags["min-outcome-samples"] ?? DISCOVERY_DEFAULTS.minOutcomeSamples);
-  const maxItemset = Number(flags["max-itemset-size"] ?? DISCOVERY_DEFAULTS.maxItemset);
-  const minSupport = Number(flags["min-support"] ?? DISCOVERY_DEFAULTS.minSupport);
+  let maxDepth = Number(flags["tree-depth"] ?? DISCOVERY_DEFAULTS.maxDepth);
+  let minLeaf = Number(flags["min-samples"] ?? DISCOVERY_DEFAULTS.minLeaf);
+  let minTokenSupport = Number(flags["min-token-support"] ?? DISCOVERY_DEFAULTS.minTokenSupport);
+  let minOutcomeSamples = Number(flags["min-outcome-samples"] ?? DISCOVERY_DEFAULTS.minOutcomeSamples);
+  let maxItemset = Number(flags["max-itemset-size"] ?? DISCOVERY_DEFAULTS.maxItemset);
+  let minSupport = Number(flags["min-support"] ?? DISCOVERY_DEFAULTS.minSupport);
   const maxPatterns = Number(flags["max-patterns"] ?? DISCOVERY_DEFAULTS.maxPatterns);
   const minConditionCount = Math.max(1, Number(flags["min-condition-count"] ?? DISCOVERY_DEFAULTS.minConditionCount));
   const minDistinctFeatureCount = Math.max(1, Number(flags["min-distinct-features"] ?? DISCOVERY_DEFAULTS.minDistinctFeatureCount));
@@ -973,20 +1589,29 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
       Number(flags["max-per-family-other"] ?? DISCOVERY_DEFAULTS.maxPerFamilyByBucket.OTHER),
     ),
   };
-  const maxTrainCoverage = Math.min(1, Math.max(0.01, Number(flags["max-train-coverage"] ?? DISCOVERY_DEFAULTS.maxTrainCoverage)));
-  const minOutcomeTrainSeasons = Math.max(1, Number(flags["min-outcome-train-seasons"] ?? DISCOVERY_DEFAULTS.minOutcomeTrainSeasons));
-  const minOutcomeTrainCoverage = Math.max(0, Number(flags["min-outcome-train-coverage"] ?? DISCOVERY_DEFAULTS.minOutcomeTrainCoverage));
-  const maxOutcomeTrainCoverage = Math.min(1, Math.max(0.01, Number(flags["max-outcome-train-coverage"] ?? DISCOVERY_DEFAULTS.maxOutcomeTrainCoverage)));
-  const minValSamples = Math.max(1, Number(flags["min-val-samples"] ?? DISCOVERY_DEFAULTS.minValSamples));
-  const minForwardSamples = Math.max(1, Number(flags["min-forward-samples"] ?? DISCOVERY_DEFAULTS.minForwardSamples));
-  const minValPosteriorDiscovery = Number(
+  const explicitMaxTrainCoverage = flags["max-train-coverage"] != null;
+  let maxTrainCoverage = Math.min(1, Math.max(0.01, Number(flags["max-train-coverage"] ?? DISCOVERY_DEFAULTS.maxTrainCoverage)));
+  const requestedMinOutcomeTrainSeasons = Math.max(
+    1,
+    Number(flags["min-outcome-train-seasons"] ?? DISCOVERY_DEFAULTS.minOutcomeTrainSeasons),
+  );
+  const explicitMinOutcomeTrainSeasons = flags["min-outcome-train-seasons"] != null;
+  let minOutcomeTrainCoverage = Math.max(0, Number(flags["min-outcome-train-coverage"] ?? DISCOVERY_DEFAULTS.minOutcomeTrainCoverage));
+  let maxOutcomeTrainCoverage = Math.min(1, Math.max(0.01, Number(flags["max-outcome-train-coverage"] ?? DISCOVERY_DEFAULTS.maxOutcomeTrainCoverage)));
+  let minValSamples = Math.max(1, Number(flags["min-val-samples"] ?? DISCOVERY_DEFAULTS.minValSamples));
+  let minForwardSamples = Math.max(1, Number(flags["min-forward-samples"] ?? DISCOVERY_DEFAULTS.minForwardSamples));
+  let minValPosteriorDiscovery = Number(
     flags["min-val-posterior-discovery"] ?? DISCOVERY_DEFAULTS.minValPosteriorDiscovery,
   );
-  const minForwardPosteriorDiscovery = Number(
+  let minForwardPosteriorDiscovery = Number(
     flags["min-forward-posterior-discovery"] ?? DISCOVERY_DEFAULTS.minForwardPosteriorDiscovery,
   );
-  const minValEdge = Number(flags["min-val-edge"] ?? DISCOVERY_DEFAULTS.minValEdge);
-  const minForwardEdgeDiscovery = Number(flags["min-forward-edge-discovery"] ?? DISCOVERY_DEFAULTS.minForwardEdgeDiscovery);
+  let minValEdge = Number(flags["min-val-edge"] ?? DISCOVERY_DEFAULTS.minValEdge);
+  let minForwardEdgeDiscovery = Number(flags["min-forward-edge-discovery"] ?? DISCOVERY_DEFAULTS.minForwardEdgeDiscovery);
+  let minPlayerOutcomePropCoverage = Math.max(
+    0,
+    Math.min(1, Number(flags["min-player-outcome-prop-coverage"] ?? DISCOVERY_DEFAULTS.minPlayerOutcomePropCoverage)),
+  );
   const maxConditionOverlap = Math.min(0.99, Math.max(0, Number(flags["max-condition-overlap"] ?? DISCOVERY_DEFAULTS.maxConditionOverlap)));
   const priorStrength = Number(flags["prior-strength"] ?? DISCOVERY_DEFAULTS.priorStrength);
   const recencyHalfLifeDays = Math.max(7, Number(flags["recency-half-life-days"] ?? DISCOVERY_DEFAULTS.recencyHalfLifeDays));
@@ -1001,12 +1626,106 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
     0.1,
     Math.min(1, Number(flags["season-weight-min"] ?? DISCOVERY_DEFAULTS.seasonWeightMin)),
   );
-  const maxSingletons = Math.max(10, Number(flags["max-singletons"] ?? DISCOVERY_DEFAULTS.maxSingletons));
+  let maxSingletons = Math.max(10, Number(flags["max-singletons"] ?? DISCOVERY_DEFAULTS.maxSingletons));
   const noOdds = flags["no-odds"] === "true";
+  const featureMode = (flags["feature-mode"] ?? "all").toLowerCase();
+  const debugLenient = flags["debug-lenient"] === "true";
+  const auditDiagnostics = flags["audit-diagnostics"] === "true";
+  const explicitBroadPatternSafeguard = flags["broad-pattern-safeguard"] != null;
+  const requestedBroadPatternSafeguard = flags["broad-pattern-safeguard"] === "true";
+  const includeOutcomeFamilies = new Set<FamilyBucket>();
+  if (flags["include-outcome-families"]) {
+    for (const raw of flags["include-outcome-families"].split(",")) {
+      const v = raw.trim().toUpperCase();
+      if (!v) continue;
+      if (!FAMILY_BUCKETS.includes(v as FamilyBucket)) {
+        throw new Error(
+          `Unknown outcome family '${v}' in --include-outcome-families. Valid values: ${FAMILY_BUCKETS.join(", ")}`,
+        );
+      }
+      includeOutcomeFamilies.add(v as FamilyBucket);
+    }
+  }
+  const excludeOutcomeFamilies = new Set<FamilyBucket>();
+  if (flags["exclude-outcome-families"]) {
+    for (const raw of flags["exclude-outcome-families"].split(",")) {
+      const v = raw.trim().toUpperCase();
+      if (!v) continue;
+      if (!FAMILY_BUCKETS.includes(v as FamilyBucket)) {
+        throw new Error(
+          `Unknown outcome family '${v}' in --exclude-outcome-families. Valid values: ${FAMILY_BUCKETS.join(", ")}`,
+        );
+      }
+      excludeOutcomeFamilies.add(v as FamilyBucket);
+    }
+  }
+  const includeOutcomeTypeSubstrings = (flags["include-outcome-type-substrings"] ?? "")
+    .split(",")
+    .map((v) => v.trim().toUpperCase())
+    .filter(Boolean);
+  const excludeOutcomeTypeSubstrings = (flags["exclude-outcome-type-substrings"] ?? "")
+    .split(",")
+    .map((v) => v.trim().toUpperCase())
+    .filter(Boolean);
+  const isStrictNonPlayerGameLane =
+    !debugLenient &&
+    excludeOutcomeFamilies.has("PLAYER") &&
+    (includeOutcomeFamilies.size === 0 ||
+      [...includeOutcomeFamilies].every((f) => f === "TOTAL" || f === "SPREAD" || f === "MONEYLINE")) &&
+    includeOutcomeFamilies.size > 0;
+  const legacyTrainCoverageCap = DISCOVERY_DEFAULTS.maxTrainCoverage;
+  // Lane policy note:
+  // - Legacy 0.35 train coverage was too restrictive for non-PLAYER game-level branches.
+  // - 0.45 recovers useful broad signal.
+  // - Broad-pattern safeguard blocks weak broad patterns from slipping in.
+  const broadPatternSafeguard =
+    explicitBroadPatternSafeguard
+      ? requestedBroadPatternSafeguard
+      : isStrictNonPlayerGameLane
+        ? true
+        : false;
+  if (!explicitMaxTrainCoverage && isStrictNonPlayerGameLane && maxTrainCoverage < 0.45) {
+    maxTrainCoverage = 0.45;
+  }
+
+  if (debugLenient) {
+    maxDepth = Math.max(maxDepth, 2);
+    minLeaf = Math.min(minLeaf, 60);
+    minTokenSupport = Math.min(minTokenSupport, 50);
+    minOutcomeSamples = Math.min(minOutcomeSamples, 40);
+    minValSamples = Math.min(minValSamples, 8);
+    minForwardSamples = Math.min(minForwardSamples, 8);
+    minValPosteriorDiscovery = Math.min(minValPosteriorDiscovery, 0.5);
+    minForwardPosteriorDiscovery = Math.min(minForwardPosteriorDiscovery, 0.5);
+    minValEdge = Math.min(minValEdge, -0.01);
+    minForwardEdgeDiscovery = Math.min(minForwardEdgeDiscovery, -0.01);
+    minOutcomeTrainCoverage = Math.min(minOutcomeTrainCoverage, 0);
+    maxOutcomeTrainCoverage = Math.max(maxOutcomeTrainCoverage, 0.95);
+    maxTrainCoverage = Math.max(maxTrainCoverage, 0.85);
+    minPlayerOutcomePropCoverage = Math.min(minPlayerOutcomePropCoverage, 0.05);
+  }
 
   console.log("\n=== Discover Patterns v2 ===\n");
   if (noOdds) {
     console.log("Mode: odds-free discovery (excluding spread_home, spread_abs, total_line, ml_home, ml_away features)\n");
+  }
+  if (featureMode === "legacy-only") {
+    console.log("Mode: legacy-only features (excluding newly added feature families)\n");
+  }
+  if (includeOutcomeFamilies.size > 0 || excludeOutcomeFamilies.size > 0) {
+    const includeMsg = includeOutcomeFamilies.size > 0 ? [...includeOutcomeFamilies].join(",") : "(all)";
+    const excludeMsg = excludeOutcomeFamilies.size > 0 ? [...excludeOutcomeFamilies].join(",") : "(none)";
+    console.log(`Outcome family filter: include=${includeMsg}, exclude=${excludeMsg}\n`);
+  }
+  if (includeOutcomeTypeSubstrings.length > 0 || excludeOutcomeTypeSubstrings.length > 0) {
+    const includeMsg = includeOutcomeTypeSubstrings.length > 0 ? includeOutcomeTypeSubstrings.join(",") : "(all)";
+    const excludeMsg = excludeOutcomeTypeSubstrings.length > 0 ? excludeOutcomeTypeSubstrings.join(",") : "(none)";
+    console.log(`Outcome type substring filter: include=${includeMsg}, exclude=${excludeMsg}\n`);
+  }
+  if (isStrictNonPlayerGameLane) {
+    console.log(
+      `Lane policy: strict non-PLAYER game-level defaults active (max-train-coverage=${maxTrainCoverage.toFixed(2)}${explicitMaxTrainCoverage ? ", explicit override" : ""}; broad-pattern-safeguard=${broadPatternSafeguard ? "ON" : "OFF"}${explicitBroadPatternSafeguard ? ", explicit override" : ""}).\n`,
+    );
   }
 
   const skipSnapshot = flags["skip-snapshot"] === "true";
@@ -1016,21 +1735,53 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
 
   const ODDS_FEATURE_PREFIXES = ["spread_home:", "spread_abs:", "total_line:", "ml_home:", "ml_away:"];
   const rawGames = await loadTokenizedGames();
-  const games = noOdds
-    ? rawGames.map((g) => {
-        const filtered = new Set<string>();
-        for (const t of g.tokens) {
-          if (!ODDS_FEATURE_PREFIXES.some((p) => t.startsWith(p))) {
-            filtered.add(t);
-          }
-        }
-        return { ...g, tokens: filtered };
-      })
-    : rawGames;
-  const splits: SeasonSplit =
-    cvMode === "loso"
+  if (featureMode !== "all" && featureMode !== "legacy-only") {
+    throw new Error(`Unknown feature mode '${featureMode}'. Valid values: all, legacy-only.`);
+  }
+  const games = rawGames.map((g) => {
+    const filtered = new Set<string>();
+    for (const t of g.tokens) {
+      if (noOdds && ODDS_FEATURE_PREFIXES.some((p) => t.startsWith(p))) continue;
+      if (featureMode === "legacy-only") {
+        const family = conditionFeatureKey(t);
+        if (NEW_FEATURE_FAMILIES.has(family)) continue;
+      }
+      filtered.add(t);
+    }
+    return { ...g, tokens: filtered };
+  });
+  let effectiveCvMode = requestedCvMode;
+  let splits: SeasonSplit =
+    effectiveCvMode === "loso"
       ? splitRowsBySeasonLOSO(games, forwardFrom)
       : splitRowsBySeason(games, trainSeason, valSeason, forwardFrom);
+
+  if (
+    effectiveCvMode === "default" &&
+    !explicitMinOutcomeTrainSeasons &&
+    requestedMinOutcomeTrainSeasons > 1
+  ) {
+    const defaultTrainSeasons = [...new Set(splits.train.map((r) => r.season))].sort((a, b) => a - b);
+    if (defaultTrainSeasons.length < requestedMinOutcomeTrainSeasons) {
+      const losoSplits = splitRowsBySeasonLOSO(games, forwardFrom);
+      const losoTrainSeasons = [...new Set(losoSplits.train.map((r) => r.season))].sort((a, b) => a - b);
+      if (
+        losoSplits.train.length > 0 &&
+        losoSplits.forward.length > 0 &&
+        losoSplits.mode === "loso" &&
+        losoSplits.losoFolds.length >= 2 &&
+        losoTrainSeasons.length >= requestedMinOutcomeTrainSeasons
+      ) {
+        splits = losoSplits;
+        effectiveCvMode = "loso";
+        console.log(
+          `\n!!! AUTO-ADJUSTED DISCOVERY MODE !!!\n` +
+            `Requested/implicit min-outcome-train-seasons=${requestedMinOutcomeTrainSeasons} is incompatible with default single-season train split [${defaultTrainSeasons.join(", ")}].\n` +
+            `Switching to CV=loso with train seasons [${losoTrainSeasons.join(", ")}] and forward-from=${forwardFrom}+.\n`,
+        );
+      }
+    }
+  }
 
   if (splits.train.length === 0 || splits.forward.length === 0) {
     throw new Error("Insufficient split coverage. Make sure train and forward have quantized games.");
@@ -1053,6 +1804,17 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
   const allSeasons = [...new Set(games.map((r) => r.season))].sort((a, b) => a - b);
   const minSeason = allSeasons[0] ?? 2023;
   const maxSeason = allSeasons[allSeasons.length - 1] ?? 2025;
+  const trainSeasons = [...new Set(splits.train.map((r) => r.season))].sort((a, b) => a - b);
+  const valSeasons =
+    splits.mode === "loso"
+      ? [...new Set(splits.losoFolds.map((f) => f.season))].sort((a, b) => a - b)
+      : [...new Set(splits.val.map((r) => r.season))].sort((a, b) => a - b);
+  const forwardSeasons = [...new Set(splits.forward.map((r) => r.season))].sort((a, b) => a - b);
+  const { effectiveMinOutcomeTrainSeasons } = resolveAndValidateOutcomeSeasonGate({
+    requestedMinOutcomeTrainSeasons,
+    trainSeasons,
+    explicitMinOutcomeTrainSeasons,
+  });
   const seasonWeight =
     seasonWeightEnabled && allSeasons.length > 1
       ? makeSeasonWeightFn(minSeason, maxSeason, seasonWeightMin)
@@ -1071,6 +1833,16 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
       `LOSO seasons: ${seasons} (${splits.losoFolds.length} folds), min ${effectiveMinLosoFolds} folds must pass, forward: ${forwardFrom}+\n`,
     );
   }
+  console.log(
+    `Split summary: mode=${splits.mode}, train seasons=[${trainSeasons.join(", ")}] (rows=${splits.train.length}), ` +
+      `val seasons=[${valSeasons.join(", ")}] (rows=${splits.mode === "loso" ? splits.losoFolds.reduce((acc, f) => acc + f.valRows.length, 0) : splits.val.length}), ` +
+      `forward seasons=[${forwardSeasons.join(", ")}] (rows=${splits.forward.length}), forward-from=${forwardFrom}+\n`,
+  );
+  console.log(
+    `Outcome gate settings: min-outcome-samples=${minOutcomeSamples}, min-outcome-train-seasons=${effectiveMinOutcomeTrainSeasons}` +
+      `${explicitMinOutcomeTrainSeasons ? " (explicit)" : requestedMinOutcomeTrainSeasons !== effectiveMinOutcomeTrainSeasons ? ` (auto-adjusted from ${requestedMinOutcomeTrainSeasons})` : ""}, ` +
+      `train-coverage=${minOutcomeTrainCoverage}-${maxOutcomeTrainCoverage}, min-player-outcome-prop-coverage=${minPlayerOutcomePropCoverage}\n`,
+  );
 
   const outcomes = new Map<string, number>();
   const outcomeTrainSeasons = new Map<string, Set<number>>();
@@ -1083,18 +1855,113 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
     }
   }
   const trainTotal = Math.max(1, splits.train.length);
-  const outcomeTypes = [...outcomes.entries()]
-    .filter(([o, n]) => {
-      if (n < minOutcomeSamples) return false;
-      const coverage = n / trainTotal;
-      if (coverage < minOutcomeTrainCoverage) return false;
-      if (coverage > maxOutcomeTrainCoverage) return false;
-      const seasons = outcomeTrainSeasons.get(o)?.size ?? 0;
-      if (seasons < minOutcomeTrainSeasons) return false;
-      return true;
-    })
-    .map(([o]) => o)
-    .sort();
+  const trainGameIds = [...new Set(splits.train.map((r) => r.gameId))];
+  const playerOutcomeCoverage = await loadPlayerOutcomeMarketCoverage({
+    trainGameIds,
+    outcomeTypes: [...outcomes.keys()],
+  });
+  const outcomeStats = [...outcomes.entries()].map(([o, n]) => ({
+    outcomeType: o,
+    n,
+    coverage: n / trainTotal,
+    seasons: outcomeTrainSeasons.get(o)?.size ?? 0,
+    family: outcomeFamily(o),
+    market: outcomeMarketForPlayerProps(o),
+    playerCoverage: playerOutcomeCoverage.get(o) ?? 0,
+  }));
+  const outcomeFunnel = {
+    initial: outcomeStats.length,
+    afterMinSamples: 0,
+    afterMinCoverage: 0,
+    afterMaxCoverage: 0,
+    afterMinTrainSeasons: 0,
+    afterPlayerMarketMap: 0,
+    afterPlayerCoverage: 0,
+    afterFamilyFilter: 0,
+    afterOutcomeTypeFilter: 0,
+    removedMinSamples: 0,
+    removedMinCoverage: 0,
+    removedMaxCoverage: 0,
+    removedMinTrainSeasons: 0,
+    removedPlayerNoMarket: 0,
+    removedPlayerLowCoverage: 0,
+    removedFamilyFilter: 0,
+    removedOutcomeTypeFilter: 0,
+  };
+  const stage1 = outcomeStats.filter((s) => {
+    const keep = s.n >= minOutcomeSamples;
+    if (!keep) outcomeFunnel.removedMinSamples += 1;
+    return keep;
+  });
+  outcomeFunnel.afterMinSamples = stage1.length;
+  const stage2 = stage1.filter((s) => {
+    const keep = s.coverage >= minOutcomeTrainCoverage;
+    if (!keep) outcomeFunnel.removedMinCoverage += 1;
+    return keep;
+  });
+  outcomeFunnel.afterMinCoverage = stage2.length;
+  const stage3 = stage2.filter((s) => {
+    const keep = s.coverage <= maxOutcomeTrainCoverage;
+    if (!keep) outcomeFunnel.removedMaxCoverage += 1;
+    return keep;
+  });
+  outcomeFunnel.afterMaxCoverage = stage3.length;
+  const stage4 = stage3.filter((s) => {
+    const keep = s.seasons >= effectiveMinOutcomeTrainSeasons;
+    if (!keep) outcomeFunnel.removedMinTrainSeasons += 1;
+    return keep;
+  });
+  outcomeFunnel.afterMinTrainSeasons = stage4.length;
+  const stage5 = stage4.filter((s) => {
+    if (s.family !== "PLAYER") return true;
+    const keep = s.market != null;
+    if (!keep) outcomeFunnel.removedPlayerNoMarket += 1;
+    return keep;
+  });
+  outcomeFunnel.afterPlayerMarketMap = stage5.length;
+  const stage6 = stage5.filter((s) => {
+    if (s.family !== "PLAYER") return true;
+    const keep = s.playerCoverage >= minPlayerOutcomePropCoverage;
+    if (!keep) outcomeFunnel.removedPlayerLowCoverage += 1;
+    return keep;
+  });
+  outcomeFunnel.afterPlayerCoverage = stage6.length;
+  const stage7 = stage6.filter((s) => {
+    const fam = outcomeFamilyBucket(s.outcomeType);
+    const keepInclude = includeOutcomeFamilies.size === 0 || includeOutcomeFamilies.has(fam);
+    const keepExclude = !excludeOutcomeFamilies.has(fam);
+    const keep = keepInclude && keepExclude;
+    if (!keep) outcomeFunnel.removedFamilyFilter += 1;
+    return keep;
+  });
+  outcomeFunnel.afterFamilyFilter = stage7.length;
+  const stage8 = stage7.filter((s) => {
+    const upperOutcome = s.outcomeType.toUpperCase();
+    const keepInclude =
+      includeOutcomeTypeSubstrings.length === 0 ||
+      includeOutcomeTypeSubstrings.some((v) => upperOutcome.includes(v));
+    const keepExclude =
+      excludeOutcomeTypeSubstrings.length === 0 ||
+      !excludeOutcomeTypeSubstrings.some((v) => upperOutcome.includes(v));
+    const keep = keepInclude && keepExclude;
+    if (!keep) outcomeFunnel.removedOutcomeTypeFilter += 1;
+    return keep;
+  });
+  outcomeFunnel.afterOutcomeTypeFilter = stage8.length;
+  const droppedPlayerOutcomesNoMarket = outcomeFunnel.removedPlayerNoMarket;
+  const droppedPlayerOutcomesLowCoverage = outcomeFunnel.removedPlayerLowCoverage;
+  const outcomeTypes = stage8.map((s) => s.outcomeType).sort();
+  if (auditDiagnostics) {
+    const eligiblePreTypeFilter = stage7.map((s) => s.outcomeType).sort();
+    console.log(
+      `Eligible outcomes before type filter (${eligiblePreTypeFilter.length}): ${eligiblePreTypeFilter.slice(0, 100).join(", ") || "(none)"}`,
+    );
+    if (includeOutcomeTypeSubstrings.length > 0 || excludeOutcomeTypeSubstrings.length > 0) {
+      console.log(
+        `Eligible outcomes after type filter (${outcomeTypes.length}): ${outcomeTypes.slice(0, 100).join(", ") || "(none)"}`,
+      );
+    }
+  }
 
   const rawCandidates: CandidatePattern[] = [];
   for (const outcomeType of outcomeTypes) {
@@ -1121,6 +1988,65 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
   }
 
   const scored: ScoredPattern[] = [];
+  const acceptanceFunnel = {
+    beforeValidation: 0,
+    afterMinSampleGate: 0,
+    afterValidationGate: 0,
+    afterForwardGate: 0,
+    afterDeploymentAcceptance: 0,
+    removedByReason: {
+      conditionStructure: 0,
+      minSample: 0,
+      validationGate: 0,
+      forwardGate: 0,
+      trainCoverage: 0,
+      perOutcomeCap: 0,
+      perFamilyCap: 0,
+      overlap: 0,
+    },
+  };
+  const admittedOnlyByRelaxedCoverage: Array<{
+    outcomeType: string;
+    conditions: string[];
+    trainCoverage: number;
+    train: SplitStats;
+    val: SplitStats;
+    forward: SplitStats;
+    score: number;
+  }> = [];
+  const broadSafeguardRejected: Array<{
+    outcomeType: string;
+    conditions: string[];
+    trainCoverage: number;
+    trainPosterior: number;
+    valPosterior: number;
+    forwardPosterior: number;
+    score: number;
+    trainToValPosteriorDrop: number;
+    failedChecks: string[];
+  }> = [];
+  const validationKillReasons = new Map<string, number>();
+  const validationNearMisses: Array<{
+    outcomeType: string;
+    conditions: string[];
+    train: SplitStats;
+    val: SplitStats;
+    forward: SplitStats;
+    reason: string;
+  }> = [];
+  const preValidationCandidates: Array<{
+    outcomeType: string;
+    conditions: string[];
+    train: SplitStats;
+    val: SplitStats;
+    forward: SplitStats;
+    score: number;
+    trainValPosteriorDrop: number;
+  }> = [];
+
+  const bumpReason = (reason: string): void => {
+    validationKillReasons.set(reason, (validationKillReasons.get(reason) ?? 0) + 1);
+  };
   for (const c of deduped.values()) {
     if ((c.conditions?.length ?? 0) < minConditionCount) continue;
     if (distinctConditionFeatureCount(c.conditions ?? []) < minDistinctFeatureCount) continue;
@@ -1130,13 +2056,13 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
       !c.conditions[0].startsWith("!") &&
       isLowSpecificityConditionToken(c.conditions[0])
     ) {
+      acceptanceFunnel.removedByReason.conditionStructure += 1;
       continue;
     }
+    acceptanceFunnel.beforeValidation += 1;
 
     const trainBase =
       splits.train.filter((r) => r.outcomes.has(c.outcomeType)).length / Math.max(1, splits.train.length);
-    const forwardBase =
-      splits.forward.filter((r) => r.outcomes.has(c.outcomeType)).length / Math.max(1, splits.forward.length);
 
     const train = computeStats(
       splits.train,
@@ -1146,7 +2072,11 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
       priorStrength,
       seasonWeight,
     );
-    if (train.n < minLeaf) continue;
+    if (train.n < minLeaf) {
+      acceptanceFunnel.removedByReason.minSample += 1;
+      continue;
+    }
+    acceptanceFunnel.afterMinSampleGate += 1;
     const trainRecency = computeWeightedStats(
       splits.train,
       c.outcomeType,
@@ -1156,23 +2086,10 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
       recencyHalfLifeDays,
       seasonWeight,
     );
-    const forward = computeStats(
-      splits.forward,
-      c.outcomeType,
-      c.conditions,
-      forwardBase,
-      priorStrength,
-      undefined,
-    );
-    if (forward.n < minForwardSamples) continue;
-    if (useHitRateObjective) {
-      if (forward.posteriorHitRate < minForwardPosteriorDiscovery) continue;
-    } else if (forward.edge < minForwardEdgeDiscovery) {
-      continue;
-    }
 
     let val: SplitStats;
     let valOk: boolean;
+    let valFailReason: string | null = null;
     if (splits.mode === "default") {
       const valRows = splits.val;
       const valBase =
@@ -1185,9 +2102,18 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
         priorStrength,
         seasonWeight,
       );
-      valOk = useHitRateObjective
-        ? val.n >= minValSamples && val.posteriorHitRate >= minValPosteriorDiscovery
-        : val.n >= minValSamples && val.edge >= minValEdge;
+      if (val.n < minValSamples) {
+        valOk = false;
+        valFailReason = "insufficient_val_samples";
+      } else if (useHitRateObjective && val.posteriorHitRate < minValPosteriorDiscovery) {
+        valOk = false;
+        valFailReason = val.posteriorHitRate < 0.5 ? "poor_calibration" : "low_val_hit_rate";
+      } else if (!useHitRateObjective && val.edge < minValEdge) {
+        valOk = false;
+        valFailReason = "low_val_edge";
+      } else {
+        valOk = true;
+      }
     } else {
       const losoFoldStats: SplitStats[] = [];
       for (const fold of splits.losoFolds) {
@@ -1211,6 +2137,7 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
             ? s.n >= minValSamples && s.posteriorHitRate >= minValPosteriorDiscovery
             : s.n >= minValSamples && s.edge >= minValEdge,
       ).length;
+      const foldsWithEnoughSamples = losoFoldStats.filter((s) => s.n >= minValSamples).length;
       valOk = foldsWithPositiveSignal >= effectiveMinLosoFolds;
       const totalN = losoFoldStats.reduce((acc, s) => acc + s.n, 0);
       const totalWins = losoFoldStats.reduce((acc, s) => acc + s.wins, 0);
@@ -1230,12 +2157,29 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
         edge: meanEdge,
         lift: meanEdge > 0 ? 1 + meanEdge : 0,
       };
+      if (!valOk) {
+        if (foldsWithEnoughSamples < effectiveMinLosoFolds) {
+          valFailReason = "insufficient_val_samples";
+        } else if (useHitRateObjective && val.posteriorHitRate < minValPosteriorDiscovery) {
+          valFailReason = val.posteriorHitRate < 0.5 ? "poor_calibration" : "low_val_hit_rate";
+        } else if (!useHitRateObjective && val.edge < minValEdge) {
+          valFailReason = "low_val_edge";
+        } else {
+          valFailReason = "instability";
+        }
+      }
     }
-    if (!valOk) continue;
-
+    const forwardBase =
+      splits.forward.filter((r) => r.outcomes.has(c.outcomeType)).length / Math.max(1, splits.forward.length);
+    const forward = computeStats(
+      splits.forward,
+      c.outcomeType,
+      c.conditions,
+      forwardBase,
+      priorStrength,
+      undefined,
+    );
     const trainCoverage = train.n / Math.max(1, splits.train.length);
-    if (trainCoverage > maxTrainCoverage) continue;
-
     const stabilityFactor =
       (val.edge > 0 ? 0.6 : 0.2) +
       (forward.edge > 0 ? 0.5 : 0.1) +
@@ -1246,8 +2190,6 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
       1 / (1 + forwardStabilityWeight * (forwardGapVsVal + forwardGapVsTrain));
     const forwardDirectionalBonus =
       forward.edge >= val.edge && val.edge >= 0 ? 1.08 : forward.edge >= 0 ? 1.02 : 0.92;
-
-    // Prefer specific patterns over broad "always-on" rules.
     const specificityFactor = Math.sqrt(Math.max(0.01, 1 - trainCoverage));
     const uncertaintyPenalty = Math.sqrt(trainRecency.n / (trainRecency.n + lowNPenaltyK));
     const portability = portabilitySignals(c.outcomeType, c.conditions ?? []);
@@ -1266,6 +2208,49 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
       fragilityPenalty *
       forwardStability *
       forwardDirectionalBonus;
+    preValidationCandidates.push({
+      outcomeType: c.outcomeType,
+      conditions: c.conditions,
+      train,
+      val,
+      forward,
+      score,
+      trainValPosteriorDrop: train.posteriorHitRate - val.posteriorHitRate,
+    });
+    if (!valOk) {
+      acceptanceFunnel.removedByReason.validationGate += 1;
+      const reason = valFailReason ?? "instability";
+      bumpReason(reason);
+      validationNearMisses.push({
+        outcomeType: c.outcomeType,
+        conditions: c.conditions,
+        train,
+        val,
+        forward,
+        reason,
+      });
+      continue;
+    }
+    acceptanceFunnel.afterValidationGate += 1;
+    if (forward.n < minForwardSamples) {
+      acceptanceFunnel.removedByReason.forwardGate += 1;
+      continue;
+    }
+    if (useHitRateObjective) {
+      if (forward.posteriorHitRate < minForwardPosteriorDiscovery) {
+        acceptanceFunnel.removedByReason.forwardGate += 1;
+        continue;
+      }
+    } else if (forward.edge < minForwardEdgeDiscovery) {
+      acceptanceFunnel.removedByReason.forwardGate += 1;
+      continue;
+    }
+    acceptanceFunnel.afterForwardGate += 1;
+
+    if (trainCoverage > maxTrainCoverage) {
+      acceptanceFunnel.removedByReason.trainCoverage += 1;
+      continue;
+    }
     scored.push({
       ...c,
       train,
@@ -1288,22 +2273,72 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
   const selectedByOutcome = new Map<string, ScoredPattern[]>();
   for (const p of scored) {
     const used = perOutcome.get(p.outcomeType) ?? 0;
-    if (used >= maxPerOutcome) continue;
+    if (used >= maxPerOutcome) {
+      acceptanceFunnel.removedByReason.perOutcomeCap += 1;
+      continue;
+    }
     const family = outcomeFamilyBucket(p.outcomeType);
     const familyUsed = perFamily.get(family) ?? 0;
     const familyCap = Math.max(1, Math.min(maxPerFamily, maxPerFamilyByBucket[family] ?? maxPerFamily));
-    if (familyUsed >= familyCap) continue;
+    if (familyUsed >= familyCap) {
+      acceptanceFunnel.removedByReason.perFamilyCap += 1;
+      continue;
+    }
     const existing = selectedByOutcome.get(p.outcomeType) ?? [];
     const tooSimilar = existing.some(
       (e) => conditionOverlap(e.conditions ?? [], p.conditions ?? []) >= maxConditionOverlap,
     );
-    if (tooSimilar) continue;
+    if (tooSimilar) {
+      acceptanceFunnel.removedByReason.overlap += 1;
+      continue;
+    }
+    if (broadPatternSafeguard) {
+      const trainToValPosteriorDrop = p.train.posteriorHitRate - p.val.posteriorHitRate;
+      const safeguard = evaluateBroadPatternSafeguard({
+        enabled: broadPatternSafeguard,
+        trainCoverage: p.trainCoverage,
+        forwardPosterior: p.forward.posteriorHitRate,
+        discoveryScore: p.score,
+        trainToValPosteriorDrop,
+      });
+      if (safeguard.applies && !safeguard.passed) {
+        broadSafeguardRejected.push({
+          outcomeType: p.outcomeType,
+          conditions: p.conditions,
+          trainCoverage: p.trainCoverage,
+          trainPosterior: p.train.posteriorHitRate,
+          valPosterior: p.val.posteriorHitRate,
+          forwardPosterior: p.forward.posteriorHitRate,
+          score: p.score,
+          trainToValPosteriorDrop,
+          failedChecks: safeguard.failedChecks,
+        });
+        continue;
+      }
+    }
     top.push(p);
     perOutcome.set(p.outcomeType, used + 1);
     perFamily.set(family, familyUsed + 1);
     selectedByOutcome.set(p.outcomeType, [...existing, p]);
+    if (
+      isStrictNonPlayerGameLane &&
+      maxTrainCoverage > legacyTrainCoverageCap &&
+      p.trainCoverage > legacyTrainCoverageCap &&
+      p.trainCoverage <= maxTrainCoverage
+    ) {
+      admittedOnlyByRelaxedCoverage.push({
+        outcomeType: p.outcomeType,
+        conditions: p.conditions,
+        trainCoverage: p.trainCoverage,
+        train: p.train,
+        val: p.val,
+        forward: p.forward,
+        score: p.score,
+      });
+    }
     if (top.length >= maxPatterns) break;
   }
+  acceptanceFunnel.afterDeploymentAcceptance = top.length;
 
   await prisma.$executeRawUnsafe(`DELETE FROM "PatternV2Hit"`);
   await prisma.$executeRawUnsafe(`DELETE FROM "PatternV2"`);
@@ -1335,10 +2370,184 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
   }
 
   console.log(`Generated ${rawCandidates.length} raw candidates.`);
-  const cvNote = cvMode === "loso" ? `CV=loso min-folds-pass=${effectiveMinLosoFolds}; ` : "";
+  const cvNote = effectiveCvMode === "loso" ? `CV=loso min-folds-pass=${effectiveMinLosoFolds}; ` : "";
   console.log(
-    `Scored ${scored.length} patterns. Stored top ${top.length} into PatternV2 (objective=${objective}; ${cvNote}outcome filters: min samples=${minOutcomeSamples}, seasons>=${minOutcomeTrainSeasons}, coverage ${minOutcomeTrainCoverage}-${maxOutcomeTrainCoverage}; candidate filters: min conditions=${minConditionCount}, min distinct features=${minDistinctFeatureCount}, max/outcome=${maxPerOutcome}, max/family=${maxPerFamily}, max train coverage=${maxTrainCoverage}, min val samples=${minValSamples}, min forward samples=${minForwardSamples}${useHitRateObjective ? `, min val posterior=${minValPosteriorDiscovery}, min forward posterior=${minForwardPosteriorDiscovery}` : cvMode === "default" ? `, min val edge=${minValEdge}` : ""}${useHitRateObjective ? "" : `, min forward edge=${minForwardEdgeDiscovery}`}, recency half-life=${recencyHalfLifeDays}d, low-n penalty k=${lowNPenaltyK}, max overlap=${maxConditionOverlap}, outcomes=${perOutcome.size}, families=${perFamily.size}).`,
+    `Scored ${scored.length} patterns. Stored top ${top.length} into PatternV2 (objective=${objective}; ${cvNote}outcome filters: min samples=${minOutcomeSamples}, seasons>=${effectiveMinOutcomeTrainSeasons}, coverage ${minOutcomeTrainCoverage}-${maxOutcomeTrainCoverage}; candidate filters: min conditions=${minConditionCount}, min distinct features=${minDistinctFeatureCount}, max/outcome=${maxPerOutcome}, max/family=${maxPerFamily}, max train coverage=${maxTrainCoverage}, min val samples=${minValSamples}, min forward samples=${minForwardSamples}${useHitRateObjective ? `, min val posterior=${minValPosteriorDiscovery}, min forward posterior=${minForwardPosteriorDiscovery}` : effectiveCvMode === "default" ? `, min val edge=${minValEdge}` : ""}${useHitRateObjective ? "" : `, min forward edge=${minForwardEdgeDiscovery}`}, recency half-life=${recencyHalfLifeDays}d, low-n penalty k=${lowNPenaltyK}, max overlap=${maxConditionOverlap}, outcomes=${perOutcome.size}, families=${perFamily.size}).`,
   );
+  console.log(
+    `Player outcome market coverage gate: min coverage=${minPlayerOutcomePropCoverage.toFixed(3)}, dropped(no market map)=${droppedPlayerOutcomesNoMarket}, dropped(low coverage)=${droppedPlayerOutcomesLowCoverage}`,
+  );
+  console.log(
+    `Outcome eligibility funnel: initial=${outcomeFunnel.initial} -> minSamples=${outcomeFunnel.afterMinSamples} (removed ${outcomeFunnel.removedMinSamples}) -> minCoverage=${outcomeFunnel.afterMinCoverage} (removed ${outcomeFunnel.removedMinCoverage}) -> maxCoverage=${outcomeFunnel.afterMaxCoverage} (removed ${outcomeFunnel.removedMaxCoverage}) -> minTrainSeasons=${outcomeFunnel.afterMinTrainSeasons} (removed ${outcomeFunnel.removedMinTrainSeasons}) -> playerMarketMap=${outcomeFunnel.afterPlayerMarketMap} (removed ${outcomeFunnel.removedPlayerNoMarket}) -> playerCoverage=${outcomeFunnel.afterPlayerCoverage} (removed ${outcomeFunnel.removedPlayerLowCoverage}) -> familyFilter=${outcomeFunnel.afterFamilyFilter} (removed ${outcomeFunnel.removedFamilyFilter}) -> outcomeTypeFilter=${outcomeFunnel.afterOutcomeTypeFilter} (removed ${outcomeFunnel.removedOutcomeTypeFilter})`,
+  );
+  console.log(
+    `Acceptance funnel: beforeValidation=${acceptanceFunnel.beforeValidation} -> afterMinSample=${acceptanceFunnel.afterMinSampleGate} -> afterValidation=${acceptanceFunnel.afterValidationGate} -> afterForward=${acceptanceFunnel.afterForwardGate} -> accepted=${acceptanceFunnel.afterDeploymentAcceptance}`,
+  );
+  console.log(
+    `Acceptance removals: conditionStructure=${acceptanceFunnel.removedByReason.conditionStructure}, minSample=${acceptanceFunnel.removedByReason.minSample}, validation=${acceptanceFunnel.removedByReason.validationGate}, forward=${acceptanceFunnel.removedByReason.forwardGate}, trainCoverage=${acceptanceFunnel.removedByReason.trainCoverage}, perOutcomeCap=${acceptanceFunnel.removedByReason.perOutcomeCap}, perFamilyCap=${acceptanceFunnel.removedByReason.perFamilyCap}, overlap=${acceptanceFunnel.removedByReason.overlap}`,
+  );
+  const rawFamilyTop = topConditionFamilies([...deduped.values()], 10);
+  const scoredFamilyTop = topConditionFamilies(scored, 10);
+  const acceptedFamilyTop = topConditionFamilies(top, 10);
+  console.log(
+    `Top feature families (raw): ${rawFamilyTop.length ? rawFamilyTop.map((x) => `${x.family}=${x.count}`).join(", ") : "(none)"}`,
+  );
+  console.log(
+    `Top feature families (scored): ${scoredFamilyTop.length ? scoredFamilyTop.map((x) => `${x.family}=${x.count}`).join(", ") : "(none)"}`,
+  );
+  console.log(
+    `Top feature families (accepted): ${acceptedFamilyTop.length ? acceptedFamilyTop.map((x) => `${x.family}=${x.count}`).join(", ") : "(none)"}`,
+  );
+  if (isStrictNonPlayerGameLane && maxTrainCoverage > legacyTrainCoverageCap) {
+    if (admittedOnlyByRelaxedCoverage.length > 0) {
+      console.log(
+        `Train-coverage note: ${admittedOnlyByRelaxedCoverage.length} accepted pattern(s) were admitted only because max-train-coverage is ${maxTrainCoverage.toFixed(2)} (legacy cap=${legacyTrainCoverageCap.toFixed(2)}).`,
+      );
+      for (const p of admittedOnlyByRelaxedCoverage.slice(0, 10)) {
+        console.log(
+          `  coverage=${p.trainCoverage.toFixed(4)} score=${p.score.toFixed(4)} trainP=${p.train.posteriorHitRate.toFixed(4)} valP=${p.val.posteriorHitRate.toFixed(4)} fwdP=${p.forward.posteriorHitRate.toFixed(4)} outcome=${p.outcomeType} conds=${(p.conditions ?? []).join(" & ")}`,
+        );
+      }
+    } else {
+      console.log(
+        `Train-coverage note: no accepted patterns required the relaxed cap (legacy cap=${legacyTrainCoverageCap.toFixed(2)}, effective cap=${maxTrainCoverage.toFixed(2)}).`,
+      );
+    }
+  }
+  if (broadPatternSafeguard) {
+    console.log(
+      `Broad-pattern safeguard: rejected=${broadSafeguardRejected.length} (applies when trainCoverage>0.35 and all safeguard checks fail)`,
+    );
+    if (broadSafeguardRejected.length > 0) {
+      for (const p of broadSafeguardRejected.slice(0, 20)) {
+        console.log(
+          `  rejected coverage=${p.trainCoverage.toFixed(4)} score=${p.score.toFixed(4)} trainP=${p.trainPosterior.toFixed(4)} valP=${p.valPosterior.toFixed(4)} fwdP=${p.forwardPosterior.toFixed(4)} drop=${p.trainToValPosteriorDrop.toFixed(4)} failed=${p.failedChecks.join(",")} outcome=${p.outcomeType} conds=${p.conditions.join(" & ")}`,
+        );
+      }
+    }
+    const savedByRelaxedCoverage =
+      isStrictNonPlayerGameLane && maxTrainCoverage > legacyTrainCoverageCap
+        ? admittedOnlyByRelaxedCoverage.length
+        : 0;
+    console.log(
+      `Broad-pattern safeguard context: saved_by_relaxed_train_coverage=${savedByRelaxedCoverage} (legacy cap=${legacyTrainCoverageCap.toFixed(2)}, effective cap=${maxTrainCoverage.toFixed(2)})`,
+    );
+    if (top.length > 0) {
+      console.log("Final accepted patterns (coverage/posteriors/score):");
+      for (const p of top.slice(0, 20)) {
+        console.log(
+          `  coverage=${p.trainCoverage.toFixed(4)} score=${p.score.toFixed(4)} trainP=${p.train.posteriorHitRate.toFixed(4)} valP=${p.val.posteriorHitRate.toFixed(4)} fwdP=${p.forward.posteriorHitRate.toFixed(4)} outcome=${p.outcomeType} conds=${(p.conditions ?? []).join(" & ")}`,
+        );
+      }
+    } else {
+      console.log("Final accepted patterns (coverage/posteriors/score): (none)");
+    }
+  }
+  const topPatternSummaries = top.slice(0, 10);
+  if (topPatternSummaries.length > 0) {
+    console.log("Top pattern summaries:");
+    for (const p of topPatternSummaries) {
+      const score = Number.isFinite(p.score) ? p.score.toFixed(4) : String(p.score);
+      const edge = Number.isFinite(p.edge) ? p.edge.toFixed(4) : String(p.edge);
+      const ph = Number.isFinite(p.posteriorHitRate) ? p.posteriorHitRate.toFixed(4) : String(p.posteriorHitRate);
+      console.log(`  score=${score} edge=${edge} posterior=${ph} outcome=${p.outcomeType} conditions=${(p.conditions ?? []).join(" & ")}`);
+    }
+  } else {
+    console.log("Top pattern summaries: (none)");
+  }
+  if (debugLenient) {
+    console.log(
+      `Debug lenient mode: thresholds relaxed for diagnostics. Accepted patterns ${top.length > 0 ? `present (${top.length})` : "not found"}.`,
+    );
+  }
+  if (auditDiagnostics) {
+    const top30 = preValidationCandidates
+      .slice()
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 30);
+    console.log("Validation kill breakdown:");
+    for (const reason of [
+      "insufficient_val_samples",
+      "low_val_hit_rate",
+      "low_val_edge",
+      "instability",
+      "poor_calibration",
+    ]) {
+      console.log(`  ${reason}=${validationKillReasons.get(reason) ?? 0}`);
+    }
+    console.log("Top 30 pre-validation candidates (train/val/forward):");
+    for (const c of top30) {
+      console.log(
+        `  score=${c.score.toFixed(4)} outcome=${c.outcomeType} train(n=${c.train.n.toFixed(1)},p=${c.train.posteriorHitRate.toFixed(4)},e=${c.train.edge.toFixed(4)}) ` +
+          `val(n=${c.val.n.toFixed(1)},p=${c.val.posteriorHitRate.toFixed(4)},e=${c.val.edge.toFixed(4)}) ` +
+          `forward(n=${c.forward.n.toFixed(1)},p=${c.forward.posteriorHitRate.toFixed(4)},e=${c.forward.edge.toFixed(4)}) ` +
+          `drop(train->val posterior=${c.trainValPosteriorDrop.toFixed(4)}) conds=${c.conditions.join(" & ")}`,
+      );
+    }
+    const biggestCollapse = preValidationCandidates
+      .slice()
+      .sort((a, b) => b.trainValPosteriorDrop - a.trainValPosteriorDrop)
+      .slice(0, 10);
+    console.log("Top collapse train->val posterior:");
+    for (const c of biggestCollapse) {
+      console.log(
+        `  drop=${c.trainValPosteriorDrop.toFixed(4)} outcome=${c.outcomeType} trainP=${c.train.posteriorHitRate.toFixed(4)} valP=${c.val.posteriorHitRate.toFixed(4)} conds=${c.conditions.join(" & ")}`,
+      );
+    }
+    const tokenBucketForFamily = (row: TokenizedGame, family: string): string => {
+      for (const t of row.tokens) {
+        if (conditionFeatureKey(t) !== family) continue;
+        const base = t.startsWith("!") ? t.slice(1) : t;
+        const idx = base.indexOf(":");
+        return idx >= 0 ? base.slice(idx + 1) : "UNKNOWN";
+      }
+      return "UNKNOWN";
+    };
+    const analysisRows =
+      splits.mode === "default"
+        ? [...splits.train, ...splits.val, ...splits.forward]
+        : [...splits.train, ...splits.forward];
+    const summarizeRegime = (
+      label: string,
+      candidates: Array<{ outcomeType: string; conditions: string[] }>,
+    ): void => {
+      const seasonMap = new Map<number, number>();
+      const totalBandMap = new Map<string, number>();
+      const spreadBandMap = new Map<string, number>();
+      const injuryEnvMap = new Map<string, number>();
+      for (const c of candidates) {
+        for (const r of analysisRows) {
+          if (!matchesConditions(r.tokens, c.conditions ?? [])) continue;
+          seasonMap.set(r.season, (seasonMap.get(r.season) ?? 0) + 1);
+          totalBandMap.set(
+            tokenBucketForFamily(r, "market_total_band"),
+            (totalBandMap.get(tokenBucketForFamily(r, "market_total_band")) ?? 0) + 1,
+          );
+          spreadBandMap.set(
+            tokenBucketForFamily(r, "spread_band"),
+            (spreadBandMap.get(tokenBucketForFamily(r, "spread_band")) ?? 0) + 1,
+          );
+          injuryEnvMap.set(
+            tokenBucketForFamily(r, "injury_environment"),
+            (injuryEnvMap.get(tokenBucketForFamily(r, "injury_environment")) ?? 0) + 1,
+          );
+        }
+      }
+      const top = (m: Map<any, number>) =>
+        [...m.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 6)
+          .map(([k, v]) => `${k}:${v}`)
+          .join(", ");
+      console.log(`Regime summary (${label}):`);
+      console.log(`  season=${top(seasonMap) || "(none)"}`);
+      console.log(`  total_band=${top(totalBandMap) || "(none)"}`);
+      console.log(`  spread_band=${top(spreadBandMap) || "(none)"}`);
+      console.log(`  injury_environment=${top(injuryEnvMap) || "(none)"}`);
+    };
+    summarizeRegime("accepted", top);
+    summarizeRegime("near_miss_validation", validationNearMisses.slice(0, 30));
+  }
 }
 
 type StoredPatternRow = {

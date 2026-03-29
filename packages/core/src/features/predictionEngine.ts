@@ -239,7 +239,15 @@ export type PredictionOutput = {
 
 function isGenericPlayerOutcome(outcomeType: string): boolean {
   const base = outcomeType.replace(/:.*$/, "");
-  return base === "PLAYER_DOUBLE_DOUBLE" || base === "PLAYER_10_PLUS_REBOUNDS";
+  return [
+    "PLAYER_DOUBLE_DOUBLE",
+    "PLAYER_TRIPLE_DOUBLE",
+    "PLAYER_10_PLUS_REBOUNDS",
+    "PLAYER_10_PLUS_ASSISTS",
+    "PLAYER_30_PLUS",
+    "PLAYER_40_PLUS",
+    "PLAYER_5_PLUS_THREES",
+  ].includes(base);
 }
 
 // ── Player-outcome requirement parsing ──────────────────────────────────────────
@@ -296,18 +304,52 @@ export function parsePlayerOutcomeRequirement(
 
 function marketSpecForOutcome(
   outcomeType: string,
+  target: V2PlayerTarget | null,
 ): { market: string; requiredActual: "points" | "rebounds" | "assists" | "fg3m"; requiredLine: number } | null {
   const req = parsePlayerOutcomeRequirement(outcomeType);
-  if (!req) return null;
+  if (req) {
+    const market =
+      req.actualStat === "points"
+        ? "player_points"
+        : req.actualStat === "rebounds"
+          ? "player_rebounds"
+          : req.actualStat === "assists"
+            ? "player_assists"
+            : "player_threes";
+    return { market, requiredActual: req.actualStat, requiredLine: req.line };
+  }
+  const base = outcomeType.replace(/:.*$/, "");
+  const inferredActual =
+    base.includes("ASSIST") || base.includes("PLAYMAKER")
+      ? "assists"
+      : base.includes("REBOUND")
+        ? "rebounds"
+        : base.includes("SCORER") || base.includes("POINT")
+          ? "points"
+          : base.includes("THREE")
+            ? "fg3m"
+            : null;
+  if (!inferredActual) return null;
   const market =
-    req.actualStat === "points"
+    inferredActual === "points"
       ? "player_points"
-      : req.actualStat === "rebounds"
+      : inferredActual === "rebounds"
         ? "player_rebounds"
-        : req.actualStat === "assists"
+        : inferredActual === "assists"
           ? "player_assists"
           : "player_threes";
-  return { market, requiredActual: req.actualStat, requiredLine: req.line };
+  const targetBaseline =
+    inferredActual === "points" && target?.stat === "ppg"
+      ? target.statValue
+      : inferredActual === "rebounds" && target?.stat === "rpg"
+        ? target.statValue
+        : inferredActual === "assists" && target?.stat === "apg"
+          ? target.statValue
+          : null;
+  const requiredLine = targetBaseline != null && Number.isFinite(targetBaseline)
+    ? Math.max(0.5, targetBaseline)
+    : 0.5;
+  return { market, requiredActual: inferredActual, requiredLine };
 }
 
 function labelForMarketPick(
@@ -315,6 +357,7 @@ function labelForMarketPick(
   market: string,
   line: number,
   overPrice: number,
+  side: "over" | "under" = "over",
 ): string {
   if (market === "moneyline_home") {
     const oddsLabel = overPrice > 0 ? `+${overPrice}` : `${overPrice}`;
@@ -334,6 +377,7 @@ function labelForMarketPick(
           ? "assists"
           : "threes";
   const oddsLabel = overPrice > 0 ? `+${overPrice}` : `${overPrice}`;
+  if (side === "under") return `${playerName} under ${line} ${suffix} @ ${oddsLabel}`;
   return `${playerName} ${threshold}+ ${suffix} @ ${oddsLabel}`;
 }
 
@@ -368,6 +412,26 @@ function pickFromProps(
   };
 }
 
+function targetStatFromGameCtx(args: {
+  playerId: number;
+  stat: "ppg" | "rpg" | "apg";
+  gamePlayerCtx: GamePlayerContext;
+}): number | null {
+  const { playerId, stat, gamePlayerCtx } = args;
+  const candidates = [
+    gamePlayerCtx.homeTopScorer,
+    gamePlayerCtx.homeTopRebounder,
+    gamePlayerCtx.homeTopPlaymaker,
+    gamePlayerCtx.awayTopScorer,
+    gamePlayerCtx.awayTopRebounder,
+    gamePlayerCtx.awayTopPlaymaker,
+  ];
+  const match = candidates.find((p) => p?.id === playerId) ?? null;
+  if (!match) return null;
+  if (stat === "ppg" || stat === "rpg" || stat === "apg") return match.stat;
+  return null;
+}
+
 // ── Player target resolution ────────────────────────────────────────────────────
 
 export function pickV2PlayerTarget(
@@ -392,15 +456,17 @@ export function pickV2PlayerTarget(
     if (prop) {
       const pct = prop.pOver != null ? `${(prop.pOver * 100).toFixed(1)}%` : "n/a";
       const lineStr = prop.line != null ? `line ${prop.line}` : "no line";
+      const baselineFromCtx = targetStatFromGameCtx({
+        playerId: prop.id,
+        stat: "rpg",
+        gamePlayerCtx,
+      });
       return {
         id: prop.id,
         name: prop.name,
         stat: "rpg",
-        statValue: gamePlayerCtx.homeTopRebounder?.name === prop.name
-          ? gamePlayerCtx.homeTopRebounder.stat
-          : gamePlayerCtx.awayTopRebounder?.name === prop.name
-            ? gamePlayerCtx.awayTopRebounder.stat
-            : Math.max(gamePlayerCtx.homeTopRebounder?.stat ?? 0, gamePlayerCtx.awayTopRebounder?.stat ?? 0),
+        // Use selected player's own baseline when known; otherwise fall back to offered line.
+        statValue: baselineFromCtx ?? prop.line ?? 10,
         rationale: `Best prop over implied (${pct}) for 10+ rebounds (${lineStr})`,
       };
     }
@@ -412,11 +478,16 @@ export function pickV2PlayerTarget(
     if (prop) {
       const pct = prop.pOver != null ? `${(prop.pOver * 100).toFixed(1)}%` : "n/a";
       const lineStr = prop.line != null ? `line ${prop.line}` : "no line";
+      const baselineFromCtx = targetStatFromGameCtx({
+        playerId: prop.id,
+        stat: "apg",
+        gamePlayerCtx,
+      });
       return {
         id: prop.id,
         name: prop.name,
         stat: "apg",
-        statValue: Math.max(gamePlayerCtx.homeTopPlaymaker?.stat ?? 0, gamePlayerCtx.awayTopPlaymaker?.stat ?? 0),
+        statValue: baselineFromCtx ?? prop.line ?? 10,
         rationale: `Best prop over implied (${pct}) for 10+ assists (${lineStr})`,
       };
     }
@@ -441,17 +512,41 @@ export function pickV2PlayerTarget(
     const p = gamePlayerCtx.homeTopScorer;
     return p ? { id: p.id, name: p.name, stat: "ppg", statValue: p.stat, rationale: "Home top scorer by pregame context" } : null;
   }
+  if (outcome === "HOME_TOP_SCORER_EXCEEDS_AVG") {
+    const p = gamePlayerCtx.homeTopScorer;
+    return p ? { id: p.id, name: p.name, stat: "ppg", statValue: p.stat, rationale: "Home top scorer baseline from pregame context" } : null;
+  }
   if (outcome === "AWAY_TOP_SCORER_25_PLUS" || outcome === "AWAY_TOP_SCORER_30_PLUS") {
     const p = gamePlayerCtx.awayTopScorer;
     return p ? { id: p.id, name: p.name, stat: "ppg", statValue: p.stat, rationale: "Away top scorer by pregame context" } : null;
+  }
+  if (outcome === "AWAY_TOP_SCORER_EXCEEDS_AVG") {
+    const p = gamePlayerCtx.awayTopScorer;
+    return p ? { id: p.id, name: p.name, stat: "ppg", statValue: p.stat, rationale: "Away top scorer baseline from pregame context" } : null;
   }
   if (outcome === "HOME_TOP_REBOUNDER_10_PLUS" || outcome === "HOME_TOP_REBOUNDER_12_PLUS") {
     const p = gamePlayerCtx.homeTopRebounder;
     return p ? { id: p.id, name: p.name, stat: "rpg", statValue: p.stat, rationale: "Home top rebounder by pregame context" } : null;
   }
+  if (outcome === "HOME_TOP_REBOUNDER_EXCEEDS_AVG") {
+    const p = gamePlayerCtx.homeTopRebounder;
+    return p ? { id: p.id, name: p.name, stat: "rpg", statValue: p.stat, rationale: "Home top rebounder baseline from pregame context" } : null;
+  }
   if (outcome === "AWAY_TOP_REBOUNDER_10_PLUS" || outcome === "AWAY_TOP_REBOUNDER_12_PLUS") {
     const p = gamePlayerCtx.awayTopRebounder;
     return p ? { id: p.id, name: p.name, stat: "rpg", statValue: p.stat, rationale: "Away top rebounder by pregame context" } : null;
+  }
+  if (outcome === "AWAY_TOP_REBOUNDER_EXCEEDS_AVG") {
+    const p = gamePlayerCtx.awayTopRebounder;
+    return p ? { id: p.id, name: p.name, stat: "rpg", statValue: p.stat, rationale: "Away top rebounder baseline from pregame context" } : null;
+  }
+  if (outcome === "HOME_TOP_ASSIST_EXCEEDS_AVG") {
+    const p = gamePlayerCtx.homeTopPlaymaker;
+    return p ? { id: p.id, name: p.name, stat: "apg", statValue: p.stat, rationale: "Home top playmaker baseline from pregame context" } : null;
+  }
+  if (outcome === "AWAY_TOP_ASSIST_EXCEEDS_AVG") {
+    const p = gamePlayerCtx.awayTopPlaymaker;
+    return p ? { id: p.id, name: p.name, stat: "apg", statValue: p.stat, rationale: "Away top playmaker baseline from pregame context" } : null;
   }
   if (outcome === "PLAYER_30_PLUS" || outcome === "PLAYER_40_PLUS" || outcome === "PLAYER_5_PLUS_THREES") {
     if (outcome === "PLAYER_30_PLUS") {
@@ -459,7 +554,12 @@ export function pickV2PlayerTarget(
       if (prop) {
         const pct = prop.pOver != null ? `${(prop.pOver * 100).toFixed(1)}%` : "n/a";
         const lineStr = prop.line != null ? `line ${prop.line}` : "no line";
-        return { id: prop.id, name: prop.name, stat: "ppg", statValue: Math.max(gamePlayerCtx.homeTopScorer?.stat ?? 0, gamePlayerCtx.awayTopScorer?.stat ?? 0), rationale: `Best prop over implied (${pct}) for 30+ points (${lineStr})` };
+        const baselineFromCtx = targetStatFromGameCtx({
+          playerId: prop.id,
+          stat: "ppg",
+          gamePlayerCtx,
+        });
+        return { id: prop.id, name: prop.name, stat: "ppg", statValue: baselineFromCtx ?? prop.line ?? 30, rationale: `Best prop over implied (${pct}) for 30+ points (${lineStr})` };
       }
     }
     if (outcome === "PLAYER_40_PLUS") {
@@ -467,7 +567,12 @@ export function pickV2PlayerTarget(
       if (prop) {
         const pct = prop.pOver != null ? `${(prop.pOver * 100).toFixed(1)}%` : "n/a";
         const lineStr = prop.line != null ? `line ${prop.line}` : "no line";
-        return { id: prop.id, name: prop.name, stat: "ppg", statValue: Math.max(gamePlayerCtx.homeTopScorer?.stat ?? 0, gamePlayerCtx.awayTopScorer?.stat ?? 0), rationale: `Best prop over implied (${pct}) for 40+ points (${lineStr})` };
+        const baselineFromCtx = targetStatFromGameCtx({
+          playerId: prop.id,
+          stat: "ppg",
+          gamePlayerCtx,
+        });
+        return { id: prop.id, name: prop.name, stat: "ppg", statValue: baselineFromCtx ?? prop.line ?? 40, rationale: `Best prop over implied (${pct}) for 40+ points (${lineStr})` };
       }
     }
     if (outcome === "PLAYER_5_PLUS_THREES") {
@@ -650,17 +755,30 @@ function selectBestMarketBackedPick(args: {
   }
 
   if (!target) return null;
-  const spec = marketSpecForOutcome(outcomeType);
+  const spec = marketSpecForOutcome(outcomeType, target);
   if (!spec) return null;
 
-  const candidates = propsForGame.filter(
+  const allCandidates = propsForGame.filter(
     (r) =>
       r.playerId === target.id &&
       r.market === spec.market &&
       r.line != null &&
-      r.overPrice != null,
+      (r.overPrice != null || r.underPrice != null),
   );
-  if (candidates.length === 0) return null;
+  if (allCandidates.length === 0) return null;
+
+  // Use realistic local alt-line windows per market so picks stay near actionable books.
+  // If no line exists in-range, fall back to all offered lines.
+  const ladderHalfSpan =
+    spec.market === "player_threes"
+      ? 1.5 // roughly +/- 3 made-threes ladder steps at half-point lines
+      : spec.market === "player_assists" || spec.market === "player_rebounds"
+        ? 2.5 // nearby assist/rebound ladder around baseline
+        : 3.5; // points can support a slightly wider local ladder
+  const minLine = Math.max(0.5, spec.requiredLine - ladderHalfSpan);
+  const maxLine = spec.requiredLine + ladderHalfSpan;
+  const nearCandidates = allCandidates.filter((r) => (r.line ?? 0) >= minLine && (r.line ?? 0) <= maxLine);
+  const candidates = nearCandidates.length > 0 ? nearCandidates : allCandidates;
 
   const slope =
     spec.requiredActual === "fg3m"
@@ -672,10 +790,6 @@ function selectBestMarketBackedPick(args: {
   let bestEv = -Infinity;
 
   for (const c of candidates) {
-    const overPrice = c.overPrice ?? 0;
-    if (overPrice < PREDICTION_TUNING.maxNegativeAmericanOdds) continue;
-    const implied = impliedProbFromAmerican(c.overPrice);
-    if (implied == null) continue;
     const offeredThreshold = Math.floor((c.line ?? 0) + 0.5);
     const lineDelta = spec.requiredLine - offeredThreshold;
     const statBonus =
@@ -688,35 +802,46 @@ function selectBestMarketBackedPick(args: {
             : 0;
     const estModel = Math.max(0.05, Math.min(0.95, baseProb + lineDelta * slope + statBonus));
     const modelWeight = Math.min(0.85, 0.5 + confidence * 0.25 + Math.min(0.1, (support - 1) * 0.02));
-    const est = Math.max(
-      0.05,
-      Math.min(0.95, modelWeight * estModel + (1 - modelWeight) * implied),
-    );
-    const ev = est * payoutFromAmerican(overPrice) - (1 - est);
-    if (ev > bestEv) {
+    const sideCandidates: Array<{ side: "over" | "under"; price: number | null; modelProb: number }> = [
+      { side: "over", price: c.overPrice, modelProb: estModel },
+      { side: "under", price: c.underPrice, modelProb: 1 - estModel },
+    ];
+    for (const sideCandidate of sideCandidates) {
+      const price = sideCandidate.price;
+      if (price == null || !Number.isFinite(price) || price === 0) continue;
+      if (price < PREDICTION_TUNING.maxNegativeAmericanOdds) continue;
+      const implied = impliedProbFromAmerican(price);
+      if (implied == null) continue;
+      const est = Math.max(
+        0.05,
+        Math.min(0.95, modelWeight * sideCandidate.modelProb + (1 - modelWeight) * implied),
+      );
+      const ev = est * payoutFromAmerican(price) - (1 - est);
+      if (ev <= bestEv) continue;
       bestEv = ev;
       best = {
         playerId: c.playerId,
         playerName: `${c.player.firstname} ${c.player.lastname}`.trim(),
         market: c.market,
         line: c.line ?? 0,
-        overPrice: c.overPrice ?? 0,
+        overPrice: price,
         impliedProb: implied,
         estimatedProb: est,
-        modelEstimatedProb: estModel,
+        modelEstimatedProb: sideCandidate.modelProb,
         edge: est - implied,
         ev,
         label: labelForMarketPick(
           `${c.player.firstname} ${c.player.lastname}`.trim(),
           c.market,
           c.line ?? 0,
-          c.overPrice ?? 0,
+          price,
+          sideCandidate.side,
         ),
         marketType: "player_prop",
-        marketSubType: c.market,
-        selectionSide: "player_over",
+        marketSubType: `${c.market}_${sideCandidate.side}`,
+        selectionSide: sideCandidate.side,
         lineSnapshot: c.line ?? 0,
-        priceSnapshot: c.overPrice ?? 0,
+        priceSnapshot: price,
       };
     }
   }
@@ -1319,7 +1444,7 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
         expectedValueScore: quality.expectedValueScore,
         marketType: quality.marketType,
         marketSubType: quality.marketSubType,
-        selectionSide: quality.selectionSide,
+        selectionSide: marketPick?.selectionSide ?? quality.selectionSide,
         lineSnapshot: quality.lineSnapshot,
         priceSnapshot: quality.priceSnapshot,
         laneTag: quality.laneTag,
@@ -1436,6 +1561,33 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
 
   const suggestedBetPicks = strictActionabilityGatesEnabled
     ? legacySuggestedBetPicks.filter((p) => {
+        if (p.laneTag === "other_prop") {
+          if (gateDiagnostics) {
+            recordGateEval(gateDiagnostics.bettable, {
+              pass: false,
+              reason: "strict_other_prop_block",
+            });
+          }
+          return false;
+        }
+        if (p.marketType === "player_prop" && !p.playerTarget) {
+          if (gateDiagnostics) {
+            recordGateEval(gateDiagnostics.bettable, {
+              pass: false,
+              reason: "strict_missing_player_target",
+            });
+          }
+          return false;
+        }
+        if (p.marketType === "player_prop" && isGenericPlayerOutcome(p.outcomeType)) {
+          if (gateDiagnostics) {
+            recordGateEval(gateDiagnostics.bettable, {
+              pass: false,
+              reason: "strict_generic_player_outcome",
+            });
+          }
+          return false;
+        }
         const family = betFamilyForOutcome(p.outcomeType);
         const strictCfg = PICK_QUALITY_TUNING.strictGateByFamily[family];
         const moneylineStrict = strictCfg as {

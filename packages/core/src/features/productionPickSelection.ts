@@ -103,8 +103,10 @@ export function outcomeDedupFamily(outcomeType: string): string {
     base === "PLAYER_10_PLUS_ASSISTS" ||
     base === "HOME_TOP_ASSIST_8_PLUS" ||
     base === "HOME_TOP_ASSIST_10_PLUS" ||
+    base === "HOME_TOP_ASSIST_EXCEEDS_AVG" ||
     base === "AWAY_TOP_ASSIST_8_PLUS" ||
     base === "AWAY_TOP_ASSIST_10_PLUS" ||
+    base === "AWAY_TOP_ASSIST_EXCEEDS_AVG" ||
     base === "HOME_TOP_PLAYMAKER_8_PLUS" ||
     base === "HOME_TOP_PLAYMAKER_10_PLUS" ||
     base === "AWAY_TOP_PLAYMAKER_8_PLUS" ||
@@ -114,16 +116,20 @@ export function outcomeDedupFamily(outcomeType: string): string {
     base === "PLAYER_10_PLUS_REBOUNDS" ||
     base === "HOME_TOP_REBOUNDER_10_PLUS" ||
     base === "HOME_TOP_REBOUNDER_12_PLUS" ||
+    base === "HOME_TOP_REBOUNDER_EXCEEDS_AVG" ||
     base === "AWAY_TOP_REBOUNDER_10_PLUS" ||
-    base === "AWAY_TOP_REBOUNDER_12_PLUS"
+    base === "AWAY_TOP_REBOUNDER_12_PLUS" ||
+    base === "AWAY_TOP_REBOUNDER_EXCEEDS_AVG"
   ) return "REBOUNDS_LADDER";
   if (
     base === "PLAYER_30_PLUS" ||
     base === "PLAYER_40_PLUS" ||
     base === "HOME_TOP_SCORER_25_PLUS" ||
     base === "HOME_TOP_SCORER_30_PLUS" ||
+    base === "HOME_TOP_SCORER_EXCEEDS_AVG" ||
     base === "AWAY_TOP_SCORER_25_PLUS" ||
-    base === "AWAY_TOP_SCORER_30_PLUS"
+    base === "AWAY_TOP_SCORER_30_PLUS" ||
+    base === "AWAY_TOP_SCORER_EXCEEDS_AVG"
   ) return "POINTS_LADDER";
   return base;
 }

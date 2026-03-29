@@ -174,6 +174,9 @@ function quantileLabelToUnit(label: string): number | null {
   if (label.startsWith("LT_") || label.startsWith("LE_")) return 0.2;
   if (label.startsWith("GE_") || label.startsWith("GT_")) return 0.8;
   if (label.startsWith("RANGE_")) return 0.5;
+  if (label === "BALANCED" || label === "LOW" || label === "CLEAN" || label === "UNDERPRICED") return 0.2;
+  if (label === "MID" || label === "FAIR" || label === "MIXED" || label === "STAR_LED") return 0.5;
+  if (label === "EXTREME" || label === "HIGH" || label === "CHAOTIC" || label === "OVERPRICED") return 0.8;
   return null;
 }
 

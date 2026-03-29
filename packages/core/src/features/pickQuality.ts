@@ -77,7 +77,7 @@ export function deriveLaneTag(outcomeType: string, market: string | null): strin
   if (market === "player_points") return "player_points";
   if (market === "player_rebounds") return "player_rebounds";
   if (market === "player_assists") return "player_assists";
-  if (market === "player_threes") return "other_prop";
+  if (market === "player_threes") return "player_threes";
   if (market?.startsWith("moneyline")) return "moneyline";
   if (market?.startsWith("spread")) return "spread";
   if (market?.startsWith("total")) return "total";

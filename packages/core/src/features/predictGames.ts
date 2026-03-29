@@ -14,7 +14,6 @@ import { LEDGER_TUNING, PICK_QUALITY_TUNING } from "../config/tuning";
 import {
   generateGamePredictions,
   loadLatestFeatureBins,
-  loadMetaModel,
   type DeployedPatternV2,
   type GamePlayerContext,
   type PlayerPropRow,
@@ -29,6 +28,16 @@ function getSeasonForDate(date: Date): number {
 
 function sqlEsc(value: string): string {
   return value.replaceAll("'", "''");
+}
+
+function toTextArrayLiteral(values: unknown[] | null | undefined): string | null {
+  if (!values || values.length === 0) return null;
+  const safe = values
+    .filter((v): v is string => typeof v === "string")
+    .map((v) => v.trim())
+    .filter((v) => v.length > 0);
+  if (safe.length === 0) return null;
+  return `{${safe.map((v) => `"${v.replaceAll('"', '\\"')}"`).join(",")}}`;
 }
 
 async function ensureCanonicalPredictionTables(): Promise<void> {
@@ -167,9 +176,8 @@ async function persistCanonicalPredictions(input: {
 }): Promise<void> {
   for (const record of input.records) {
     const q = record.quality_context;
-    const regimeTagsLiteral = q?.regime_tags?.length
-      ? `{${q.regime_tags.map((t) => `"${t.replaceAll('"', '\\"')}"`).join(",")}}`
-      : null;
+    const regimeTagsLiteral = toTextArrayLiteral(q?.regime_tags ?? null);
+    const supportingPatternsLiteral = toTextArrayLiteral(record.supporting_patterns ?? null);
     await prisma.$executeRawUnsafe(
       `INSERT INTO "CanonicalPrediction"
       ("predictionId","runId","runStartedAt","runContext","voteWeightingVersion","gameId","market","selection","confidenceScore","edgeEstimate",
@@ -201,7 +209,7 @@ async function persistCanonicalPredictions(input: {
        '${sqlEsc(record.aggregation_policy_version)}','${sqlEsc(record.model_bundle_version)}',
        '${sqlEsc(record.feature_schema_version)}','${sqlEsc(record.feature_snapshot_id)}',
        '${sqlEsc(JSON.stringify(record.feature_snapshot_payload))}'::jsonb,
-       '${sqlEsc(`{${record.supporting_patterns.map((p) => `"${p.replaceAll('"', '\\"')}"`).join(",")}}`)}'::text[],
+       ${supportingPatternsLiteral ? `'${sqlEsc(supportingPatternsLiteral)}'::text[]` : "'{}'::text[]"},
        '${sqlEsc(JSON.stringify(record.model_votes))}'::jsonb,
        '${sqlEsc(record.generated_at)}'::timestamptz,NOW())
       ON CONFLICT ("predictionId") DO UPDATE SET
@@ -250,13 +258,13 @@ async function persistRejectionDiagnostics(input: {
 }): Promise<void> {
   for (const row of input.rejectedPatternDiagnostics) {
     const id = crypto.randomUUID();
-    const reasonsArrayLiteral = `{${row.reasons.map((r) => `"${r.replaceAll('"', '\\"')}"`).join(",")}}`;
+    const reasonsArrayLiteral = toTextArrayLiteral(row.reasons ?? []);
     await prisma.$executeRawUnsafe(
       `INSERT INTO "CanonicalPredictionRejection"
        ("id","runId","runDate","gameId","patternId","reasons")
        VALUES
        ('${id}','${sqlEsc(input.runId)}','${sqlEsc(input.runDate)}'::date,'${sqlEsc(input.gameId)}','${sqlEsc(row.patternId)}',
-        '${sqlEsc(reasonsArrayLiteral)}'::text[])`,
+        ${reasonsArrayLiteral ? `'${sqlEsc(reasonsArrayLiteral)}'::text[]` : "'{}'::text[]"})`,
     );
   }
 }
@@ -362,7 +370,7 @@ export async function predictGames(args: string[] = []): Promise<void> {
   const activeVersion = forcedLive ? null : (explicitVersion ?? (await loadActiveModelVersion()));
   let deployedV2: DeployedPatternV2[];
   let bins: Map<string, any>;
-  let metaModel: Awaited<ReturnType<typeof loadMetaModel>>;
+  let metaModel: null = null;
 
   if (activeVersion) {
     if (explicitVersion) {
@@ -372,7 +380,7 @@ export async function predictGames(args: string[] = []): Promise<void> {
     }
     deployedV2 = activeVersion.deployedPatterns;
     bins = new Map(Object.entries(activeVersion.featureBins));
-    metaModel = activeVersion.metaModel;
+    metaModel = null;
     runContext.modelVersionName = (activeVersion as { name?: string }).name ?? null;
   } else {
     if (forcedLive) {
@@ -392,7 +400,7 @@ export async function predictGames(args: string[] = []): Promise<void> {
       orderBy: { score: "desc" },
     }) as DeployedPatternV2[];
     bins = await loadLatestFeatureBins(prisma);
-    metaModel = await loadMetaModel();
+    metaModel = null;
     runContext.modelVersionName = null;
   }
   const calibrationArtifacts = await loadCalibrationArtifacts();
