@@ -20,7 +20,11 @@ export type DeployedPatternV2 = {
 
 export type OddsLite = {
   spreadHome?: number | null;
+  spreadHomePrice?: number | null;
+  spreadAwayPrice?: number | null;
   totalOver?: number | null;
+  totalOverPrice?: number | null;
+  totalUnderPrice?: number | null;
   mlHome?: number | null;
   mlAway?: number | null;
 };
@@ -72,8 +76,9 @@ export function buildPregameTokenSet(input: {
   odds: OddsLite | null;
   bins: Map<string, FeatureBinDef>;
   playerContext?: PregamePlayerContext;
+  topPropLines?: { home: number | null; away: number | null };
 }): Set<string> {
-  const { season, context, odds, bins, playerContext } = input;
+  const { season, context, odds, bins, playerContext, topPropLines } = input;
   const tokens = new Set<string>();
   tokens.add(`season:${season}`);
 
@@ -118,8 +123,9 @@ export function buildPregameTokenSet(input: {
     return ast / (1 + pressure * 0.6);
   };
 
-  // Discovery uses top-scorer share of top-3 scorers, but pregame has only top scorer.
-  // Approximate dependency from top scorer share of team PPG with a scaling factor.
+  // Discovery computes roleDependency as topScorer.ppg / sum(top3.ppg).
+  // Pregame only has the single top scorer, so approximate top3Sum from teamPpg.
+  // Empirically, top-3 scorers account for ~55% of team PPG across NBA rosters.
   const estimateRoleDependency = (
     topScorerPpg: number | null | undefined,
     teamPpg: number | null | undefined,
@@ -134,8 +140,8 @@ export function buildPregameTokenSet(input: {
     ) {
       return null;
     }
-    const share = topScorerPpg / teamPpg;
-    return Math.max(0.2, Math.min(0.75, share * 1.8));
+    const estimatedTop3Sum = teamPpg * 0.55;
+    return topScorerPpg / estimatedTop3Sum;
   };
 
   const rankToStrength = (rank: number | null | undefined): number | null => {
@@ -237,13 +243,16 @@ export function buildPregameTokenSet(input: {
   if (homePlaymakingResilience != null && awayPlaymakingResilience != null) {
     addToken("playmaking_resilience_delta", homePlaymakingResilience - awayPlaymakingResilience);
   }
+  // Discovery uses top3Average(ppg) / ast. The top scorer's PPG is typically ~1.4x
+  // the average of the top-3 scorers, so scale down to approximate the discovery formula.
+  const estimateTop3AvgPpg = (topScorerPpg: number) => topScorerPpg / 1.4;
   const homeCreationBurden =
     playerContext?.homeTopScorer?.stat != null && context.homeAstPg != null && context.homeAstPg > 0
-      ? playerContext.homeTopScorer.stat / context.homeAstPg
+      ? estimateTop3AvgPpg(playerContext.homeTopScorer.stat) / context.homeAstPg
       : null;
   const awayCreationBurden =
     playerContext?.awayTopScorer?.stat != null && context.awayAstPg != null && context.awayAstPg > 0
-      ? playerContext.awayTopScorer.stat / context.awayAstPg
+      ? estimateTop3AvgPpg(playerContext.awayTopScorer.stat) / context.awayAstPg
       : null;
   addToken("home_creation_burden", homeCreationBurden);
   addToken("away_creation_burden", awayCreationBurden);
@@ -352,8 +361,20 @@ export function buildPregameTokenSet(input: {
   addToken("shot_creation_stability", shotCreationStability);
 
   const marketOverpricingRisk = (() => {
-    if (spreadHome == null || homeCreationBurden == null || awayCreationBurden == null) return null;
-    return (homeCreationBurden - awayCreationBurden) + (-spreadHome * 0.15);
+    if (spreadHome == null) return null;
+    const homeTopLine = topPropLines?.home ?? null;
+    const awayTopLine = topPropLines?.away ?? null;
+    const homeBaseline = playerContext?.homeTopScorer?.stat ?? null;
+    const awayBaseline = playerContext?.awayTopScorer?.stat ?? null;
+    if (homeTopLine != null && awayTopLine != null && homeBaseline != null && awayBaseline != null) {
+      const homeGap = homeTopLine - homeBaseline;
+      const awayGap = awayTopLine - awayBaseline;
+      return (homeGap - awayGap) + (-spreadHome * 0.15);
+    }
+    if (homeCreationBurden != null && awayCreationBurden != null) {
+      return (homeCreationBurden - awayCreationBurden) + (-spreadHome * 0.15);
+    }
+    return null;
   })();
   addToken("market_overpricing_risk", marketOverpricingRisk);
 
@@ -363,7 +384,17 @@ export function buildPregameTokenSet(input: {
   if (homeRoleDependency != null && awayRoleDependency != null) {
     addToken("role_dependency_band", semanticRoleDependency(Math.max(homeRoleDependency, awayRoleDependency)));
   }
-  addToken("line_value_state", semanticLineValue(marketOverpricingRisk));
+  const lineValueInput = (() => {
+    const homeTopLine = topPropLines?.home ?? null;
+    const awayTopLine = topPropLines?.away ?? null;
+    const homeBaseline = playerContext?.homeTopScorer?.stat ?? null;
+    const awayBaseline = playerContext?.awayTopScorer?.stat ?? null;
+    if (homeTopLine != null && awayTopLine != null && homeBaseline != null && awayBaseline != null) {
+      return (homeTopLine - homeBaseline) - (awayTopLine - awayBaseline);
+    }
+    return marketOverpricingRisk;
+  })();
+  addToken("line_value_state", semanticLineValue(lineValueInput));
 
   const injuryNoiseScore =
     (context.homeInjuryQuestionableCount ?? 0) +

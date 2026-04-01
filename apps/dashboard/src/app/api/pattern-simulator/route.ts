@@ -414,7 +414,11 @@ export async function POST(req: Request) {
         const engineOdds = consensus
           ? {
               spreadHome: consensus.spreadHome ?? null,
+              spreadHomePrice: (consensus as Record<string, unknown>).spreadHomePrice as number | null ?? null,
+              spreadAwayPrice: (consensus as Record<string, unknown>).spreadAwayPrice as number | null ?? null,
               totalOver: consensus.totalOver ?? null,
+              totalOverPrice: (consensus as Record<string, unknown>).totalOverPrice as number | null ?? null,
+              totalUnderPrice: (consensus as Record<string, unknown>).totalUnderPrice as number | null ?? null,
               mlHome: consensus.mlHome ?? null,
               mlAway: consensus.mlAway ?? null,
             }

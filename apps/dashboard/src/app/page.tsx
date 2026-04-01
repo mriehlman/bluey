@@ -169,9 +169,15 @@ interface ModelVersionOption {
 }
 
 function getLocalDateString(d: Date = new Date()) {
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(d);
+  const year = parts.find((p) => p.type === "year")!.value;
+  const month = parts.find((p) => p.type === "month")!.value;
+  const day = parts.find((p) => p.type === "day")!.value;
   return `${year}-${month}-${day}`;
 }
 
@@ -228,13 +234,33 @@ function filterByLane<T extends { outcomeType: string; laneTag?: string }>(
   return picks.filter((p) => (p.laneTag ?? inferLaneTag(p.outcomeType)) === lane);
 }
 
+function isPlayerProp(outcomeType: string): boolean {
+  const base = (outcomeType ?? "").replace(/:.*$/, "");
+  if (base.startsWith("PLAYER_") || base.startsWith("HOME_TOP_") || base.startsWith("AWAY_TOP_")) return true;
+  if (base.includes("WIN") || base.includes("COVERED") || base.startsWith("OVER_") || base.startsWith("UNDER_") || base.startsWith("TOTAL_")) return false;
+  return false;
+}
+
+function filterByMinVotes<T extends { votes?: number; outcomeType: string }>(
+  picks: T[] | undefined,
+  gameMinVotes: number,
+  playerMinVotes: number,
+): T[] {
+  if (!picks) return [];
+  if (gameMinVotes <= 1 && playerMinVotes <= 1) return picks;
+  return picks.filter((p) => {
+    const min = isPlayerProp(p.outcomeType) ? playerMinVotes : gameMinVotes;
+    return (p.votes ?? 1) >= min;
+  });
+}
+
 export function PredictionsPage() {
   const [date, setDate] = useState(() => getLocalDateString());
   const [data, setData] = useState<PredictionData | null>(null);
   const [loading, setLoading] = useState(false);
   const [expandedGame, setExpandedGame] = useState<string | null>(null);
   const [evidenceOpenByGame, setEvidenceOpenByGame] = useState<Record<string, boolean>>({});
-  const [parlayLegs, setParlayLegs] = useState<{ key: string; gameLabel: string; pickLabel: string; odds: number }[]>([]);
+  const [parlayLegs, setParlayLegs] = useState<{ key: string; gameLabel: string; pickLabel: string; odds: number; american: number }[]>([]);
   const [parlayStake, setParlayStake] = useState("10");
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<{ ok: boolean; message: string; steps?: { step: string; ok: boolean; message?: string }[] } | null>(null);
@@ -242,6 +268,8 @@ export function PredictionsPage() {
   const [mlFilter, setMlFilter] = useState<"all" | "ml_only" | "no_ml">("all");
   const [gateMode, setGateMode] = useState<"legacy" | "strict">("legacy");
   const [laneFilter, setLaneFilter] = useState<"all" | "moneyline" | "spread" | "total" | "player_points" | "player_rebounds" | "player_assists" | "other_prop" | "other">("all");
+  const [gameMinVotes, setGameMinVotes] = useState(1);
+  const [playerMinVotes, setPlayerMinVotes] = useState(1);
   const [calendarMonth, setCalendarMonth] = useState(() => {
     const d = new Date();
     return { year: d.getFullYear(), month: d.getMonth() };
@@ -258,13 +286,18 @@ export function PredictionsPage() {
     setParlayLegs((prev) => {
       if (prev.some((l) => l.key === key)) return prev.filter((l) => l.key !== key);
       const decimal = americanOdds > 0 ? 1 + americanOdds / 100 : 1 + 100 / Math.abs(americanOdds);
-      return [...prev, { key, gameLabel, pickLabel, odds: decimal }];
+      return [...prev, { key, gameLabel, pickLabel, odds: decimal, american: americanOdds }];
     });
   };
 
   const parlayDecimalOdds = parlayLegs.reduce((acc, l) => acc * l.odds, 1);
   const stakeNum = parseFloat(parlayStake) || 0;
   const parlayPayout = stakeNum * parlayDecimalOdds;
+  const parlayAmericanOdds = parlayDecimalOdds <= 1
+    ? "+0"
+    : parlayDecimalOdds >= 2
+      ? `+${Math.round((parlayDecimalOdds - 1) * 100).toLocaleString()}`
+      : `${Math.round(-100 / (parlayDecimalOdds - 1))}`;
 
   const fetchPredictions = useCallback(async (targetDate: string, refreshLedger?: boolean) => {
     setLoading(true);
@@ -339,7 +372,7 @@ export function PredictionsPage() {
     const monthStr = `${calendarMonth.year}-${String(calendarMonth.month + 1).padStart(2, "0")}`;
     const modelVersion = data?.modelVersion ?? "live";
     fetch(
-      `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&lane=${laneFilter}&modelVersion=${encodeURIComponent(modelVersion)}&gateMode=${gateMode}`,
+      `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&lane=${laneFilter}&modelVersion=${encodeURIComponent(modelVersion)}&gateMode=${gateMode}&gameMinVotes=${gameMinVotes}&playerMinVotes=${playerMinVotes}`,
       { cache: "no-store" },
     )
       .then((r) => r.json())
@@ -347,7 +380,7 @@ export function PredictionsPage() {
         setPerfectDates(new Set(json.dates ?? []));
       })
       .catch(() => setPerfectDates(new Set()));
-  }, [calendarMonth.year, calendarMonth.month, pickType, mlFilter, laneFilter, gateMode, data?.modelVersion]);
+  }, [calendarMonth.year, calendarMonth.month, pickType, mlFilter, laneFilter, gateMode, data?.modelVersion, gameMinVotes, playerMinVotes]);
 
   const runSync = useCallback(async () => {
     setSyncing(true);
@@ -367,7 +400,7 @@ export function PredictionsPage() {
         const monthStr = `${calendarMonth.year}-${String(calendarMonth.month + 1).padStart(2, "0")}`;
         const modelVersion = data?.modelVersion ?? "live";
         fetch(
-          `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&lane=${laneFilter}&modelVersion=${encodeURIComponent(modelVersion)}&gateMode=${gateMode}`,
+          `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&lane=${laneFilter}&modelVersion=${encodeURIComponent(modelVersion)}&gateMode=${gateMode}&gameMinVotes=${gameMinVotes}&playerMinVotes=${playerMinVotes}`,
           { cache: "no-store" },
         )
           .then((r) => r.json())
@@ -379,7 +412,7 @@ export function PredictionsPage() {
     } finally {
       setSyncing(false);
     }
-  }, [date, fetchPredictions, calendarMonth.year, calendarMonth.month, pickType, mlFilter, laneFilter, gateMode, data?.modelVersion]);
+  }, [date, fetchPredictions, calendarMonth.year, calendarMonth.month, pickType, mlFilter, laneFilter, gateMode, data?.modelVersion, gameMinVotes, playerMinVotes]);
 
   const switchModelVersion = useCallback(async (next: string) => {
     setSwitchingModelVersion(true);
@@ -582,8 +615,8 @@ export function PredictionsPage() {
 
   const filteredGames = data?.games.map((g) => ({
     ...g,
-    suggestedBetPicks: filterByLane(filterPicksByMl(filterPicks(g.suggestedBetPicks, pickType), mlFilter), laneFilter),
-    suggestedPlays: filterByLane(filterPicks(g.suggestedPlays, pickType), laneFilter),
+    suggestedBetPicks: filterByMinVotes(filterByLane(filterPicksByMl(filterPicks(g.suggestedBetPicks, pickType), mlFilter), laneFilter), gameMinVotes, playerMinVotes),
+    suggestedPlays: filterByMinVotes(filterByLane(filterPicks(g.suggestedPlays, pickType), laneFilter), gameMinVotes, playerMinVotes),
     discoveryV2Matches: filterByLane(filterPicks(g.discoveryV2Matches, pickType), laneFilter),
   })) ?? [];
   const totalPicks = filteredGames.reduce((sum, g) => sum + (g.suggestedBetPicks?.length ?? 0), 0);
@@ -1222,6 +1255,34 @@ export function PredictionsPage() {
             <option value="other">other</option>
           </select>
         </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.5rem" }}>
+          <span className="muted" style={{ fontSize: "0.8rem" }}>Game votes:</span>
+          <select
+            value={gameMinVotes}
+            onChange={(e) => setGameMinVotes(Number(e.target.value))}
+            style={{ width: "100%", padding: "0.3rem 0.4rem", fontSize: "0.72rem" }}
+          >
+            <option value={1}>1 (all)</option>
+            <option value={2}>2+</option>
+            <option value={3}>3+</option>
+            <option value={4}>4+</option>
+            <option value={5}>5+</option>
+          </select>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.5rem" }}>
+          <span className="muted" style={{ fontSize: "0.8rem" }}>Player votes:</span>
+          <select
+            value={playerMinVotes}
+            onChange={(e) => setPlayerMinVotes(Number(e.target.value))}
+            style={{ width: "100%", padding: "0.3rem 0.4rem", fontSize: "0.72rem" }}
+          >
+            <option value={1}>1 (all)</option>
+            <option value={2}>2+</option>
+            <option value={3}>3+</option>
+            <option value={4}>4+</option>
+            <option value={5}>5+</option>
+          </select>
+        </div>
         {mlFilter !== "all" && pickType === "game" && (
           <div className="muted" style={{ fontSize: "0.72rem", marginBottom: "0.5rem" }}>
             ML vote applies to player-point picks. Switch Picks to Player or All.
@@ -1265,7 +1326,7 @@ export function PredictionsPage() {
                       const label = resolveLabel(play.displayLabel, play.outcomeType, hl, al);
                       const american = play.marketPick?.overPrice ?? -110;
                       const decimal = american > 0 ? 1 + american / 100 : 1 + 100 / Math.abs(american);
-                      legs.push({ key, gameLabel: ml, pickLabel: label, odds: decimal });
+                      legs.push({ key, gameLabel: ml, pickLabel: label, odds: decimal, american });
                     }
                   }
                   setParlayLegs(legs);
@@ -1294,10 +1355,13 @@ export function PredictionsPage() {
                   key={leg.key}
                   style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.8rem", padding: "0.3rem 0.4rem", background: "var(--bg-elevated)", borderRadius: 6 }}
                 >
-                  <div style={{ minWidth: 0 }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
                     <div style={{ fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{leg.pickLabel}</div>
                     <div className="muted" style={{ fontSize: "0.7rem" }}>{leg.gameLabel}</div>
                   </div>
+                  <span style={{ fontSize: "0.75rem", fontWeight: 600, color: leg.american > 0 ? "var(--success)" : "var(--text)", whiteSpace: "nowrap", marginRight: "0.3rem" }}>
+                    {leg.american > 0 ? `+${leg.american}` : leg.american}
+                  </span>
                   <button
                     onClick={() => setParlayLegs((prev) => prev.filter((l) => l.key !== leg.key))}
                     style={{ background: "none", border: "none", color: "var(--error)", cursor: "pointer", padding: "0 0.3rem", fontSize: "1rem", lineHeight: 1 }}
@@ -1326,15 +1390,19 @@ export function PredictionsPage() {
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.82rem" }}>
                 <span className="muted">Combined odds</span>
+                <span style={{ fontWeight: 600 }}>{parlayAmericanOdds}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.72rem", opacity: 0.7 }}>
+                <span className="muted">Decimal</span>
                 <span>{parlayDecimalOdds.toFixed(2)}x</span>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: "1rem", fontWeight: 800, marginTop: "0.4rem" }}>
-                <span>Payout</span>
-                <span style={{ color: "var(--success)" }}>${parlayPayout.toFixed(2)}</span>
+                <span>Win</span>
+                <span style={{ color: "var(--success)" }}>${(parlayPayout - stakeNum).toFixed(2)}</span>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.82rem", marginTop: "0.15rem" }}>
-                <span className="muted">Profit</span>
-                <span style={{ color: "var(--success)" }}>${(parlayPayout - stakeNum).toFixed(2)}</span>
+                <span className="muted">Total payout</span>
+                <span style={{ color: "var(--success)" }}>${parlayPayout.toFixed(2)}</span>
               </div>
             </div>
 

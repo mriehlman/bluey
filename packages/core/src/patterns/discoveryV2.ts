@@ -1633,6 +1633,11 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
   const auditDiagnostics = flags["audit-diagnostics"] === "true";
   const explicitBroadPatternSafeguard = flags["broad-pattern-safeguard"] != null;
   const requestedBroadPatternSafeguard = flags["broad-pattern-safeguard"] === "true";
+  const excludeFeaturePrefixes = (flags["exclude-features"] ?? "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean)
+    .map((v) => `${v}:`);
   const includeOutcomeFamilies = new Set<FamilyBucket>();
   if (flags["include-outcome-families"]) {
     for (const raw of flags["include-outcome-families"].split(",")) {
@@ -1738,6 +1743,9 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
   if (featureMode !== "all" && featureMode !== "legacy-only") {
     throw new Error(`Unknown feature mode '${featureMode}'. Valid values: all, legacy-only.`);
   }
+  if (excludeFeaturePrefixes.length > 0) {
+    console.log(`Excluding features: ${excludeFeaturePrefixes.map((p) => p.slice(0, -1)).join(", ")}\n`);
+  }
   const games = rawGames.map((g) => {
     const filtered = new Set<string>();
     for (const t of g.tokens) {
@@ -1746,6 +1754,7 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
         const family = conditionFeatureKey(t);
         if (NEW_FEATURE_FAMILIES.has(family)) continue;
       }
+      if (excludeFeaturePrefixes.length > 0 && excludeFeaturePrefixes.some((p) => t.startsWith(p))) continue;
       filtered.add(t);
     }
     return { ...g, tokens: filtered };

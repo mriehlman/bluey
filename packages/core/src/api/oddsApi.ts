@@ -102,6 +102,34 @@ export async function fetchHistoricalOdds(date: string): Promise<OddsEvent[]> {
   return res.data;
 }
 
+export async function fetchLiveEvents(): Promise<Array<{ id: string; home_team: string; away_team: string; commence_time: string }>> {
+  const params = new URLSearchParams({
+    apiKey: getApiKey(),
+  });
+  return fetchJson<Array<{ id: string; home_team: string; away_team: string; commence_time: string }>>(
+    `${BASE_URL}/sports/basketball_nba/events?${params.toString()}`,
+  );
+}
+
+export async function fetchLiveEventOdds(
+  eventId: string,
+  markets: string,
+): Promise<OddsEvent | null> {
+  const params = new URLSearchParams({
+    apiKey: getApiKey(),
+    regions: "us",
+    markets,
+    oddsFormat: "american",
+  });
+  try {
+    return await fetchJson<OddsEvent>(
+      `${BASE_URL}/sports/basketball_nba/events/${eventId}/odds?${params.toString()}`,
+    );
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchHistoricalEvents(date: string): Promise<Array<{ id: string; home_team: string; away_team: string; commence_time: string }>> {
   const params = new URLSearchParams({
     apiKey: getApiKey(),

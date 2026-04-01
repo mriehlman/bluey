@@ -7,15 +7,16 @@ import {
   buildTeamAliasLookup,
   computeLineupSignalsFromCounts,
 } from "./injuryContext";
+import type { GameContext, PlayerGameContext } from "@prisma/client";
 import { GAME_EVENT_CATALOG } from "./gameEventCatalog";
 import type { GameEventContext } from "./gameEventCatalog";
-import type { GameContext, PlayerGameContext } from "@prisma/client";
 import { LEDGER_TUNING, PICK_QUALITY_TUNING } from "../config/tuning";
 import {
   generateGamePredictions,
   loadLatestFeatureBins,
   type DeployedPatternV2,
   type GamePlayerContext,
+  type MetaModel,
   type PlayerPropRow,
 } from "./predictionEngine";
 import { assertPredictionRecord, type PredictionRecord } from "./predictionContract";
@@ -352,11 +353,6 @@ export async function predictGames(args: string[] = []): Promise<void> {
   const allTeamIds = [...new Set(games.flatMap((g) => [g.homeTeamId, g.awayTeamId]))];
   const { teamSnapshots, playerSnapshots } = await computeContextForDate(season, targetDate, allTeamIds);
 
-  // Load all stored patterns
-  const patterns = await prisma.gamePattern.findMany({
-    orderBy: { confidenceScore: "desc" },
-  });
-
   const requestedModelVersion = flags.modelVersion;
   const forcedLive = requestedModelVersion === "live";
   const explicitVersion =
@@ -370,7 +366,7 @@ export async function predictGames(args: string[] = []): Promise<void> {
   const activeVersion = forcedLive ? null : (explicitVersion ?? (await loadActiveModelVersion()));
   let deployedV2: DeployedPatternV2[];
   let bins: Map<string, any>;
-  let metaModel: null = null;
+  let metaModel: MetaModel | null = null;
 
   if (activeVersion) {
     if (explicitVersion) {
@@ -409,8 +405,8 @@ export async function predictGames(args: string[] = []): Promise<void> {
   const tokenizedTodayCount = await prisma.gameFeatureToken.count({
     where: { gameId: { in: games.map((g) => g.id) } },
   });
-  console.log(`Loaded ${patterns.length} legacy stored patterns`);
   console.log(`Loaded ${deployedV2.length} deployed PatternV2 rows${activeVersion ? " (from snapshot)" : ""}`);
+  console.log(`Meta model: ${metaModel ? `v${metaModel.version} (${metaModel.source})` : "not loaded"}`);
   console.log(`Found ${tokenizedTodayCount}/${games.length} GameFeatureToken rows for target games\n`);
   if (deployedV2.length > 0 && bins.size === 0) {
     console.log(
@@ -576,57 +572,6 @@ export async function predictGames(args: string[] = []): Promise<void> {
 
     const consensusOdds = game.odds.find((o) => o.source === "consensus") ?? game.odds[0] ?? null;
 
-    const ctx: GameEventContext = {
-      game: { ...game, homeTeam: game.homeTeam, awayTeam: game.awayTeam },
-      context: virtualContext,
-      playerContexts: virtualPlayerContexts,
-      stats: game.playerStats,
-      odds: consensusOdds,
-    };
-
-    // Compute active conditions
-    const activeConditions = new Set<string>();
-    for (const def of GAME_EVENT_CATALOG) {
-      if (def.type !== "condition") continue;
-      for (const side of def.sides) {
-        const result = def.compute(ctx, side);
-        if (result.hit) {
-          activeConditions.add(`${def.key}:${side}`);
-        }
-      }
-    }
-
-    // Match against stored patterns
-    const matchingPredictions: {
-      conditions: string[];
-      outcome: string;
-      hitRate: number;
-      hitCount: number;
-      sampleSize: number;
-      seasons: number;
-      confidenceScore: number;
-      valueScore: number;
-    }[] = [];
-
-    for (const pattern of patterns) {
-      const allConditionsMet = pattern.conditions.every((c) => activeConditions.has(c));
-      if (allConditionsMet) {
-        matchingPredictions.push({
-          conditions: pattern.conditions,
-          outcome: pattern.outcome,
-          hitRate: pattern.hitRate,
-          hitCount: pattern.hitCount,
-          sampleSize: pattern.sampleSize,
-          seasons: pattern.seasons,
-          confidenceScore: pattern.confidenceScore ?? 0,
-          valueScore: pattern.valueScore ?? 0,
-        });
-      }
-    }
-
-    matchingPredictions.sort((a, b) => b.confidenceScore - a.confidenceScore || b.valueScore - a.valueScore);
-
-    // Print output
     const homeLabel = game.homeTeam.code ?? game.homeTeam.name ?? `Team ${game.homeTeamId}`;
     const awayLabel = game.awayTeam.code ?? game.awayTeam.name ?? `Team ${game.awayTeamId}`;
     const spreadStr = consensusOdds?.spreadHome != null ? `Spread: ${homeLabel} ${consensusOdds.spreadHome > 0 ? "+" : ""}${consensusOdds.spreadHome}` : "";
@@ -635,21 +580,6 @@ export async function predictGames(args: string[] = []): Promise<void> {
 
     console.log(`${homeLabel} vs ${awayLabel}${lineInfo ? `  |  ${lineInfo}` : ""}`);
     console.log(`  Record: ${homeLabel} ${homeSnap.wins}-${homeSnap.losses} (Off #${homeSnap.rankOff}, Def #${homeSnap.rankDef})  |  ${awayLabel} ${awaySnap.wins}-${awaySnap.losses} (Off #${awaySnap.rankOff}, Def #${awaySnap.rankDef})`);
-    console.log(`  Active conditions: ${activeConditions.size > 0 ? [...activeConditions].join(", ") : "(none)"}`);
-
-    if (matchingPredictions.length === 0) {
-      console.log("  No matching patterns found.\n");
-    } else {
-      console.log(`  ${matchingPredictions.length} matching predictions:\n`);
-      const top = matchingPredictions.slice(0, 10);
-      for (let i = 0; i < top.length; i++) {
-        const p = top[i];
-        const edge = ((p.hitRate - 0.524) * 100).toFixed(1);
-        console.log(`  [${i + 1}] ${p.conditions.join(" + ")}`);
-        console.log(`      -> ${p.outcome}  |  ${(p.hitRate * 100).toFixed(1)}% (${p.hitCount}/${p.sampleSize})  |  ${p.seasons} seasons  |  edge ${Number(edge) >= 0 ? "+" : ""}${edge}%`);
-      }
-      console.log("");
-    }
 
     const propsForGame = playerPropsByGame.get(game.id) ?? [];
 
@@ -677,7 +607,11 @@ export async function predictGames(args: string[] = []): Promise<void> {
       const engineOdds = consensusOdds
         ? {
             spreadHome: (consensusOdds as any).spreadHome ?? null,
+            spreadHomePrice: (consensusOdds as any).spreadHomePrice ?? null,
+            spreadAwayPrice: (consensusOdds as any).spreadAwayPrice ?? null,
             totalOver: (consensusOdds as any).totalOver ?? null,
+            totalOverPrice: (consensusOdds as any).totalOverPrice ?? null,
+            totalUnderPrice: (consensusOdds as any).totalUnderPrice ?? null,
             mlHome: (consensusOdds as any).mlHome ?? (consensusOdds as any).moneylineHome ?? null,
             mlAway: (consensusOdds as any).mlAway ?? (consensusOdds as any).moneylineAway ?? null,
           }

@@ -670,11 +670,20 @@ function selectBestMarketBackedPick(args: {
   ) {
     const spread = args.gameOdds?.spreadHome;
     if (spread == null || !Number.isFinite(spread)) return null;
+    const isHomeSide =
+      baseOutcome === "HOME_COVERED" ||
+      (baseOutcome === "FAVORITE_COVERED" && (spread ?? 0) < 0) ||
+      (baseOutcome === "UNDERDOG_COVERED" && (spread ?? 0) > 0);
+    const storedSpreadPrice = isHomeSide
+      ? args.gameOdds?.spreadHomePrice
+      : args.gameOdds?.spreadAwayPrice;
     const explicitFallbackPrice =
       Number.isFinite(args.defaultMarketPrice ?? NaN) && (args.defaultMarketPrice ?? 0) !== 0
         ? Number(args.defaultMarketPrice)
         : null;
-    const price = explicitFallbackPrice ?? (allowFallbackMarketOdds ? -110 : null);
+    const price = (storedSpreadPrice != null && Number.isFinite(storedSpreadPrice) && storedSpreadPrice !== 0)
+      ? storedSpreadPrice
+      : explicitFallbackPrice ?? (allowFallbackMarketOdds ? -110 : null);
     if (price == null || !Number.isFinite(price) || price === 0) return null;
     if (price < PREDICTION_TUNING.maxNegativeAmericanOdds) return null;
     const implied = impliedProbFromAmerican(price);
@@ -705,11 +714,11 @@ function selectBestMarketBackedPick(args: {
       marketType: "spread",
       marketSubType: market,
       selectionSide:
-        baseOutcome === "HOME_COVERED"
-          ? "home"
-          : baseOutcome === "AWAY_COVERED"
-            ? "away"
-            : "other",
+        baseOutcome === "HOME_COVERED" ? "home"
+          : baseOutcome === "AWAY_COVERED" ? "away"
+          : baseOutcome === "FAVORITE_COVERED" ? ((spread ?? 0) < 0 ? "home" : "away")
+          : baseOutcome === "UNDERDOG_COVERED" ? ((spread ?? 0) > 0 ? "home" : "away")
+          : "other",
       lineSnapshot: spread,
       priceSnapshot: price,
     };
@@ -721,11 +730,17 @@ function selectBestMarketBackedPick(args: {
   ) {
     const total = args.gameOdds?.totalOver;
     if (total == null || !Number.isFinite(total)) return null;
+    const isUnder = baseOutcome === "UNDER_HIT" || baseOutcome.startsWith("TOTAL_UNDER_");
+    const storedTotalPrice = isUnder
+      ? args.gameOdds?.totalUnderPrice
+      : args.gameOdds?.totalOverPrice;
     const explicitFallbackPrice =
       Number.isFinite(args.defaultMarketPrice ?? NaN) && (args.defaultMarketPrice ?? 0) !== 0
         ? Number(args.defaultMarketPrice)
         : null;
-    const price = explicitFallbackPrice ?? (allowFallbackMarketOdds ? -110 : null);
+    const price = (storedTotalPrice != null && Number.isFinite(storedTotalPrice) && storedTotalPrice !== 0)
+      ? storedTotalPrice
+      : explicitFallbackPrice ?? (allowFallbackMarketOdds ? -110 : null);
     if (price == null || !Number.isFinite(price) || price === 0) return null;
     if (price < PREDICTION_TUNING.maxNegativeAmericanOdds) return null;
     const implied = impliedProbFromAmerican(price);
@@ -1254,6 +1269,13 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
     ),
   };
 
+  const homeTopPropLine = propsForGame
+    .filter(p => p.market === "player_points" && gamePlayerCtx.homeTopScorer && p.playerId === gamePlayerCtx.homeTopScorer.id)
+    .reduce((best, p) => (p.line != null && (best == null || p.line > best) ? p.line : best), null as number | null);
+  const awayTopPropLine = propsForGame
+    .filter(p => p.market === "player_points" && gamePlayerCtx.awayTopScorer && p.playerId === gamePlayerCtx.awayTopScorer.id)
+    .reduce((best, p) => (p.line != null && (best == null || p.line > best) ? p.line : best), null as number | null);
+
   const pregameTokenSet = buildPregameTokenSet({
     season,
     context: gameContext,
@@ -1263,6 +1285,7 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
       homeTopScorer: gamePlayerCtx.homeTopScorer,
       awayTopScorer: gamePlayerCtx.awayTopScorer,
     },
+    topPropLines: { home: homeTopPropLine, away: awayTopPropLine },
   });
   const featureSnapshotId = createFeatureSnapshotId({
     gameId: gameContext.gameId,
@@ -1328,11 +1351,12 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
     const target = pickV2PlayerTarget(p.outcomeType, gamePlayerCtx, propsForGame);
     const dedupKey = `${outcomeDedupFamily(p.outcomeType)}|${target?.id ?? "none"}`;
     const existing = allPlayMap.get(dedupKey);
+    const conditions = p.conditions ?? [];
     if (!existing) {
       allPlayMap.set(dedupKey, {
         dedupKey,
         outcomeType: p.outcomeType,
-        bestConditions: p.conditions ?? [],
+        bestConditions: conditions,
         scoreSum: p.score,
         count: 1,
         bestPosterior: p.posteriorHitRate,
@@ -1349,7 +1373,7 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
       if (p.n > existing.bestN) existing.bestN = p.n;
       if (p.score > existing.scoreSum / Math.max(1, existing.count)) {
         existing.outcomeType = p.outcomeType;
-        existing.bestConditions = p.conditions ?? [];
+        existing.bestConditions = conditions;
       }
       existing.supportingPatternIds.add(p.id);
     }
@@ -1514,10 +1538,10 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
 
   const excludeFamilies = overrideExcludeFamilies ?? PREDICTION_TUNING.excludeFamilies ?? [];
   const excludedFamilies = new Set(excludeFamilies);
-  const familyFilteredPlays =
-    excludedFamilies.size > 0
-      ? rankedSuggestedPlays.filter((p) => !excludedFamilies.has(betFamilyForOutcome(p.outcomeType)))
-      : rankedSuggestedPlays;
+  const familyFilteredPlays = rankedSuggestedPlays.filter((p) => {
+    if (excludedFamilies.size > 0 && excludedFamilies.has(betFamilyForOutcome(p.outcomeType))) return false;
+    return true;
+  });
 
   // Build the baseline (legacy) pick universe first. Strict mode should be subtractive-only.
   const legacyQualitySuggestedPlays = familyFilteredPlays.filter((p) => {

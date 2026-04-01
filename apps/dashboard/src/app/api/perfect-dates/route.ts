@@ -16,6 +16,8 @@ export async function GET(req: Request) {
   const lane = (url.searchParams.get("lane") ?? "all").toLowerCase(); // all | moneyline | spread | total | ...
   const modelVersion = url.searchParams.get("modelVersion") ?? "all"; // all | live | <snapshot name>
   const gateMode = (url.searchParams.get("gateMode") ?? "legacy").toLowerCase(); // legacy | strict
+  const gameMinVotes = Math.max(1, Number(url.searchParams.get("gameMinVotes") ?? "1") || 1);
+  const playerMinVotes = Math.max(1, Number(url.searchParams.get("playerMinVotes") ?? "1") || 1);
   if (!month || !/^\d{4}-\d{2}$/.test(month)) {
     return NextResponse.json(
       { error: "Requires ?month=YYYY-MM" },
@@ -121,6 +123,12 @@ export async function GET(req: Request) {
   const gateModeExpr = `COALESCE(s."gateMode", CASE WHEN COALESCE(s."actionabilityVersion",'legacy_v1') LIKE 'strict%' THEN 'strict' ELSE 'legacy' END)`;
   const gateModeFilter = `AND ${gateModeExpr} = '${sqlEsc(gateMode)}'`;
 
+  const isPlayerExpr = `(${baseExpr.replaceAll('l."', 's."')} LIKE 'PLAYER_%' OR ${baseExpr.replaceAll('l."', 's."')} LIKE 'HOME_TOP_%' OR ${baseExpr.replaceAll('l."', 's."')} LIKE 'AWAY_TOP_%')`;
+  const votesFilterSql =
+    gameMinVotes <= 1 && playerMinVotes <= 1
+      ? ""
+      : `AND CASE WHEN ${isPlayerExpr} THEN COALESCE(s."votes", 1) >= ${playerMinVotes} ELSE COALESCE(s."votes", 1) >= ${gameMinVotes} END`;
+
   try {
     const rows = await prisma.$queryRawUnsafe<
       Array<{ date: string }>
@@ -135,6 +143,7 @@ export async function GET(req: Request) {
          ${typeFilter.replaceAll('l."', 's."')}
          ${mlFilterSql}
          ${laneFilterSql}
+         ${votesFilterSql}
        GROUP BY s."date"
        HAVING BOOL_AND(s."settledHit" = TRUE)
           AND COUNT(*) > 0`,

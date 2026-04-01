@@ -204,17 +204,21 @@ model OrphanPlayerStat {
 }
 
 model GameOdds {
-  id         String   @id @default(cuid())
-  gameId     String
-  source     String
-  spreadHome Float?
-  spreadAway Float?
-  totalOver  Float?
-  totalUnder Float?
-  mlHome     Int?
-  mlAway     Int?
-  fetchedAt  DateTime @default(now())
-  game       Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  id              String   @id @default(cuid())
+  gameId          String
+  source          String
+  spreadHome      Float?
+  spreadAway      Float?
+  spreadHomePrice Int?
+  spreadAwayPrice Int?
+  totalOver       Float?
+  totalUnder      Float?
+  totalOverPrice  Int?
+  totalUnderPrice Int?
+  mlHome          Int?
+  mlAway          Int?
+  fetchedAt       DateTime @default(now())
+  game            Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
 
   @@unique([gameId, source])
   @@index([gameId])

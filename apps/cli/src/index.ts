@@ -27,6 +27,7 @@ import { evaluatePatternIdeas } from "@bluey/core/patterns/patternIdeas";
 import { trainMetaModel, predictMetaScore, evaluateMetaModelMonthly, evaluateMetaModelPurged } from "@bluey/core/patterns/metaModel";
 import { coverageReport } from "@bluey/core/reports/coverage";
 import { reportProbabilityQuality } from "@bluey/core/reports/probabilityQuality";
+import { reportPickDiagnostics } from "@bluey/core/reports/pickDiagnostics";
 import { playerProfile } from "@bluey/core/profiles/playerProfile";
 import { teamProfile } from "@bluey/core/profiles/teamProfile";
 import { buildGameContext } from "@bluey/core/features/buildGameContext";
@@ -711,6 +712,10 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
 
   "report:probability-quality": async (args) => {
     await reportProbabilityQuality(args);
+  },
+
+  "report:pick-diagnostics": async (args) => {
+    await reportPickDiagnostics(args);
   },
 
   "profile:player": async (args) => {

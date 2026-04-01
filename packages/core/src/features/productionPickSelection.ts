@@ -94,6 +94,7 @@ export function impliedProbFromAmerican(american: number | null | undefined): nu
 }
 
 export function payoutFromAmerican(american: number): number {
+  if (american === 0) return 0;
   return american > 0 ? american / 100 : 100 / Math.abs(american);
 }
 

@@ -12,6 +12,7 @@ interface LedgerRow {
   settledHit: boolean;
   mlInvolved: boolean;
   laneTag: string | null;
+  votes: number;
   homeCode: string | null;
   awayCode: string | null;
 }
@@ -67,10 +68,26 @@ export async function GET(req: Request) {
       : gateMode === "legacy"
         ? `AND COALESCE((cp."runContext"->>'strictGates')::boolean, FALSE) = FALSE`
         : "";
+  const baseExpr = `SPLIT_PART(s."outcomeType", ':', 1)`;
+  const laneExpr = `
+    COALESCE(
+      NULLIF(s."laneTag", ''),
+      CASE
+        WHEN ${baseExpr} LIKE '%WIN' THEN 'moneyline'
+        WHEN ${baseExpr} LIKE '%COVERED' THEN 'spread'
+        WHEN ${baseExpr} LIKE '%OVER%' OR ${baseExpr} LIKE '%UNDER%' OR ${baseExpr} LIKE 'TOTAL_%' THEN 'total'
+        WHEN ${baseExpr} = 'PLAYER_10_PLUS_REBOUNDS' OR ${baseExpr} LIKE '%REBOUNDER%' THEN 'player_rebounds'
+        WHEN ${baseExpr} = 'PLAYER_10_PLUS_ASSISTS' OR ${baseExpr} LIKE '%ASSIST%' OR ${baseExpr} LIKE '%PLAYMAKER%' THEN 'player_assists'
+        WHEN ${baseExpr} = 'PLAYER_30_PLUS' OR ${baseExpr} = 'PLAYER_40_PLUS' OR ${baseExpr} LIKE '%SCORER%' THEN 'player_points'
+        WHEN ${baseExpr} LIKE 'PLAYER_%' OR ${baseExpr} LIKE 'HOME_TOP_%' OR ${baseExpr} LIKE 'AWAY_TOP_%' THEN 'other_prop'
+        ELSE 'other'
+      END
+    )
+  `;
   const laneFilter =
     lane === "all"
       ? ""
-      : `AND COALESCE(NULLIF(s."laneTag", ''), 'other') = '${sqlEsc(lane)}'`;
+      : `AND ${laneExpr} = '${sqlEsc(lane)}'`;
 
   await prisma.$executeRawUnsafe(
     `ALTER TABLE "SuggestedPlayLedger" ADD COLUMN IF NOT EXISTS "mlInvolved" boolean NOT NULL DEFAULT FALSE`,
@@ -112,6 +129,7 @@ export async function GET(req: Request) {
       s."settledHit",
       COALESCE(s."mlInvolved", FALSE) as "mlInvolved",
       s."laneTag" as "laneTag",
+      COALESCE(s."votes", 1) as "votes",
       ht."code" as "homeCode",
       at2."code" as "awayCode"
     FROM canonical_latest cl
@@ -153,6 +171,7 @@ export async function GET(req: Request) {
       hit: p.settledHit,
       mlInvolved: Boolean(p.mlInvolved),
       laneTag: p.laneTag ?? null,
+      votes: Number(p.votes) || 1,
       meta: p.metaScore,
       posterior: p.posteriorHitRate,
     })),

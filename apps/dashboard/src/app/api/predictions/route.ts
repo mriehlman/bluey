@@ -658,8 +658,7 @@ async function autoSyncForDate(dateStr: string): Promise<boolean> {
 }
 
 function isDateTodayOrFuture(dateStr: string): boolean {
-  const today = new Date();
-  const todayStr = today.toISOString().slice(0, 10);
+  const todayStr = getEasternDateFromUtc(new Date());
   return dateStr >= todayStr;
 }
 
@@ -680,6 +679,21 @@ async function queryGamesForDate(targetDate: Date, dateStr: string) {
     orderBy: { tipoffTimeUtc: "asc" },
   });
 
+  const oddsPriceRows = await prisma.$queryRawUnsafe<Array<{
+    id: string; spreadHomePrice: number | null; spreadAwayPrice: number | null;
+    totalOverPrice: number | null; totalUnderPrice: number | null;
+  }>>(
+    `SELECT "id", "spreadHomePrice", "spreadAwayPrice", "totalOverPrice", "totalUnderPrice"
+     FROM "GameOdds" WHERE "gameId" IN (${gamesRaw.map(g => `'${g.id}'`).join(",") || "''"})`,
+  );
+  const oddsPriceMap = new Map(oddsPriceRows.map(r => [r.id, r]));
+  for (const game of gamesRaw) {
+    for (const o of game.odds) {
+      const prices = oddsPriceMap.get(o.id);
+      if (prices) Object.assign(o, prices);
+    }
+  }
+
   const gamesForDate = gamesRaw.filter((g) => {
     if (!g.tipoffTimeUtc) {
       const storedDate = g.date instanceof Date ? g.date.toISOString().slice(0, 10) : String(g.date).slice(0, 10);
@@ -689,8 +703,19 @@ async function queryGamesForDate(targetDate: Date, dateStr: string) {
     return easternDate === dateStr;
   });
 
+  const todayEastern = getEasternDateFromUtc(new Date());
+  const isPastDate = dateStr < todayEastern;
+  const activeGames = isPastDate
+    ? gamesForDate.filter((g) => {
+        const hasScore = (g.homeScore ?? 0) > 0 || (g.awayScore ?? 0) > 0;
+        const isFinal = !!g.status?.includes("Final");
+        if (!isFinal && !hasScore) return false;
+        return true;
+      })
+    : gamesForDate;
+
   const seenMatchups = new Map<string, (typeof gamesForDate)[0]>();
-  for (const g of gamesForDate) {
+  for (const g of activeGames) {
     const homeCode = g.homeTeam?.code ?? g.homeTeamId.toString();
     const awayCode = g.awayTeam?.code ?? g.awayTeamId.toString();
     const key = [homeCode, awayCode].sort().join(":");
@@ -731,13 +756,12 @@ export async function GET(req: Request) {
   const gateMode: "legacy" | "strict" = gateModeRaw === "strict" ? "strict" : "legacy";
 
   if (!dateStr) {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getEasternDateFromUtc(new Date());
     return NextResponse.redirect(new URL(`/api/predictions?date=${today}`, req.url));
   }
 
   const targetDate = new Date(dateStr + "T00:00:00Z");
   const season = getSeasonForDate(targetDate);
-  const metaModel = null;
   const defaultStake = LEDGER_TUNING.stake;
   const bankrollStart = LEDGER_TUNING.bankrollStart;
   const maxBetPicksPerGame = Math.max(1, LEDGER_TUNING.maxBetPicksPerGame);
@@ -802,12 +826,12 @@ export async function GET(req: Request) {
   const selectedModelVersionName = activeVersion?.name ?? "live";
   let deployedV2Patterns: DeployedPatternV2[];
   let featureBins: Map<string, any>;
-  let activeMetaModel = metaModel;
+  let activeMetaModel: any = null;
 
   if (activeVersion) {
     deployedV2Patterns = activeVersion.deployedPatterns;
     featureBins = new Map(Object.entries(activeVersion.featureBins));
-    activeMetaModel = null;
+    activeMetaModel = activeVersion.metaModel ?? null;
   } else {
     [deployedV2Patterns, featureBins] = await Promise.all([
       loadDeployedV2PatternsSafe(),
@@ -1062,7 +1086,11 @@ export async function GET(req: Request) {
     const engineOdds = consensus
       ? {
           spreadHome: consensus.spreadHome ?? null,
+          spreadHomePrice: (consensus as Record<string, unknown>).spreadHomePrice as number | null ?? null,
+          spreadAwayPrice: (consensus as Record<string, unknown>).spreadAwayPrice as number | null ?? null,
           totalOver: consensus.totalOver ?? null,
+          totalOverPrice: (consensus as Record<string, unknown>).totalOverPrice as number | null ?? null,
+          totalUnderPrice: (consensus as Record<string, unknown>).totalUnderPrice as number | null ?? null,
           mlHome: consensus.mlHome ?? null,
           mlAway: consensus.mlAway ?? null,
         }
@@ -1253,6 +1281,7 @@ export async function GET(req: Request) {
         allowFallbackOddsForLedger,
       });
     }
+    await voidStaleNonFinalPicks();
     wagerTracking = await getWagerTrackingSummary({
       dateStr,
       season,
@@ -1498,6 +1527,34 @@ async function upsertSuggestedPlayLedger(args: {
   );
 }
 
+let lastStaleVoidCheck = 0;
+
+async function voidStaleNonFinalPicks(): Promise<void> {
+  const now = Date.now();
+  if (now - lastStaleVoidCheck < 60_000 * 30) return; // at most once per 30 min
+  lastStaleVoidCheck = now;
+  try {
+    const voided = await prisma.$executeRawUnsafe(`
+      UPDATE "SuggestedPlayLedger" s
+      SET "settledHit" = NULL,
+          "settledResult" = 'VOID',
+          "payout" = 0,
+          "profit" = 0,
+          "updatedAt" = NOW()
+      FROM "Game" g
+      WHERE g."id" = s."gameId"
+        AND s."settledHit" IS NULL
+        AND g."date" < CURRENT_DATE - INTERVAL '2 days'
+        AND (g."status" IS NULL OR g."status" NOT LIKE '%Final%')
+    `);
+    if (voided > 0) {
+      console.log(`[ledger] Voided ${voided} stale picks on non-Final games older than 2 days`);
+    }
+  } catch (err) {
+    console.error("[ledger] Failed to void stale picks:", err);
+  }
+}
+
 function toWagerSummary(rows: Array<{
   settledResult: string | null;
   count: number;
@@ -1722,7 +1779,7 @@ async function shouldUpsertLedgerSnapshot(
   gateMode: "legacy" | "strict",
 ): Promise<boolean> {
   if (refreshLedger) return true;
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getEasternDateFromUtc(new Date());
   if (dateStr >= today) return true; // today/future can change as markets/results update
   const hasRows = await hasLedgerRowsForDate(dateStr, modelVersionName, gateMode);
   if (!hasRows) return true;

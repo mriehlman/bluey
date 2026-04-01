@@ -1,5 +1,5 @@
 import { prisma } from "@bluey/db";
-import { fetchHistoricalOdds, fetchHistoricalEvents, fetchHistoricalEventOdds, getHistoricalSnapshotIsoUtc, type OddsEvent } from "../api/oddsApi";
+import { fetchNbaOdds, fetchHistoricalOdds, fetchLiveEvents, fetchLiveEventOdds, fetchHistoricalEvents, fetchHistoricalEventOdds, getHistoricalSnapshotIsoUtc, type OddsEvent } from "../api/oddsApi";
 import { getEasternDateFromUtc, dateStringToUtcMidday } from "./utils";
 import * as fs from "fs";
 import * as path from "path";
@@ -204,33 +204,35 @@ async function findOrCreateGame(event: OddsEvent): Promise<{ gameId: string; fli
     }
   }
 
-  // Also check games without context (fallback)
-  const gamesNoContext = await prisma.game.findMany({
-    where: { 
-      date: gameDate,
-    },
-    include: { homeTeam: true, awayTeam: true },
-  });
+  // Also check games without context on same date, then +/- 1 day (for late-tipping games near midnight)
+  const dayMs = 86_400_000;
+  const nearbyDates = [gameDate, new Date(gameDate.getTime() - dayMs), new Date(gameDate.getTime() + dayMs)];
+  for (const searchDate of nearbyDates) {
+    const gamesNearby = await prisma.game.findMany({
+      where: { date: searchDate },
+      include: { homeTeam: true, awayTeam: true },
+    });
 
-  for (const game of gamesNoContext) {
-    const dbHome = getCanonicalTeam(game.homeTeam?.name ?? game.homeTeamNameSnapshot ?? "");
-    const dbAway = getCanonicalTeam(game.awayTeam?.name ?? game.awayTeamNameSnapshot ?? "");
+    for (const game of gamesNearby) {
+      const dbHome = getCanonicalTeam(game.homeTeam?.name ?? game.homeTeamNameSnapshot ?? "");
+      const dbAway = getCanonicalTeam(game.awayTeam?.name ?? game.awayTeamNameSnapshot ?? "");
 
-    if (dbHome === homeCanon && dbAway === awayCanon) {
-      await prisma.gameExternalId.upsert({
-        where: { gameId_source: { gameId: game.id, source: "odds_api" } },
-        update: { sourceId: event.id },
-        create: { gameId: game.id, source: "odds_api", sourceId: event.id },
-      });
-      return { gameId: game.id, flipped: false };
-    }
-    if (dbHome === awayCanon && dbAway === homeCanon) {
-      await prisma.gameExternalId.upsert({
-        where: { gameId_source: { gameId: game.id, source: "odds_api" } },
-        update: { sourceId: event.id },
-        create: { gameId: game.id, source: "odds_api", sourceId: event.id },
-      });
-      return { gameId: game.id, flipped: true };
+      if (dbHome === homeCanon && dbAway === awayCanon) {
+        await prisma.gameExternalId.upsert({
+          where: { gameId_source: { gameId: game.id, source: "odds_api" } },
+          update: { sourceId: event.id },
+          create: { gameId: game.id, source: "odds_api", sourceId: event.id },
+        });
+        return { gameId: game.id, flipped: false };
+      }
+      if (dbHome === awayCanon && dbAway === homeCanon) {
+        await prisma.gameExternalId.upsert({
+          where: { gameId_source: { gameId: game.id, source: "odds_api" } },
+          update: { sourceId: event.id },
+          create: { gameId: game.id, source: "odds_api", sourceId: event.id },
+        });
+        return { gameId: game.id, flipped: true };
+      }
     }
   }
 
@@ -252,7 +254,7 @@ async function findOrCreateGame(event: OddsEvent): Promise<{ gameId: string; fli
       homeTeamNameSnapshot: event.home_team,
       awayTeamNameSnapshot: event.away_team,
       season,
-      stage: 0,
+      stage: 2,
       league: "NBA",
       homeScore: 0,
       awayScore: 0,
@@ -275,8 +277,12 @@ function extractOddsFromBookmaker(event: OddsEvent, bookmakerKey: string) {
 
   let spreadHome: number | null = null;
   let spreadAway: number | null = null;
+  let spreadHomePrice: number | null = null;
+  let spreadAwayPrice: number | null = null;
   let totalOver: number | null = null;
   let totalUnder: number | null = null;
+  let totalOverPrice: number | null = null;
+  let totalUnderPrice: number | null = null;
   let mlHome: number | null = null;
   let mlAway: number | null = null;
 
@@ -287,14 +293,14 @@ function extractOddsFromBookmaker(event: OddsEvent, bookmakerKey: string) {
     if (market.key === "spreads") {
       for (const o of market.outcomes) {
         const oCanon = getCanonicalTeam(o.name);
-        if (oCanon === homeCanon) spreadHome = o.point ?? null;
-        if (oCanon === awayCanon) spreadAway = o.point ?? null;
+        if (oCanon === homeCanon) { spreadHome = o.point ?? null; spreadHomePrice = o.price; }
+        if (oCanon === awayCanon) { spreadAway = o.point ?? null; spreadAwayPrice = o.price; }
       }
     }
     if (market.key === "totals") {
       for (const o of market.outcomes) {
-        if (o.name === "Over") totalOver = o.point ?? null;
-        if (o.name === "Under") totalUnder = o.point ?? null;
+        if (o.name === "Over") { totalOver = o.point ?? null; totalOverPrice = o.price; }
+        if (o.name === "Under") { totalUnder = o.point ?? null; totalUnderPrice = o.price; }
       }
     }
     if (market.key === "h2h") {
@@ -306,7 +312,11 @@ function extractOddsFromBookmaker(event: OddsEvent, bookmakerKey: string) {
     }
   }
 
-  return { spreadHome, spreadAway, totalOver, totalUnder, mlHome, mlAway };
+  return {
+    spreadHome, spreadAway, spreadHomePrice, spreadAwayPrice,
+    totalOver, totalUnder, totalOverPrice, totalUnderPrice,
+    mlHome, mlAway,
+  };
 }
 
 function flipOdds(odds: ReturnType<typeof extractOddsFromBookmaker>) {
@@ -314,11 +324,30 @@ function flipOdds(odds: ReturnType<typeof extractOddsFromBookmaker>) {
   return {
     spreadHome: odds.spreadAway,
     spreadAway: odds.spreadHome,
+    spreadHomePrice: odds.spreadAwayPrice,
+    spreadAwayPrice: odds.spreadHomePrice,
     totalOver: odds.totalOver,
     totalUnder: odds.totalUnder,
+    totalOverPrice: odds.totalOverPrice,
+    totalUnderPrice: odds.totalUnderPrice,
     mlHome: odds.mlAway,
     mlAway: odds.mlHome,
   };
+}
+
+async function updateOddsPrices(
+  gameId: string, source: string,
+  spreadHomePrice: number | null, spreadAwayPrice: number | null,
+  totalOverPrice: number | null, totalUnderPrice: number | null,
+): Promise<void> {
+  await prisma.$executeRawUnsafe(
+    `UPDATE "GameOdds"
+     SET "spreadHomePrice" = $1, "spreadAwayPrice" = $2,
+         "totalOverPrice" = $3, "totalUnderPrice" = $4
+     WHERE "gameId" = $5 AND "source" = $6`,
+    spreadHomePrice, spreadAwayPrice, totalOverPrice, totalUnderPrice,
+    gameId, source,
+  );
 }
 
 async function processOddsEvents(events: OddsEvent[], debug = false): Promise<number> {
@@ -338,26 +367,57 @@ async function processOddsEvents(events: OddsEvent[], debug = false): Promise<nu
       if (!odds) continue;
       if (flipped) odds = flipOdds(odds)!;
 
-      await prisma.gameOdds.upsert({
-        where: { gameId_source: { gameId, source: bookmaker.key } },
-        update: { ...odds, fetchedAt: new Date() },
-        create: { gameId, source: bookmaker.key, ...odds },
+      const { spreadHomePrice: shp, spreadAwayPrice: sap, totalOverPrice: top_, totalUnderPrice: tup, ...prismaOdds } = odds;
+      await prisma.$transaction(async (tx) => {
+        await tx.gameOdds.upsert({
+          where: { gameId_source: { gameId, source: bookmaker.key } },
+          update: { ...prismaOdds, fetchedAt: new Date() },
+          create: { gameId, source: bookmaker.key, ...prismaOdds },
+        });
+        await tx.$executeRawUnsafe(
+          `UPDATE "GameOdds" SET "spreadHomePrice" = $1, "spreadAwayPrice" = $2, "totalOverPrice" = $3, "totalUnderPrice" = $4 WHERE "gameId" = $5 AND "source" = $6`,
+          shp, sap, top_, tup, gameId, bookmaker.key,
+        );
       });
       upserted++;
     }
 
+    const merged: ReturnType<typeof extractOddsFromBookmaker> = {
+      spreadHome: null, spreadAway: null, spreadHomePrice: null, spreadAwayPrice: null,
+      totalOver: null, totalUnder: null, totalOverPrice: null, totalUnderPrice: null,
+      mlHome: null, mlAway: null,
+    };
     for (const bookKey of PRIORITY_BOOKS) {
       let odds = extractOddsFromBookmaker(event, bookKey);
-      if (odds && (odds.spreadHome != null || odds.totalOver != null)) {
-        if (flipped) odds = flipOdds(odds)!;
-        await prisma.gameOdds.upsert({
-          where: { gameId_source: { gameId, source: "consensus" } },
-          update: { ...odds, fetchedAt: new Date() },
-          create: { gameId, source: "consensus", ...odds },
-        });
-        upserted++;
-        break;
+      if (!odds) continue;
+      if (flipped) odds = flipOdds(odds)!;
+      if (merged.spreadHome == null && odds.spreadHome != null) {
+        merged.spreadHome = odds.spreadHome; merged.spreadAway = odds.spreadAway;
+        merged.spreadHomePrice = odds.spreadHomePrice; merged.spreadAwayPrice = odds.spreadAwayPrice;
       }
+      if (merged.totalOver == null && odds.totalOver != null) {
+        merged.totalOver = odds.totalOver; merged.totalUnder = odds.totalUnder;
+        merged.totalOverPrice = odds.totalOverPrice; merged.totalUnderPrice = odds.totalUnderPrice;
+      }
+      if (merged.mlHome == null && odds.mlHome != null) {
+        merged.mlHome = odds.mlHome; merged.mlAway = odds.mlAway;
+      }
+      if (merged.spreadHome != null && merged.totalOver != null && merged.mlHome != null) break;
+    }
+    if (merged.spreadHome != null || merged.totalOver != null || merged.mlHome != null) {
+      const { spreadHomePrice: shp, spreadAwayPrice: sap, totalOverPrice: top_, totalUnderPrice: tup, ...prismaOdds } = merged;
+      await prisma.$transaction(async (tx) => {
+        await tx.gameOdds.upsert({
+          where: { gameId_source: { gameId, source: "consensus" } },
+          update: { ...prismaOdds, fetchedAt: new Date() },
+          create: { gameId, source: "consensus", ...prismaOdds },
+        });
+        await tx.$executeRawUnsafe(
+          `UPDATE "GameOdds" SET "spreadHomePrice" = $1, "spreadAwayPrice" = $2, "totalOverPrice" = $3, "totalUnderPrice" = $4 WHERE "gameId" = $5 AND "source" = $6`,
+          shp, sap, top_, tup, gameId, "consensus",
+        );
+      });
+      upserted++;
     }
   }
 
@@ -379,6 +439,20 @@ export async function syncOddsLive(debug = false): Promise<number> {
 }
 
 export async function syncOddsForDate(date: string): Promise<number> {
+  const today = getEasternDateFromUtc(new Date());
+  const isToday = date === today;
+
+  if (isToday) {
+    console.log(`Fetching live odds for today (${date})...`);
+    const liveEvents = await fetchNbaOdds();
+    console.log(`  Found ${liveEvents.length} events with live odds`);
+    if (liveEvents.length > 0) {
+      saveRawOdds(date, liveEvents, "live");
+      return processOddsEvents(liveEvents);
+    }
+    console.log(`  No live odds found, falling back to historical snapshot...`);
+  }
+
   console.log(`Fetching historical odds for ${date} at ${getHistoricalSnapshotIsoUtc(date)} (target: 7am ET window)...`);
   const events = await fetchHistoricalOdds(date);
   console.log(`  Found ${events.length} events with odds`);
@@ -391,10 +465,22 @@ export async function syncOddsForDate(date: string): Promise<number> {
 }
 
 export async function syncPlayerPropsForDate(date: string): Promise<number> {
-  console.log(`Fetching historical player props for ${date} at ${getHistoricalSnapshotIsoUtc(date)} (target: 7am ET window)...`);
-  console.log("  Writing canonical raw files to data/raw/odds/player-props only (legacy files are left untouched).");
-  
-  const events = await fetchHistoricalEvents(date);
+  const today = getEasternDateFromUtc(new Date());
+  const isToday = date === today;
+
+  let events: Array<{ id: string; home_team: string; away_team: string; commence_time: string }>;
+  const fetchEventOdds = isToday
+    ? (eventId: string) => fetchLiveEventOdds(eventId, PLAYER_PROP_MARKETS)
+    : (eventId: string) => fetchHistoricalEventOdds(eventId, date, PLAYER_PROP_MARKETS);
+
+  if (isToday) {
+    console.log(`Fetching live player props for today (${date})...`);
+    events = await fetchLiveEvents();
+  } else {
+    console.log(`Fetching historical player props for ${date} at ${getHistoricalSnapshotIsoUtc(date)} (target: 7am ET window)...`);
+    events = await fetchHistoricalEvents(date);
+  }
+
   if (events.length === 0) {
     console.log(`  No events found`);
     return 0;
@@ -407,7 +493,7 @@ export async function syncPlayerPropsForDate(date: string): Promise<number> {
   fs.mkdirSync(propsDir, { recursive: true });
   
   for (const event of events) {
-    const propsData = await fetchHistoricalEventOdds(event.id, date, PLAYER_PROP_MARKETS);
+    const propsData = await fetchEventOdds(event.id);
     if (!propsData || !propsData.bookmakers?.length) {
       continue;
     }

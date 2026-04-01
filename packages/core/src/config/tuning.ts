@@ -99,7 +99,10 @@ export const PREDICTION_TUNING = {
   maxNegativeAmericanOdds: -200,
   familyGates: defaultFamilyGates,
   /** Exclude these bet families from suggested picks. Empty = include all; filter in UI. */
-  excludeFamilies: [] as const,
+  excludeFamilies: [] as string[],
+  excludeLanes: [] as string[],
+  maxPosteriorByFamily: {} as Record<string, number>,
+  minVotesByFamily: {} as Record<string, number>,
 } as const;
 
 export const PICK_QUALITY_TUNING = {

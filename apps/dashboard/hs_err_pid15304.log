@@ -1,0 +1,236 @@
+#
+# There is insufficient memory for the Java Runtime Environment to continue.
+# Native memory allocation (malloc) failed to allocate 1048576 bytes for AllocateHeap
+# Possible reasons:
+#   The system is out of physical RAM or swap space
+#   In 32 bit mode, the process size limit was hit
+# Possible solutions:
+#   Reduce memory load on the system
+#   Increase physical memory or swap space
+#   Check if swap backing store is full
+#   Use 64 bit Java on a 64 bit OS
+#   Decrease Java heap size (-Xmx/-Xms)
+#   Decrease number of Java threads
+#   Decrease Java thread stack sizes (-Xss)
+#   Set larger code cache with -XX:ReservedCodeCacheSize=
+# This output file may be truncated or incomplete.
+#
+#  Out of Memory Error (memory/allocation.inline.hpp:61), pid=15304, tid=0x00000000000035cc
+#
+# JRE version:  (8.0_191-b12) (build )
+# Java VM: Java HotSpot(TM) 64-Bit Server VM (25.191-b12 mixed mode windows-amd64 compressed oops)
+# Failed to write core dump. Minidumps are not enabled by default on client versions of Windows
+#
+
+---------------  T H R E A D  ---------------
+
+Current thread (0x0000017f408f3800):  JavaThread "Unknown thread" [_thread_in_vm, id=13772, stack(0x00000019abc00000,0x00000019abdf0000)]
+
+Stack: [0x00000019abc00000,0x00000019abdf0000]
+[error occurred during error reporting (printing stack bounds), id 0xc0000005]
+
+Native frames: (J=compiled Java code, j=interpreted, Vv=VM code, C=native code)
+
+
+---------------  P R O C E S S  ---------------
+
+Java Threads: ( => current thread )
+
+Other Threads:
+
+=>0x0000017f408f3800 (exited) JavaThread "Unknown thread" [_thread_in_vm, id=13772, stack(0x00000019abc00000,0x00000019abdf0000)]
+
+VM state:not at safepoint (normal execution)
+
+VM Mutex/Monitor currently owned by a thread: None
+
+Heap:
+ PSYoungGen      total 153088K, used 2631K [0x0000000715c00000, 0x0000000720680000, 0x00000007c0000000)
+  eden space 131584K, 2% used [0x0000000715c00000,0x0000000715e91ec8,0x000000071dc80000)
+  from space 21504K, 0% used [0x000000071f180000,0x000000071f180000,0x0000000720680000)
+  to   space 21504K, 0% used [0x000000071dc80000,0x000000071dc80000,0x000000071f180000)
+ ParOldGen       total 349696K, used 0K [0x00000005c1400000, 0x00000005d6980000, 0x0000000715c00000)
+  object space 349696K, 0% used [0x00000005c1400000,0x00000005c1400000,0x00000005d6980000)
+ Metaspace       used 779K, capacity 4480K, committed 4480K, reserved 1056768K
+  class space    used 76K, capacity 384K, committed 384K, reserved 1048576K
+
+Card table byte_map: [0x0000017f4fdc0000,0x0000017f50dc0000] byte_map_base: 0x0000017f4cfb6000
+
+Marking Bits: (ParMarkBitMap*) 0x000000005dba3e30
+ Begin Bits: [0x0000017f51870000, 0x0000017f59820000)
+ End Bits:   [0x0000017f59820000, 0x0000017f617d0000)
+
+Polling page: 0x0000017f408c0000
+
+CodeCache: size=245760Kb used=328Kb max_used=328Kb free=245431Kb
+ bounds [0x0000017f40a00000, 0x0000017f40c70000, 0x0000017f4fa00000]
+ total_blobs=58 nmethods=0 adapters=38
+ compilation: enabled
+
+Compilation events (0 events):
+No events
+
+GC Heap History (0 events):
+No events
+
+Deoptimization events (0 events):
+No events
+
+Classes redefined (0 events):
+No events
+
+Internal exceptions (0 events):
+No events
+
+Events (10 events):
+Event: 0.033 loading class java/lang/Short
+Event: 0.033 loading class java/lang/Short done
+Event: 0.033 loading class java/lang/Integer
+Event: 0.033 loading class java/lang/Integer done
+Event: 0.033 loading class java/lang/Long
+Event: 0.033 loading class java/lang/Long done
+Event: 0.034 loading class java/lang/NullPointerException
+Event: 0.034 loading class java/lang/NullPointerException done
+Event: 0.034 loading class java/lang/ArithmeticException
+Event: 0.034 loading class java/lang/ArithmeticException done
+
+
+Dynamic libraries:
+0x00007ff6e6a70000 - 0x00007ff6e6a8a000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\python.exe
+0x00007ffdaf210000 - 0x00007ffdaf408000 	C:\WINDOWS\SYSTEM32\ntdll.dll
+0x00007ffdae580000 - 0x00007ffdae642000 	C:\WINDOWS\System32\KERNEL32.DLL
+0x00007ffdacf30000 - 0x00007ffdad226000 	C:\WINDOWS\System32\KERNELBASE.dll
+0x00007ffdacac0000 - 0x00007ffdacbc0000 	C:\WINDOWS\System32\ucrtbase.dll
+0x00007ffda7560000 - 0x00007ffda757e000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\VCRUNTIME140.dll
+0x00007ffd12fd0000 - 0x00007ffd1367b000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\python312.dll
+0x00007ffdaee00000 - 0x00007ffdaee6b000 	C:\WINDOWS\System32\WS2_32.dll
+0x00007ffdaef00000 - 0x00007ffdaf020000 	C:\WINDOWS\System32\RPCRT4.dll
+0x00007ffda5ff0000 - 0x00007ffda5ffa000 	C:\WINDOWS\SYSTEM32\VERSION.dll
+0x00007ffdac8a0000 - 0x00007ffdac8c7000 	C:\WINDOWS\System32\bcrypt.dll
+0x00007ffdae750000 - 0x00007ffdae7ee000 	C:\WINDOWS\System32\msvcrt.dll
+0x00007ffdae690000 - 0x00007ffdae741000 	C:\WINDOWS\System32\ADVAPI32.dll
+0x00007ffdad470000 - 0x00007ffdad50f000 	C:\WINDOWS\System32\sechost.dll
+0x00007ffdac8d0000 - 0x00007ffdac952000 	C:\WINDOWS\System32\bcryptprimitives.dll
+0x0000017f1b650000 - 0x0000017f1b65f000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\python3.DLL
+0x00007ffd8a430000 - 0x00007ffd8a4a7000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\_jpype.cp312-win_amd64.pyd
+0x00007ffda7550000 - 0x00007ffda755c000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\VCRUNTIME140_1.dll
+0x00007ffd85a50000 - 0x00007ffd85ad9000 	C:\WINDOWS\SYSTEM32\MSVCP140.dll
+0x00007ffd8a3b0000 - 0x00007ffd8a3f0000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\DLLs\_decimal.pyd
+0x00007ffda6b80000 - 0x00007ffda6b96000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\DLLs\_bz2.pyd
+0x00007ffda6ac0000 - 0x00007ffda6ae9000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\DLLs\_lzma.pyd
+0x00007ffd8bc40000 - 0x00007ffd8bc56000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\DLLs\_socket.pyd
+0x00007ffdab570000 - 0x00007ffdab5ab000 	C:\WINDOWS\SYSTEM32\IPHLPAPI.DLL
+0x00007ffda7540000 - 0x00007ffda7549000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\DLLs\select.pyd
+0x00007ffda7030000 - 0x00007ffda703b000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\DLLs\_wmi.pyd
+0x00007ffdad510000 - 0x00007ffdad5dd000 	C:\WINDOWS\System32\OLEAUT32.dll
+0x00007ffdace90000 - 0x00007ffdacf2d000 	C:\WINDOWS\System32\msvcp_win.dll
+0x00007ffdae220000 - 0x00007ffdae574000 	C:\WINDOWS\System32\combase.dll
+0x00007ffda92a0000 - 0x00007ffda9394000 	C:\WINDOWS\SYSTEM32\PROPSYS.dll
+0x00007ffd6b1d0000 - 0x00007ffd6b574000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\numpy\_core\_multiarray_umath.cp312-win_amd64.pyd
+0x00007ffcef240000 - 0x00007ffcf05bf000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\numpy.libs\libscipy_openblas64_-74a408729250596b0973e69fdd954eea.dll
+0x00007ffd88120000 - 0x00007ffd881ad000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\numpy.libs\msvcp140-a4c2229bdc2a2a630acdc095b4d86008.dll
+0x00007ffd9e540000 - 0x00007ffd9e560000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\DLLs\_ctypes.pyd
+0x00007ffdaeac0000 - 0x00007ffdaebeb000 	C:\WINDOWS\System32\ole32.dll
+0x00007ffd9e530000 - 0x00007ffd9e53b000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\DLLs\libffi-8.dll
+0x00007ffdae660000 - 0x00007ffdae68b000 	C:\WINDOWS\System32\GDI32.dll
+0x00007ffdacbc0000 - 0x00007ffdacbe2000 	C:\WINDOWS\System32\win32u.dll
+0x00007ffdacca0000 - 0x00007ffdacdb9000 	C:\WINDOWS\System32\gdi32full.dll
+0x00007ffdae7f0000 - 0x00007ffdae991000 	C:\WINDOWS\System32\USER32.dll
+0x00007ffdad3c0000 - 0x00007ffdad3ef000 	C:\WINDOWS\System32\IMM32.DLL
+0x00007ffd8b930000 - 0x00007ffd8b94e000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\numpy\linalg\_umath_linalg.cp312-win_amd64.pyd
+0x00007ffd8a3f0000 - 0x00007ffd8a427000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\numpy\random\_bounded_integers.cp312-win_amd64.pyd
+0x00007ffd8aa90000 - 0x00007ffd8aaba000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\numpy\random\bit_generator.cp312-win_amd64.pyd
+0x00007ffd8a380000 - 0x00007ffd8a3ad000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\numpy\random\_common.cp312-win_amd64.pyd
+0x00007ffd8a360000 - 0x00007ffd8a372000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\DLLs\_hashlib.pyd
+0x00007ffd6ab50000 - 0x00007ffd6b053000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\DLLs\libcrypto-3.dll
+0x00007ffd8a100000 - 0x00007ffd8a195000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\numpy\random\_generator.cp312-win_amd64.pyd
+0x00007ffd88100000 - 0x00007ffd8811b000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\numpy\random\_pcg64.cp312-win_amd64.pyd
+0x00007ffd880e0000 - 0x00007ffd880f9000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\numpy\random\_mt19937.cp312-win_amd64.pyd
+0x00007ffd7df60000 - 0x00007ffd7df77000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\numpy\random\_philox.cp312-win_amd64.pyd
+0x00007ffd7df40000 - 0x00007ffd7df53000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\numpy\random\_sfc64.cp312-win_amd64.pyd
+0x00007ffd7d060000 - 0x00007ffd7d0dd000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\numpy\random\mtrand.cp312-win_amd64.pyd
+0x00007ffd9e4d0000 - 0x00007ffd9e4db000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\pandas_parser.cp312-win_amd64.pyd
+0x00007ffd8c1e0000 - 0x00007ffd8c1ec000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\pandas_datetime.cp312-win_amd64.pyd
+0x00007ffd6aa40000 - 0x00007ffd6ab41000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\interval.cp312-win_amd64.pyd
+0x00007ffd46980000 - 0x00007ffd46b36000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\hashtable.cp312-win_amd64.pyd
+0x00007ffd706c0000 - 0x00007ffd706ea000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\missing.cp312-win_amd64.pyd
+0x00007ffd88070000 - 0x00007ffd88098000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\tslibs\dtypes.cp312-win_amd64.pyd
+0x00007ffd88050000 - 0x00007ffd88064000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\tslibs\ccalendar.cp312-win_amd64.pyd
+0x00007ffd7d5e0000 - 0x00007ffd7d5fe000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\tslibs\np_datetime.cp312-win_amd64.pyd
+0x00007ffd7d2d0000 - 0x00007ffd7d309000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\tslibs\conversion.cp312-win_amd64.pyd
+0x00007ffd8b8e0000 - 0x00007ffd8b8f0000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\tslibs\base.cp312-win_amd64.pyd
+0x00007ffd7d200000 - 0x00007ffd7d2c5000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\tslibs\offsets.cp312-win_amd64.pyd
+0x00007ffd7d140000 - 0x00007ffd7d1bb000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\tslibs\timestamps.cp312-win_amd64.pyd
+0x00007ffd7d100000 - 0x00007ffd7d133000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\tslibs\nattype.cp312-win_amd64.pyd
+0x00007ffd6b730000 - 0x00007ffd6b7a1000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\tslibs\timedeltas.cp312-win_amd64.pyd
+0x00007ffd6c6e0000 - 0x00007ffd6c717000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\tslibs\timezones.cp312-win_amd64.pyd
+0x00007ffd8aae0000 - 0x00007ffd8aaed000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\DLLs\_zoneinfo.pyd
+0x0000017f3eb20000 - 0x0000017f3eb23000 	C:\WINDOWS\SYSTEM32\tzres.dll
+0x00007ffd6b180000 - 0x00007ffd6b1c3000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\tslibs\fields.cp312-win_amd64.pyd
+0x00007ffd6b140000 - 0x00007ffd6b17d000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\tslibs\tzconversion.cp312-win_amd64.pyd
+0x00007ffd7d0e0000 - 0x00007ffd7d0f4000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\properties.cp312-win_amd64.pyd
+0x00007ffd6a810000 - 0x00007ffd6a85e000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\tslibs\parsing.cp312-win_amd64.pyd
+0x00007ffd63b10000 - 0x00007ffd63b58000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\tslibs\strptime.cp312-win_amd64.pyd
+0x00007ffd52a10000 - 0x00007ffd52a71000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\tslibs\period.cp312-win_amd64.pyd
+0x00007ffd67c50000 - 0x00007ffd67c81000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\tslibs\vectorized.cp312-win_amd64.pyd
+0x00007ffd8a0f0000 - 0x00007ffd8a100000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\ops_dispatch.cp312-win_amd64.pyd
+0x00007ffd467d0000 - 0x00007ffd46976000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\algos.cp312-win_amd64.pyd
+0x00007ffd49ed0000 - 0x00007ffd49f70000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\lib.cp312-win_amd64.pyd
+0x00007ffd6a6f0000 - 0x00007ffd6a807000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\DLLs\unicodedata.pyd
+0x00007ffd69250000 - 0x00007ffd69284000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\ops.cp312-win_amd64.pyd
+0x00007ffd6e220000 - 0x00007ffd6e24b000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\hashing.cp312-win_amd64.pyd
+0x00007ffd76f90000 - 0x00007ffd76faa000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\arrays.cp312-win_amd64.pyd
+0x00007ffd63ad0000 - 0x00007ffd63b0f000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\tslib.cp312-win_amd64.pyd
+0x00007ffd47740000 - 0x00007ffd477fa000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\sparse.cp312-win_amd64.pyd
+0x00007ffd523c0000 - 0x00007ffd5240e000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\internals.cp312-win_amd64.pyd
+0x00007ffd706a0000 - 0x00007ffd706b1000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\indexing.cp312-win_amd64.pyd
+0x00007ffd47180000 - 0x00007ffd4722b000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\index.cp312-win_amd64.pyd
+0x00007ffd516d0000 - 0x00007ffd51702000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\writers.cp312-win_amd64.pyd
+0x00007ffd466d0000 - 0x00007ffd467d0000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\join.cp312-win_amd64.pyd
+0x00007ffd51220000 - 0x00007ffd51273000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\window\aggregations.cp312-win_amd64.pyd
+0x00007ffd60730000 - 0x00007ffd6075b000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\window\indexers.cp312-win_amd64.pyd
+0x00007ffd52510000 - 0x00007ffd5254d000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\reshape.cp312-win_amd64.pyd
+0x00007ffd1e920000 - 0x00007ffd1eb14000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\groupby.cp312-win_amd64.pyd
+0x00007ffd88040000 - 0x00007ffd88048000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\DLLs\_uuid.pyd
+0x00007ffd6b120000 - 0x00007ffd6b131000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\json.cp312-win_amd64.pyd
+0x00007ffd4a0d0000 - 0x00007ffd4a12b000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\parsers.cp312-win_amd64.pyd
+0x00007ffd70800000 - 0x00007ffd70819000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\_libs\testing.cp312-win_amd64.pyd
+0x00007ffd50a40000 - 0x00007ffd50a6d000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\DLLs\_ssl.pyd
+0x00007ffdac960000 - 0x00007ffdacabd000 	C:\WINDOWS\System32\CRYPT32.dll
+0x00007ffd4a540000 - 0x00007ffd4a603000 	C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\DLLs\libssl-3.dll
+0x000000005d380000 - 0x000000005dc24000 	C:\Program Files\Microsoft Team Foundation Server 2018\Search\Java\jre1.8.0_191\bin\server\jvm.dll
+0x00007ffdaed00000 - 0x00007ffdaed08000 	C:\WINDOWS\System32\PSAPI.DLL
+0x00007ffda5f10000 - 0x00007ffda5f19000 	C:\WINDOWS\SYSTEM32\WSOCK32.dll
+0x00007ffd95910000 - 0x00007ffd95937000 	C:\WINDOWS\SYSTEM32\WINMM.dll
+0x000000005e990000 - 0x000000005ea62000 	C:\WINDOWS\SYSTEM32\MSVCR100.dll
+0x000000005e980000 - 0x000000005e98f000 	C:\Program Files\Microsoft Team Foundation Server 2018\Search\Java\jre1.8.0_191\bin\verify.dll
+0x000000005e950000 - 0x000000005e979000 	C:\Program Files\Microsoft Team Foundation Server 2018\Search\Java\jre1.8.0_191\bin\java.dll
+0x000000005e930000 - 0x000000005e946000 	C:\Program Files\Microsoft Team Foundation Server 2018\Search\Java\jre1.8.0_191\bin\zip.dll
+
+VM Arguments:
+jvm_args: -Dfile.encoding=UTF-8 -Xrs 
+java_command: <unknown>
+java_class_path (initial): C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\tabula\tabula-1.0.5-jar-with-dependencies.jar;C:\Users\Michael Riehlman\AppData\Local\Programs\Python\Python312\Lib\site-packages\org.jpype.jar
+Launcher Type: generic
+
+Environment Variables:
+JAVA_HOME=C:\Program Files\Microsoft Team Foundation Server 2018\Search\Java\jre1.8.0_191
+USERNAME=Michael Riehlman
+OS=Windows_NT
+PROCESSOR_IDENTIFIER=Intel64 Family 6 Model 158 Stepping 12, GenuineIntel
+
+
+
+---------------  S Y S T E M  ---------------
+
+OS: Windows 10.0 , 64 bit Build 19041 (10.0.19041.5915)
+
+CPU:total 16 (initial active 16) (8 cores per cpu, 2 threads per core) family 6 model 158 stepping 12, cmov, cx8, fxsr, mmx, sse, sse2, sse3, ssse3, sse4.1, sse4.2, popcnt, avx, avx2, aes, clmul, erms, rtm, 3dnowpref, lzcnt, ht, tsc, tscinvbit, bmi1, bmi2, adx
+
+Memory: 4k page, physical 33471428k(7786020k free), swap 45759428k(5416k free)
+
+vm_info: Java HotSpot(TM) 64-Bit Server VM (25.191-b12) for windows-amd64 JRE (1.8.0_191-b12), built on Oct  6 2018 09:29:03 by "java_re" with MS VC++ 10.0 (VS2010)
+
+time: Sun Mar 29 19:25:48 2026
+elapsed time: 0 seconds (0d 0h 0m 0s)
+

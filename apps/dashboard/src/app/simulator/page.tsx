@@ -10,6 +10,7 @@ interface Pick {
   hit: boolean;
   mlInvolved?: boolean;
   laneTag?: string | null;
+  votes?: number;
   meta: number | null;
   posterior: number;
 }
@@ -55,6 +56,25 @@ function filterPicksByLane<T extends { outcomeType?: string; laneTag?: string | 
   return picks.filter((p) => (p.laneTag ?? inferLaneTag(p.outcomeType ?? "")) === lane);
 }
 
+function isPlayerProp(outcomeType: string): boolean {
+  const base = (outcomeType ?? "").replace(/:.*$/, "");
+  if (base.startsWith("PLAYER_") || base.startsWith("HOME_TOP_") || base.startsWith("AWAY_TOP_")) return true;
+  if (base.includes("WIN") || base.includes("COVERED") || base.startsWith("OVER_") || base.startsWith("UNDER_") || base.startsWith("TOTAL_")) return false;
+  return false;
+}
+
+function filterPicksByMinVotes<T extends { votes?: number; outcomeType?: string }>(
+  picks: T[],
+  gameMinVotes: number,
+  playerMinVotes: number,
+): T[] {
+  if (gameMinVotes <= 1 && playerMinVotes <= 1) return picks;
+  return picks.filter((p) => {
+    const min = isPlayerProp(p.outcomeType ?? "") ? playerMinVotes : gameMinVotes;
+    return (p.votes ?? 1) >= min;
+  });
+}
+
 interface Day {
   date: string;
   season: number;
@@ -71,6 +91,7 @@ interface ModelVersionOption {
 }
 
 function americanToDecimal(american: number): number {
+  if (american === 0) return 1;
   return american > 0 ? 1 + american / 100 : 1 + 100 / Math.abs(american);
 }
 
@@ -102,6 +123,8 @@ export default function SimulatorPage() {
   const [oddsMode, setOddsMode] = useState<"all" | "full" | "require" | "ignore">("all");
   const [gateMode, setGateMode] = useState<"all" | "legacy" | "strict">("all");
   const [laneFilter, setLaneFilter] = useState<"all" | "moneyline" | "spread" | "total" | "player_points" | "player_rebounds" | "player_assists" | "other_prop" | "other">("all");
+  const [gameMinVotes, setGameMinVotes] = useState(1);
+  const [playerMinVotes, setPlayerMinVotes] = useState(1);
   const [minParlayLegs, setMinParlayLegs] = useState("1");
   const [runningSeason, setRunningSeason] = useState(false);
   const [runSeasonMsg, setRunSeasonMsg] = useState<string>("");
@@ -231,7 +254,7 @@ export default function SimulatorPage() {
 
   const filteredDays = seasonFilteredDays.map((d) => ({
     ...d,
-    picks: filterPicksByLane(filterPicksByMl(filterPicksByType(d.picks, pickType), mlFilter), laneFilter),
+    picks: filterPicksByMinVotes(filterPicksByLane(filterPicksByMl(filterPicksByType(d.picks, pickType), mlFilter), laneFilter), gameMinVotes, playerMinVotes),
   }));
 
   const allPicks = filteredDays.flatMap((d) => d.picks);
@@ -424,6 +447,34 @@ export default function SimulatorPage() {
               <option value="other">other</option>
             </select>
           </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+            <label className="muted" style={{ fontSize: "0.85rem" }}>Game votes</label>
+            <select
+              value={gameMinVotes}
+              onChange={(e) => setGameMinVotes(Number(e.target.value))}
+              style={{ padding: "0.35rem 0.45rem", fontSize: "0.85rem" }}
+            >
+              <option value={1}>1 (all)</option>
+              <option value={2}>2+</option>
+              <option value={3}>3+</option>
+              <option value={4}>4+</option>
+              <option value={5}>5+</option>
+            </select>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+            <label className="muted" style={{ fontSize: "0.85rem" }}>Player votes</label>
+            <select
+              value={playerMinVotes}
+              onChange={(e) => setPlayerMinVotes(Number(e.target.value))}
+              style={{ padding: "0.35rem 0.45rem", fontSize: "0.85rem" }}
+            >
+              <option value={1}>1 (all)</option>
+              <option value={2}>2+</option>
+              <option value={3}>3+</option>
+              <option value={4}>4+</option>
+              <option value={5}>5+</option>
+            </select>
+          </div>
           <button
             type="button"
             onClick={runSeasonWithFilters}
@@ -587,7 +638,7 @@ export default function SimulatorPage() {
                   <tr key={d.date}>
                     <td style={{ fontSize: "0.82rem" }}>{d.date}</td>
                     <td>{d.legs}</td>
-                    <td>{d.odds.toFixed(2)}x</td>
+                    <td title={`${d.odds.toFixed(2)}x decimal`}>{d.odds <= 1 ? "+0" : d.odds >= 2 ? `+${Math.round((d.odds - 1) * 100).toLocaleString()}` : `${Math.round(-100 / (d.odds - 1))}`}</td>
                     <td>
                       {d.hit ? (
                         <span style={{ color: "var(--success)", fontWeight: 700 }}>+${d.pnl.toFixed(2)}</span>

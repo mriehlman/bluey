@@ -24,6 +24,7 @@ export async function POST(req: Request) {
       await syncNbaStatsForDate(dateStr);
       steps.push({ step: `${dateStr}:stats`, ok: true });
     } catch (e) {
+      console.error(`[sync] stats failed for ${dateStr}:`, String(e).slice(0, 300));
       steps.push({ step: `${dateStr}:stats`, ok: false, message: String(e).slice(0, 200) });
     }
 
@@ -31,6 +32,7 @@ export async function POST(req: Request) {
       await syncUpcomingFromNba(dateStr);
       steps.push({ step: `${dateStr}:games`, ok: true });
     } catch (e) {
+      console.error(`[sync] games failed for ${dateStr}:`, String(e).slice(0, 300));
       steps.push({ step: `${dateStr}:games`, ok: false, message: String(e).slice(0, 200) });
     }
 
@@ -38,6 +40,7 @@ export async function POST(req: Request) {
       await syncOddsForDate(dateStr);
       steps.push({ step: `${dateStr}:odds`, ok: true });
     } catch (e) {
+      console.error(`[sync] odds failed for ${dateStr}:`, String(e).slice(0, 300));
       steps.push({ step: `${dateStr}:odds`, ok: false, message: String(e).slice(0, 200) });
     }
 
@@ -45,6 +48,7 @@ export async function POST(req: Request) {
       await syncPlayerPropsForDate(dateStr);
       steps.push({ step: `${dateStr}:player-props`, ok: true });
     } catch (e) {
+      console.error(`[sync] player-props failed for ${dateStr}:`, String(e).slice(0, 300));
       steps.push({ step: `${dateStr}:player-props`, ok: false, message: String(e).slice(0, 200) });
     }
 
@@ -64,6 +68,7 @@ export async function POST(req: Request) {
   }
 
   const allOk = steps.every((s) => s.ok);
+  const noneOk = steps.every((s) => !s.ok);
   return NextResponse.json({
     ok: allOk,
     date: requestedDate,
@@ -71,5 +76,5 @@ export async function POST(req: Request) {
     syncedDates: syncDates,
     steps,
     message: allOk ? "Sync complete" : "Sync completed with some failures",
-  });
+  }, { status: allOk ? 200 : noneOk ? 500 : 207 });
 }
