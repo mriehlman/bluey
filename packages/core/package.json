@@ -1,0 +1,22 @@
+{
+  "name": "@bluey/core",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    "./api/*": "./src/api/*.ts",
+    "./backtest/*": "./src/backtest/*.ts",
+    "./config/*": "./src/config/*.ts",
+    "./features/*": "./src/features/*.ts",
+    "./ingest/*": "./src/ingest/*.ts",
+    "./ml/*": "./src/ml/*.ts",
+    "./patterns/*": "./src/patterns/*.ts",
+    "./profiles/*": "./src/profiles/*.ts",
+    "./reports/*": "./src/reports/*.ts",
+    "./stats/*": "./src/stats/*.ts"
+  },
+  "dependencies": {
+    "@bluey/db": "workspace:*",
+    "@prisma/client": "^6.4.1",
+    "nba-api-client": "^1.1.2"
+  }
+}

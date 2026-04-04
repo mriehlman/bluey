@@ -1,0 +1,67 @@
+[
+  {
+    "id": "home-win-away-fatigue-low-offense",
+    "description": "Home win when away offense/rest profile is weak.",
+    "outcomeType": "HOME_WIN:game",
+    "conditions": ["away_ppg:Q1", "away_rest_days:Q1"],
+    "enabled": true,
+    "tags": ["moneyline", "team-context"]
+  },
+  {
+    "id": "under210-away-playmaking-strained",
+    "description": "Lower total game when away playmaking resilience is in the weakest bucket.",
+    "outcomeType": "TOTAL_UNDER_210:game",
+    "conditions": ["away_playmaking_resilience:Q1", "home_role_dependency:HIGH"],
+    "enabled": true,
+    "tags": ["totals"]
+  },
+  {
+    "id": "under210-anti-creation-mismatch",
+    "description": "Under when away playmaking is weak and home playmaking is not elite.",
+    "outcomeType": "TOTAL_UNDER_210:game",
+    "conditions": ["away_playmaking_resilience:Q1", "!home_playmaking_resilience:Q5", "!away_creation_burden:Q2"],
+    "enabled": true,
+    "tags": ["totals"]
+  },
+  {
+    "id": "home-win-away-ppg-streak-low",
+    "description": "Home win when away scoring and streak buckets are both weak.",
+    "outcomeType": "HOME_WIN:game",
+    "conditions": ["away_ppg:Q1", "away_streak:Q1"],
+    "enabled": true,
+    "tags": ["moneyline", "team-context"]
+  },
+  {
+    "id": "home-win-away-netrating-bottom",
+    "description": "Home win when away net rating is bottom bucket and home is not bottom.",
+    "outcomeType": "HOME_WIN:game",
+    "conditions": ["away_net_rating:Q1", "!home_net_rating:Q1", "!home_creation_burden:Q4"],
+    "enabled": true,
+    "tags": ["moneyline", "team-context"]
+  },
+  {
+    "id": "away-top-scorer-25-usage-profile",
+    "description": "Away top scorer 25+ when creation burden and role profile align.",
+    "outcomeType": "AWAY_TOP_SCORER_25_PLUS:game",
+    "conditions": ["!away_role_dependency:EXTREME", "away_creation_burden:Q5", "away_role_dependency:HIGH"],
+    "enabled": true,
+    "tags": ["player", "props-proxy"]
+  },
+  {
+    "id": "away-top-scorer-30-usage-profile",
+    "description": "Higher bar variant for away top scorer 30+ under same profile.",
+    "outcomeType": "AWAY_TOP_SCORER_30_PLUS:game",
+    "conditions": ["!away_role_dependency:EXTREME", "away_creation_burden:Q5", "away_role_dependency:HIGH"],
+    "enabled": true,
+    "tags": ["player", "props-proxy"]
+  },
+  {
+    "id": "player-bounceback-3-under",
+    "description": "Player after 3 games below average rebounds over next line.",
+    "outcomeType": "PLAYER_30_PLUS:game",
+    "conditions": ["player_points_last3_below_avg:true"],
+    "enabled": false,
+    "tags": ["player", "bounceback"],
+    "notes": "Example of a future hypothesis. Requires adding this token in feature generation first."
+  }
+]

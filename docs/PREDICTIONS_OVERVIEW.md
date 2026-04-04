@@ -98,7 +98,7 @@ Team IDs can differ between schedule data and historical data; the API looks up 
 
 ### Step 1: Build Game Events
 
-**CLI**: `npx tsx src/cli/index.ts build-game-events`
+**CLI**: `bun run cli build:game-events`
 
 - Loads games with context, player contexts, stats, odds
 - For each game, runs every event in `GAME_EVENT_CATALOG`
@@ -106,7 +106,7 @@ Team IDs can differ between schedule data and historical data; the API looks up 
 
 ### Step 2: Search Game Patterns
 
-**CLI**: `npx tsx src/cli/index.ts search-game-patterns`
+**CLI**: `bun run cli search:discover-patterns-v2 -- --cv loso --forward-from 2025`
 
 - Loads all `GameEvent` rows
 - Builds inverted indexes: condition key → set of game IDs, outcome key → set of game IDs
@@ -165,11 +165,11 @@ Team IDs can differ between schedule data and historical data; the API looks up 
 
 | File | Purpose |
 |------|---------|
-| `src/features/gameEventCatalog.ts` | Event definitions (conditions + outcomes) |
-| `src/features/buildGameEvents.ts` | Builds `GameEvent` from completed games |
-| `src/patterns/searchGamePatterns.ts` | Mines and persists `GamePattern` |
-| `dashboard/src/app/api/predictions/route.ts` | Predictions API |
-| `dashboard/src/app/predictions/page.tsx` | Predictions UI |
+| `packages/core/src/features/gameEventCatalog.ts` | Event definitions (conditions + outcomes) |
+| `packages/core/src/features/buildGameEvents.ts` | Builds `GameEvent` from completed games |
+| `packages/core/src/patterns/discoveryV2.ts` | Mines and persists pattern candidates |
+| `apps/dashboard/src/app/api/predictions/route.ts` | Predictions API |
+| `apps/dashboard/src/app/page.tsx` | Predictions UI |
 
 ---
 
@@ -178,7 +178,7 @@ Team IDs can differ between schedule data and historical data; the API looks up 
 **One command to catch up** (no args needed):
 
 ```bash
-bun run sync:catchup
+bun run cli sync:catchup
 ```
 
 This auto-detects the gap and syncs stats + odds from the last synced date through yesterday.
@@ -189,17 +189,17 @@ This auto-detects the gap and syncs stats + odds from the last synced date throu
 
 | Command | Purpose |
 |---------|---------|
-| `bun run sync:stats` | Sync player stats via nba_api. No args = backfill from last stats date through yesterday |
-| `bun run sync:odds` | Sync game odds via Odds API. No args = fetch live + backfill historical gap |
-| `bun run sync:stats --date 2026-03-01` | Sync stats for a specific date |
-| `bun run sync:odds --date 2026-03-01` | Sync odds for a specific date |
+| `bun run cli sync:stats` | Sync player stats via nba_api. No args = backfill from last stats date through yesterday |
+| `bun run cli sync:odds` | Sync game odds via Odds API. No args = fetch live + backfill historical gap |
+| `bun run cli sync:stats -- --date 2026-03-01` | Sync stats for a specific date |
+| `bun run cli sync:odds -- --date 2026-03-01` | Sync odds for a specific date |
 
 **Full pipeline** (run after catchup):
 
 | Command | Purpose |
 |---------|---------|
-| `bun run build:game-context` | Build `GameContext` and `PlayerGameContext` for completed games |
-| `bun run build:game-events` | Compute condition/outcome events for pattern mining |
-| `bun run search:game-patterns` | Mine and persist new patterns |
+| `bun run cli build:game-context` | Build `GameContext` and `PlayerGameContext` for completed games |
+| `bun run cli build:game-events` | Compute condition/outcome events for pattern mining |
+| `bun run cli search:discover-patterns-v2 -- --cv loso --forward-from 2025` | Mine and persist new patterns |
 
 **Note:** For upcoming games, the predictions API computes team snapshots and player context on-the-fly when `PlayerGameContext` is missing, so player names will still appear.

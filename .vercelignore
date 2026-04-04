@@ -1,0 +1,30 @@
+# Keep deploy uploads under Vercel's file-count limit (see CLI --archive=tgz).
+.git
+.git/**
+
+node_modules
+**/node_modules
+
+.next
+**/.next
+out
+**/out
+
+data
+**/data
+
+dist
+**/dist
+coverage
+**/.turbo
+
+backups
+logs
+*.log
+
+.env
+.env.*
+
+# Local / editor
+.cursor
+**/.cursor
