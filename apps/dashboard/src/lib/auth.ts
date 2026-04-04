@@ -5,29 +5,11 @@ import AppleProvider from "next-auth/providers/apple";
 import CredentialsProvider from "next-auth/providers/credentials";
 import GoogleProvider from "next-auth/providers/google";
 
-const providers: NextAuthOptions["providers"] = [];
-
-if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
-  providers.push(
-    GoogleProvider({
-      clientId: process.env.GOOGLE_CLIENT_ID,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    }),
-  );
+/** Read env at runtime (avoid Next bundling a stale value from build time). */
+function envIsTrue(name: string): boolean {
+  const v = process.env[name]?.trim().toLowerCase();
+  return v === "true" || v === "1" || v === "yes";
 }
-
-if (process.env.APPLE_ID && process.env.APPLE_SECRET) {
-  providers.push(
-    AppleProvider({
-      clientId: process.env.APPLE_ID,
-      clientSecret: process.env.APPLE_SECRET,
-    }),
-  );
-}
-
-const devAuthEnabled =
-  process.env.NODE_ENV !== "production" &&
-  process.env.DEV_AUTH_BYPASS === "true";
 
 async function getOrCreateDevUser() {
   const fallbackUser = {
@@ -83,44 +65,74 @@ async function getOrCreateDevUser() {
   return fallbackUser;
 }
 
-if (devAuthEnabled) {
-  providers.push(
-    CredentialsProvider({
-      id: "dev-login",
-      name: "Dev Login",
-      credentials: {
-        devKey: { label: "Dev Key", type: "text" },
-      },
-      async authorize() {
-        return await getOrCreateDevUser();
-      },
-    }),
-  );
-}
+/**
+ * Build NextAuth options when called (not at module load) so Vercel/runtime env
+ * like DEV_AUTH_BYPASS is visible to the provider list.
+ */
+export function getAuthOptions(): NextAuthOptions & { trustHost?: boolean } {
+  const providers: NextAuthOptions["providers"] = [];
 
-export const authOptions: NextAuthOptions = {
-  adapter: PrismaAdapter(prisma as any) as any,
-  secret: process.env.NEXTAUTH_SECRET,
-  trustHost: true,
-  session: {
-    strategy: "jwt",
-  },
-  providers,
-  callbacks: {
-    jwt: ({ token, user }) => {
-      if (user?.id) {
-        token.sub = user.id;
-      }
-      return token;
+  if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+    providers.push(
+      GoogleProvider({
+        clientId: process.env.GOOGLE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      }),
+    );
+  }
+
+  if (process.env.APPLE_ID && process.env.APPLE_SECRET) {
+    providers.push(
+      AppleProvider({
+        clientId: process.env.APPLE_ID,
+        clientSecret: process.env.APPLE_SECRET,
+      }),
+    );
+  }
+
+  const devAuthEnabled =
+    envIsTrue("DEV_AUTH_BYPASS") &&
+    (process.env.NODE_ENV !== "production" || envIsTrue("DEV_AUTH_ALLOW_PRODUCTION"));
+
+  if (devAuthEnabled) {
+    providers.push(
+      CredentialsProvider({
+        id: "dev-login",
+        name: "Dev Login",
+        credentials: {
+          devKey: { label: "Dev Key", type: "text" },
+        },
+        async authorize() {
+          return await getOrCreateDevUser();
+        },
+      }),
+    );
+  }
+
+  return {
+    adapter: PrismaAdapter(prisma as any) as any,
+    secret: process.env.NEXTAUTH_SECRET,
+    trustHost: true,
+    session: {
+      strategy: "jwt",
     },
-    session: ({ session, token }) => {
-      if (session.user) {
-        session.user.id = token.sub ?? "";
-      }
-      return session;
+    providers,
+    callbacks: {
+      jwt: ({ token, user }) => {
+        if (user?.id) {
+          token.sub = user.id;
+        }
+        return token;
+      },
+      session: ({ session, token }) => {
+        if (session.user) {
+          session.user.id = token.sub ?? "";
+        }
+        return session;
+      },
     },
-  },
-  pages: {
-    signIn: "/",
-  },
-};
+    pages: {
+      signIn: "/",
+    },
+  };
+}

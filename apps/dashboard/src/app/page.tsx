@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { getProviders, signIn, useSession } from "next-auth/react";
+import { signIn, useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { getTeamLogoUrl } from "@/lib/teamLogos";
 
@@ -1461,20 +1461,25 @@ export function PredictionsPage() {
 export default function LandingPage() {
   const router = useRouter();
   const { data: session, status } = useSession();
-  const [providers, setProviders] = useState<Record<string, { id: string; name: string }> | null>(null);
+  const [providers, setProviders] = useState<Record<string, { id: string; name: string }>>({});
+  const [providersStatus, setProvidersStatus] = useState<"loading" | "ready" | "error">("loading");
 
   useEffect(() => {
     let mounted = true;
-    getProviders()
-      .then((result) => {
-        if (mounted) {
-          setProviders(result as Record<string, { id: string; name: string }> | null);
+    const url = `${window.location.origin}/api/auth/providers`;
+    fetch(url)
+      .then(async (res) => {
+        const data = res.ok ? ((await res.json()) as Record<string, { id: string; name: string }>) : null;
+        if (!mounted) return;
+        if (!res.ok) {
+          setProvidersStatus("error");
+          return;
         }
+        setProviders(data && typeof data === "object" ? data : {});
+        setProvidersStatus("ready");
       })
       .catch(() => {
-        if (mounted) {
-          setProviders({});
-        }
+        if (mounted) setProvidersStatus("error");
       });
     return () => {
       mounted = false;
@@ -1487,9 +1492,9 @@ export default function LandingPage() {
     }
   }, [router, session, status]);
 
-  const googleAvailable = !!providers?.google;
-  const appleAvailable = !!providers?.apple;
-  const devAvailable = !!providers?.["dev-login"];
+  const googleAvailable = !!providers.google;
+  const appleAvailable = !!providers.apple;
+  const devAvailable = !!providers["dev-login"];
   const hasProvider = googleAvailable || appleAvailable || devAvailable;
   const callbackUrl =
     typeof window !== "undefined"
@@ -1509,38 +1514,52 @@ export default function LandingPage() {
           <p className="muted">Checking session...</p>
         ) : (
           <div className="auth-actions">
-            {googleAvailable ? (
-              <button
-                type="button"
-                className="auth-primary-btn"
-                onClick={() => signIn("google", { callbackUrl })}
-              >
-                Continue with Google
-              </button>
-            ) : null}
-            {appleAvailable ? (
-              <button
-                type="button"
-                className="auth-secondary-btn"
-                onClick={() => signIn("apple", { callbackUrl })}
-              >
-                Continue with Apple
-              </button>
-            ) : null}
-            {devAvailable ? (
-              <button
-                type="button"
-                className="auth-secondary-btn"
-                onClick={() => signIn("dev-login", { callbackUrl })}
-              >
-                Continue in Dev Mode
-              </button>
-            ) : null}
-            {!hasProvider ? (
+            {providersStatus === "loading" ? (
+              <p className="muted">Loading sign-in options…</p>
+            ) : providersStatus === "error" ? (
               <p className="muted" style={{ margin: "0.25rem 0 0", fontSize: "0.82rem" }}>
-                No auth provider configured yet. Add OAuth credentials or enable dev auth in `apps/dashboard/.env`.
+                Could not reach the auth service. Confirm <code>NEXTAUTH_URL</code> matches this site,{" "}
+                <code>NEXTAUTH_SECRET</code> is set on the server, and the deployment succeeded.
               </p>
-            ) : null}
+            ) : (
+              <>
+                {googleAvailable ? (
+                  <button
+                    type="button"
+                    className="auth-primary-btn"
+                    onClick={() => signIn("google", { callbackUrl })}
+                  >
+                    Continue with Google
+                  </button>
+                ) : null}
+                {appleAvailable ? (
+                  <button
+                    type="button"
+                    className="auth-secondary-btn"
+                    onClick={() => signIn("apple", { callbackUrl })}
+                  >
+                    Continue with Apple
+                  </button>
+                ) : null}
+                {devAvailable ? (
+                  <button
+                    type="button"
+                    className="auth-secondary-btn"
+                    onClick={() => signIn("dev-login", { callbackUrl })}
+                  >
+                    Continue in Dev Mode
+                  </button>
+                ) : null}
+                {!hasProvider ? (
+                  <p className="muted" style={{ margin: "0.25rem 0 0", fontSize: "0.82rem" }}>
+                    No auth provider configured. In <code>apps/dashboard/.env</code> (or Vercel env), add{" "}
+                    <code>GOOGLE_CLIENT_ID</code> / <code>GOOGLE_CLIENT_SECRET</code> (or Apple), or set{" "}
+                    <code>DEV_AUTH_BYPASS=true</code>. On Vercel production, Dev Mode also requires{" "}
+                    <code>DEV_AUTH_ALLOW_PRODUCTION=true</code> (not for public sites).
+                  </p>
+                ) : null}
+              </>
+            )}
           </div>
         )}
       </div>

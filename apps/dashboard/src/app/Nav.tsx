@@ -26,6 +26,8 @@ export default function Nav() {
     };
   }, []);
 
+  const isProd = process.env.NODE_ENV === "production";
+
   if (pathname === "/") {
     return null;
   }
@@ -58,15 +60,19 @@ export default function Nav() {
             <Link href="/predictions" className={isActive("/predictions") ? "active" : ""}>
               Predictions
             </Link>
-            <Link href="/simulator" className={isActive("/simulator") ? "active" : ""}>
-              Simulator
-            </Link>
-            <Link href="/pattern-simulator" className={isActive("/pattern-simulator") ? "active" : ""}>
-              Pattern Sim
-            </Link>
-            <Link href="/predictions/governance" className={isActive("/predictions/governance") ? "active" : ""}>
-              Governance
-            </Link>
+            {!isProd && (
+              <>
+                <Link href="/simulator" className={isActive("/simulator") ? "active" : ""}>
+                  Simulator
+                </Link>
+                <Link href="/pattern-simulator" className={isActive("/pattern-simulator") ? "active" : ""}>
+                  Pattern Sim
+                </Link>
+                <Link href="/predictions/governance" className={isActive("/predictions/governance") ? "active" : ""}>
+                  Governance
+                </Link>
+              </>
+            )}
           </>
         ) : null}
       </div>

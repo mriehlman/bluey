@@ -7,7 +7,7 @@ import {
   buildTeamAliasLookup,
   computeLineupSignalsFromCounts,
 } from "./injuryContext";
-import type { GameContext, PlayerGameContext } from "@prisma/client";
+import type { GameContext, PlayerGameContext } from "@bluey/db";
 import { GAME_EVENT_CATALOG } from "./gameEventCatalog";
 import type { GameEventContext } from "./gameEventCatalog";
 import { LEDGER_TUNING, PICK_QUALITY_TUNING } from "../config/tuning";
@@ -406,7 +406,10 @@ export async function predictGames(args: string[] = []): Promise<void> {
     where: { gameId: { in: games.map((g) => g.id) } },
   });
   console.log(`Loaded ${deployedV2.length} deployed PatternV2 rows${activeVersion ? " (from snapshot)" : ""}`);
-  console.log(`Meta model: ${metaModel ? `v${metaModel.version} (${metaModel.source})` : "not loaded"}`);
+  {
+    const m = metaModel as MetaModel | null;
+    console.log(`Meta model: ${m ? `v${m.version} (${m.source})` : "not loaded"}`);
+  }
   console.log(`Found ${tokenizedTodayCount}/${games.length} GameFeatureToken rows for target games\n`);
   if (deployedV2.length > 0 && bins.size === 0) {
     console.log(
@@ -1023,8 +1026,8 @@ function buildVirtualPlayerContexts(
   game: { id: string; homeTeamId: number; awayTeamId: number; playerStats: { playerId: number; teamId: number }[] },
   playerSnapshots: Map<number, { playerId: number; teamId: number; gamesPlayed: number; ppg: number; rpg: number; apg: number; mpg: number; fg3Pct: number | null; ftPct: number | null; last5Ppg: number | null; rankPpg: number | null; rankRpg: number | null; rankApg: number | null }>,
   teamSnapshots: Map<number, { rankDef: number | null }>,
-): import("@prisma/client").PlayerGameContext[] {
-  const result: import("@prisma/client").PlayerGameContext[] = [];
+): import("@bluey/db").PlayerGameContext[] {
+  const result: import("@bluey/db").PlayerGameContext[] = [];
 
   for (const stat of game.playerStats) {
     const pSnap = playerSnapshots.get(stat.playerId);

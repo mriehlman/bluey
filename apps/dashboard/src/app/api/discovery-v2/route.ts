@@ -58,7 +58,7 @@ export async function GET(req: Request) {
     whereClauses.push(`"outcomeType" = '${sqlEsc(outcomeType)}'`);
   }
 
-  const patterns = await prisma.$queryRawUnsafe<PatternRow[]>(
+  const patterns = (await prisma.$queryRawUnsafe(
     `SELECT
       "id","outcomeType","conditions","discoverySource",
       "trainStats","valStats","forwardStats",
@@ -67,11 +67,11 @@ export async function GET(req: Request) {
      WHERE ${whereClauses.join(" AND ")}
      ORDER BY "score" DESC
      LIMIT ${limit}`,
-  );
+  )) as PatternRow[];
 
-  const outcomes = await prisma.$queryRawUnsafe<Array<{ outcomeType: string }>>(
+  const outcomes = (await prisma.$queryRawUnsafe(
     `SELECT DISTINCT "outcomeType" FROM "PatternV2" ORDER BY "outcomeType"`,
-  );
+  )) as Array<{ outcomeType: string }>;
 
   return NextResponse.json({
     status,

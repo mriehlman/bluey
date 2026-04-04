@@ -2,7 +2,7 @@ import { prisma } from "@bluey/db";
 import { computeContextForDate } from "./buildGameContext";
 import { GAME_EVENT_CATALOG } from "./gameEventCatalog";
 import type { GameEventContext } from "./gameEventCatalog";
-import type { GameContext, PlayerGameContext, GamePattern } from "@prisma/client";
+import type { GameContext, PlayerGameContext, GamePattern } from "@bluey/db";
 import * as fs from "fs";
 import * as path from "path";
 

@@ -1,4 +1,4 @@
-import type { GameContext } from "@prisma/client";
+import type { GameContext } from "@bluey/db";
 import { matchesConditions } from "../patterns/metaModelCore";
 import { bucketValue, type FeatureBinDef } from "./featureBinUtils";
 

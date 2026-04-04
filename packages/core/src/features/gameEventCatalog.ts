@@ -1,4 +1,4 @@
-import type { Game, Team, GameContext, PlayerGameContext, PlayerGameStat, GameOdds } from "@prisma/client";
+import type { Game, Team, GameContext, PlayerGameContext, PlayerGameStat, GameOdds } from "@bluey/db";
 
 export interface GameEventContext {
   game: Game & { homeTeam: Team; awayTeam: Team };

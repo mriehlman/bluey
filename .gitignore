@@ -5,6 +5,7 @@ data/
 *.db
 *.db-journal
 dist/
+packages/db/src/generated/
 
 # Next.js
 .next/

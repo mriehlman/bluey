@@ -16,7 +16,7 @@ import {
 } from "./productionPickSelection";
 import { scoreMetaModel, isLowSpecificityPattern, type MetaModel, type GameContextSignals } from "../patterns/metaModelCore";
 import { PICK_QUALITY_TUNING, PREDICTION_TUNING } from "../config/tuning";
-import type { GameContext } from "@prisma/client";
+import type { GameContext } from "@bluey/db";
 import {
   buildPickQualityContext,
   calibrateProbability,
@@ -1660,7 +1660,7 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
   const canonicalPredictions: PredictionRecord[] = allRankedPlays
     .filter((p) => p.modelProbability >= 0.52)
     .slice(0, 20)
-    .map((p) => {
+    .flatMap((p): PredictionRecord[] => {
       const market = inferPredictionMarket(p.outcomeType, p.marketPick);
       const modelVotes = buildModelVotes({
         outcomeType: p.outcomeType,
@@ -1683,7 +1683,7 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
             voteWeightingStrength,
           })
         : aggregateVotes(modelVotes);
-      if (!aggregation.pass) return null;
+      if (!aggregation.pass) return [];
       const sourceFamilies = modelVotes.map((v) => sourceFamilyFromModelId(v.model_id));
       const sourceReliabilityScore = computeSourceReliabilityScore({
         sourceFamilies,
@@ -1691,75 +1691,99 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
         snapshot: sourceReliabilitySnapshot,
         minSample: PICK_QUALITY_TUNING.sourceReliabilityMinSample,
       });
-      return {
-        prediction_id: createPredictionId({
-          gameId: gameContext.gameId,
+      return [
+        {
+          prediction_id: createPredictionId({
+            gameId: gameContext.gameId,
+            market,
+            selection: p.outcomeType,
+            predictionContractVersion: PREDICTION_CONTRACT_VERSION,
+            modelBundleVersion: modelBundleVersion ?? DEFAULT_MODEL_BUNDLE_VERSION,
+            rankingPolicyVersion: RANKING_POLICY_VERSION,
+            aggregationPolicyVersion: AGGREGATION_POLICY_VERSION,
+            featureSnapshotId,
+            voteWeightingVersion,
+          }),
+          game_id: gameContext.gameId,
           market,
           selection: p.outcomeType,
-          predictionContractVersion: PREDICTION_CONTRACT_VERSION,
-          modelBundleVersion: modelBundleVersion ?? DEFAULT_MODEL_BUNDLE_VERSION,
-          rankingPolicyVersion: RANKING_POLICY_VERSION,
-          aggregationPolicyVersion: AGGREGATION_POLICY_VERSION,
-          featureSnapshotId,
-          voteWeightingVersion,
-        }),
-        game_id: gameContext.gameId,
-        market,
-        selection: p.outcomeType,
-        model_votes: modelVotes,
-        confidence_score: aggregation.confidence,
-        edge_estimate: p.marketPick?.edge ?? p.edge,
-        supporting_patterns: p.supportingPatterns,
-        prediction_contract_version: PREDICTION_CONTRACT_VERSION,
-        ranking_policy_version: RANKING_POLICY_VERSION,
-        aggregation_policy_version: AGGREGATION_POLICY_VERSION,
-        model_bundle_version: modelBundleVersion ?? DEFAULT_MODEL_BUNDLE_VERSION,
-        feature_schema_version: FEATURE_SCHEMA_VERSION,
-        feature_snapshot_id: featureSnapshotId,
-        feature_snapshot_payload: featureSnapshotPayload,
-        vote_weighting_version: voteWeightingVersion,
-        quality_context: {
-          raw_win_probability: p.rawWinProbability,
-          calibrated_win_probability: p.calibratedWinProbability,
-          implied_market_probability: p.impliedMarketProbability,
-          edge_vs_market: p.edgeVsMarket,
-          expected_value_score: p.expectedValueScore,
-          market_type: p.marketType,
-          market_sub_type: p.marketSubType,
-          selection_side: p.selectionSide,
-          line_snapshot: p.lineSnapshot,
-          price_snapshot: p.priceSnapshot,
-          lane_tag: p.laneTag,
-          regime_tags: p.regimeTags,
-          source_reliability_score: sourceReliabilityScore,
-          uncertainty_score: p.uncertaintyScore,
-          uncertainty_penalty_applied: p.uncertaintyPenaltyApplied,
-          adjusted_edge_score: p.adjustedEdgeScore,
-          weighted_support_score: aggregation.weightedSupportScore,
-          weighted_opposition_score: aggregation.weightedOppositionScore,
-          weighted_consensus_score: aggregation.weightedConsensusScore,
-          weighted_disagreement_penalty: aggregation.weightedDisagreementPenalty,
-          vote_weight_breakdown: aggregation.voteWeightBreakdown?.map((row) => ({
-            model_id: row.modelId,
-            source_family: row.sourceFamily,
-            decision: row.decision,
-            confidence: row.confidence,
-            base_weight: row.baseWeight,
-            reliability_weight: row.reliabilityWeight,
-            sample_confidence_weight: row.sampleConfidenceWeight,
-            uncertainty_discount: row.uncertaintyDiscount,
-            lane_fit_weight: row.laneFitWeight,
-            pre_strength_vote_weight: row.preStrengthVoteWeight,
-            vote_weighting_strength: row.voteWeightingStrength,
-            final_vote_weight: row.finalVoteWeight,
-            weighted_contribution: row.weightedContribution,
-          })),
-          dominant_source_family: aggregation.dominantSourceFamily ?? null,
-        },
-        generated_at: generatedAt,
-      };
-    })
-    .filter((record): record is PredictionRecord => record != null);
+          model_votes: modelVotes,
+          confidence_score: aggregation.confidence,
+          edge_estimate: p.marketPick?.edge ?? p.edge,
+          supporting_patterns: p.supportingPatterns,
+          prediction_contract_version: PREDICTION_CONTRACT_VERSION,
+          ranking_policy_version: RANKING_POLICY_VERSION,
+          aggregation_policy_version: AGGREGATION_POLICY_VERSION,
+          model_bundle_version: modelBundleVersion ?? DEFAULT_MODEL_BUNDLE_VERSION,
+          feature_schema_version: FEATURE_SCHEMA_VERSION,
+          feature_snapshot_id: featureSnapshotId,
+          feature_snapshot_payload: featureSnapshotPayload,
+          vote_weighting_version: voteWeightingVersion,
+          quality_context: {
+            raw_win_probability: p.rawWinProbability,
+            calibrated_win_probability: p.calibratedWinProbability,
+            implied_market_probability: p.impliedMarketProbability,
+            edge_vs_market: p.edgeVsMarket,
+            expected_value_score: p.expectedValueScore,
+            market_type: p.marketType,
+            market_sub_type: p.marketSubType,
+            selection_side: p.selectionSide,
+            line_snapshot: p.lineSnapshot,
+            price_snapshot: p.priceSnapshot,
+            lane_tag: p.laneTag,
+            regime_tags: p.regimeTags,
+            source_reliability_score: sourceReliabilityScore,
+            uncertainty_score: p.uncertaintyScore,
+            uncertainty_penalty_applied: p.uncertaintyPenaltyApplied,
+            adjusted_edge_score: p.adjustedEdgeScore,
+            weighted_support_score: aggregation.weightedSupportScore,
+            weighted_opposition_score: aggregation.weightedOppositionScore,
+            weighted_consensus_score: aggregation.weightedConsensusScore,
+            weighted_disagreement_penalty: aggregation.weightedDisagreementPenalty,
+            vote_weight_breakdown: aggregation.voteWeightBreakdown?.map((row) => {
+              const base = {
+                model_id: row.modelId,
+                source_family: row.sourceFamily,
+                decision: row.decision,
+                confidence: row.confidence,
+                final_vote_weight: row.finalVoteWeight,
+                weighted_contribution: row.weightedContribution,
+              };
+              if (dynamicVoteWeightingEnabled) {
+                const r = row as {
+                  modelId: string;
+                  sourceFamily: string;
+                  decision: "yes" | "no" | "abstain";
+                  confidence: number | null;
+                  baseWeight: number;
+                  reliabilityWeight: number;
+                  sampleConfidenceWeight: number;
+                  uncertaintyDiscount: number;
+                  laneFitWeight: number;
+                  preStrengthVoteWeight: number;
+                  voteWeightingStrength: number;
+                  finalVoteWeight: number;
+                  weightedContribution: number;
+                };
+                return {
+                  ...base,
+                  base_weight: r.baseWeight,
+                  reliability_weight: r.reliabilityWeight,
+                  sample_confidence_weight: r.sampleConfidenceWeight,
+                  uncertainty_discount: r.uncertaintyDiscount,
+                  lane_fit_weight: r.laneFitWeight,
+                  pre_strength_vote_weight: r.preStrengthVoteWeight,
+                  vote_weighting_strength: r.voteWeightingStrength,
+                };
+              }
+              return base;
+            }),
+            dominant_source_family: aggregation.dominantSourceFamily ?? null,
+          },
+          generated_at: generatedAt,
+        } as PredictionRecord,
+      ];
+    });
 
   return {
     discoveryV2Matches: enrichedDiscoveryV2Matches,

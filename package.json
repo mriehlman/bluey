@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "preinstall": "node scripts/enforce-bun.cjs",
+    "postinstall": "prisma generate --schema packages/db/prisma/schema.prisma",
     "cli": "bun run apps/cli/src/index.ts",
     "dev": "cd apps/dashboard && bun run dev",
     "db:up": "docker compose up -d",
@@ -17,7 +18,8 @@
     "prisma:push": "bunx prisma db push --schema packages/db/prisma/schema.prisma",
     "prisma:push:prod": "bun run scripts/prismaPushProd.ts",
     "promote": "bun run scripts/promoteToProd.ts",
-    "prune:prod": "bun run scripts/pruneProd.ts"
+    "prune:prod": "bun run scripts/pruneProd.ts",
+    "build:vercel": "bun run prisma:generate && node scripts/copy-prisma-engines.cjs && cd apps/dashboard && bun run build"
   },
   "devDependencies": {
     "@types/bun": "latest",

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@bluey/db";
-import type { GameContext } from "@prisma/client";
+import type { GameContext } from "@bluey/db";
 import { getEasternDateFromUtc } from "@/lib/format";
 import { GAME_EVENT_CATALOG } from "@bluey/core/features/gameEventCatalog";
 import type { GameEventContext } from "@bluey/core/features/gameEventCatalog";
@@ -255,7 +255,7 @@ async function loadArtifacts(modelVersion: string | null): Promise<{
     const active = await loadActiveModelVersion();
     if (active) {
       return {
-        modelVersionUsed: active.name,
+        modelVersionUsed: active.name ?? "active",
         deployedPatterns: active.deployedPatterns,
         featureBins: new Map(Object.entries(active.featureBins)),
         metaModel: null,

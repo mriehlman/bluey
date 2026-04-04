@@ -1,5 +1,5 @@
 import { prisma } from "@bluey/db";
-import type { GameContext } from "@prisma/client";
+import type { GameContext } from "@bluey/db";
 import type { BetFamily } from "./productionPickSelection";
 import { impliedProbFromAmerican, payoutFromAmerican } from "./productionPickSelection";
 import { normalizeVoteSourceFromModelId } from "./voteWeighting";

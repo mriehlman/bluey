@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import type { Prisma } from "@bluey/db";
 
 export interface RollupFilters {
   season?: number;

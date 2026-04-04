@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@bluey/db";
-import type { GameContext } from "@prisma/client";
+import type { GameContext } from "@bluey/db";
 import { getEasternDateFromUtc } from "@/lib/format";
 import { GAME_EVENT_CATALOG } from "@bluey/core/features/gameEventCatalog";
 import type { GameEventContext } from "@bluey/core/features/gameEventCatalog";
@@ -30,7 +30,9 @@ import { syncOddsForDate, syncPlayerPropsForDate } from "@bluey/core/ingest/sync
 import { syncInjuries } from "@bluey/core/ingest/syncInjuries";
 import { syncLineups } from "@bluey/core/ingest/syncLineups";
 import * as path from "path";
+
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 type CanonicalPredictionRow = {
   predictionId: string;
@@ -751,6 +753,17 @@ export async function GET(req: Request) {
   if (url.searchParams.get("governance") === "1") {
     return handleCanonicalPredictionList(url);
   }
+  try {
+    return await predictionsMain(req);
+  } catch (err) {
+    console.error("[predictions] GET failed", err);
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: "predictions_failed", message }, { status: 500 });
+  }
+}
+
+async function predictionsMain(req: Request) {
+  const url = new URL(req.url);
   const dateStr = url.searchParams.get("date");
   const refreshLedger = url.searchParams.get("refreshLedger") === "1";
   const includeDebugPlays = url.searchParams.get("debugPlays") === "1";
@@ -769,8 +782,14 @@ export async function GET(req: Request) {
   const maxBetPicksPerGame = Math.max(1, LEDGER_TUNING.maxBetPicksPerGame);
   const allowFallbackOddsForLedger = LEDGER_TUNING.allowFallbackOddsForLedger;
   const fallbackAmericanOdds = LEDGER_TUNING.fallbackAmericanOdds;
-  const calibrationArtifacts = await loadCalibrationArtifacts();
-  const sourceReliabilitySnapshot = await loadSourceReliabilitySnapshot();
+  let calibrationArtifacts: Awaited<ReturnType<typeof loadCalibrationArtifacts>> = [];
+  let sourceReliabilitySnapshot: Awaited<ReturnType<typeof loadSourceReliabilitySnapshot>> = null;
+  try {
+    calibrationArtifacts = await loadCalibrationArtifacts();
+    sourceReliabilitySnapshot = await loadSourceReliabilitySnapshot();
+  } catch (e) {
+    console.error("[predictions] calibration / reliability load failed:", e);
+  }
   let seasonV2Hits = 0;
   let seasonV2Total = 0;
   let gateDiagnostics: GateDiagnostics | null = null;
@@ -841,22 +860,30 @@ export async function GET(req: Request) {
     ]);
   }
 
-  const seasonBetSummary = await getSeasonBetHitSummary(
-    dateStr,
-    season,
-    selectedModelVersionName,
-    gateMode,
-  );
-  seasonV2Hits = seasonBetSummary.hits;
-  seasonV2Total = seasonBetSummary.total;
-  wagerTracking = await getWagerTrackingSummary({
-    dateStr,
-    season,
-    modelVersionName: selectedModelVersionName,
-    gateMode,
-    stakePerPick: defaultStake,
-    bankrollStart,
-  });
+  try {
+    const seasonBetSummary = await getSeasonBetHitSummary(
+      dateStr,
+      season,
+      selectedModelVersionName,
+      gateMode,
+    );
+    seasonV2Hits = seasonBetSummary.hits;
+    seasonV2Total = seasonBetSummary.total;
+  } catch (e) {
+    console.error("[predictions] season bet summary failed:", e);
+  }
+  try {
+    wagerTracking = await getWagerTrackingSummary({
+      dateStr,
+      season,
+      modelVersionName: selectedModelVersionName,
+      gateMode,
+      stakePerPick: defaultStake,
+      bankrollStart,
+    });
+  } catch (e) {
+    console.error("[predictions] wager tracking (initial) failed:", e);
+  }
 
   const teamIds = [...new Set(games.flatMap((g) => [g.homeTeamId, g.awayTeamId]))];
   const teamSnapshots = await computeTeamSnapshots(season, targetDate, teamIds);

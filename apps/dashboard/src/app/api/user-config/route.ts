@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@bluey/db";
 import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { getAuthOptions } from "@/lib/auth";
 
 function normalizeString(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -103,7 +103,7 @@ async function writeUserConfig(args: {
 }
 
 export async function GET() {
-  const session = await getServerSession(authOptions);
+  const session = await getServerSession(getAuthOptions());
   const userId = session?.user?.id;
 
   if (!userId) {
@@ -129,7 +129,7 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getServerSession(getAuthOptions());
   const userId = session?.user?.id;
 
   if (!userId) {

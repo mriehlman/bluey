@@ -3,22 +3,32 @@ import { prisma } from "@bluey/db";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  const versions = await prisma.modelVersion.findMany({
-    select: {
-      id: true,
-      name: true,
-      description: true,
-      isActive: true,
-      stats: true,
-      createdAt: true,
-    },
-    orderBy: { createdAt: "desc" },
-  });
+/** Explicit shape (avoid Prisma.ModelVersionGetPayload — not on all generated clients in CI). */
+type ModelVersionListRow = {
+  id: string;
+  name: string;
+  description: string | null;
+  isActive: boolean;
+  stats: unknown;
+  createdAt: Date;
+};
 
-  const coverageRows = await prisma.$queryRawUnsafe<
-    Array<{ version: string; gradedDates: number; gradedPicks: number }>
-  >(
+const modelVersionListSelect = {
+  id: true,
+  name: true,
+  description: true,
+  isActive: true,
+  stats: true,
+  createdAt: true,
+} as const;
+
+export async function GET() {
+  const versions = (await prisma.modelVersion.findMany({
+    select: modelVersionListSelect,
+    orderBy: { createdAt: "desc" },
+  })) as ModelVersionListRow[];
+
+  const coverageRows = (await prisma.$queryRawUnsafe(
     `WITH run_rows AS (
        SELECT
          COALESCE(cp."runContext"->>'modelVersionName', 'live') AS "version",
@@ -68,7 +78,7 @@ export async function GET() {
        COUNT(DISTINCT "gameDate")::int AS "gradedDates"
      FROM graded
      GROUP BY "version"`,
-  );
+  )) as Array<{ version: string; gradedDates: number; gradedPicks: number }>;
 
   const coverageByVersion = new Map(
     coverageRows.map((r) => [r.version, { gradedDates: r.gradedDates, gradedPicks: r.gradedPicks }]),

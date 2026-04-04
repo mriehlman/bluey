@@ -157,9 +157,11 @@ All stats commands accept these optional flags:
 ### Infrastructure
 
 ```bash
-bun run db:up       # Start Postgres container
+bun run db:up       # Start Postgres container(s) — local dev + optional local prod mirror
 bun run db:down     # Stop Postgres container
 ```
+
+**Production (Neon, Vercel, GitHub Actions):** see [DEPLOYMENT.md](./DEPLOYMENT.md) for the split database model, `bun run promote`, scheduled sync, and deploy secrets.
 
 ## Architecture
 
