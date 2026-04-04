@@ -122,7 +122,7 @@ export function isLowSpecificityConditionToken(token: string): boolean {
 export function isLowSpecificityPattern(conditions: string[]): boolean {
   if (conditions.length !== 1) return false;
   const c = conditions[0];
-  if (!c || c.startsWith("!")) return false;
+  if (!c) return false;
   return isLowSpecificityConditionToken(c);
 }
 

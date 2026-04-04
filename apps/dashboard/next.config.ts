@@ -6,8 +6,9 @@ const nextConfig: NextConfig = {
   outputFileTracingRoot: path.join(__dirname, "../../"),
   webpack: (config, { dev }) => {
     if (dev) {
-      // Avoid intermittent missing-module/missing-chunk errors in dev on Windows.
-      config.cache = false;
+      config.cache = {
+        type: "filesystem" as const,
+      };
     }
     return config;
   },

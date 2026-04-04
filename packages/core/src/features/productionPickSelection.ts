@@ -35,7 +35,7 @@ function parseTotalThresholdOutcome(
 
 function parsePlayerThresholdOutcome(
   outcomeType: string,
-): { stat: "ppg" | "rpg" | "apg"; line: number } | null {
+): { stat: "ppg" | "rpg" | "apg" | "fg3m"; line: number } | null {
   const base = outcomeType.replace(/:.*$/, "");
   if (
     base === "PLAYER_10_PLUS_ASSISTS" ||
@@ -67,6 +67,7 @@ function parsePlayerThresholdOutcome(
   if (base === "HOME_TOP_SCORER_25_PLUS" || base === "AWAY_TOP_SCORER_25_PLUS") {
     return { stat: "ppg", line: 25 };
   }
+  if (base === "PLAYER_5_PLUS_THREES") return { stat: "fg3m", line: 5 };
   return null;
 }
 
@@ -153,7 +154,7 @@ export function evaluateSuggestedPlayQualityGate(play: {
   outcomeType: string;
   posteriorHitRate: number;
   metaScore: number | null;
-  playerTarget?: { stat: "ppg" | "rpg" | "apg"; statValue: number } | null;
+  playerTarget?: { stat: "ppg" | "rpg" | "apg" | "fg3m"; statValue: number } | null;
   marketPick?: SuggestedMarketPickLike | null;
   requireMarketLine?: boolean;
   strictGateEnabled?: boolean;
@@ -193,6 +194,14 @@ export function evaluateSuggestedPlayQualityGate(play: {
     }
   }
 
+  if (
+    family === "MONEYLINE" &&
+    play.impliedMarketProbability != null &&
+    play.impliedMarketProbability < 0.18
+  ) {
+    return { pass: false, reason: "moneyline_longshot_blocked" };
+  }
+
   if (play.strictGateEnabled) {
     if (play.impliedMarketProbability == null && requireMarketLine) {
       return { pass: false, reason: "missing_market_snapshot" };
@@ -205,18 +214,6 @@ export function evaluateSuggestedPlayQualityGate(play: {
     if (play.strictMaxUncertaintyScore != null && play.uncertaintyScore != null) {
       if (play.uncertaintyScore > play.strictMaxUncertaintyScore) {
         return { pass: false, reason: "uncertainty_above_max" };
-      }
-    }
-    if (
-      family === "MONEYLINE" &&
-      play.strictMinMoneylineImpliedProbability != null &&
-      play.impliedMarketProbability != null &&
-      play.impliedMarketProbability < play.strictMinMoneylineImpliedProbability
-    ) {
-      const edge = play.edgeVsMarket ?? Number.NEGATIVE_INFINITY;
-      const override = play.strictMinMoneylineLongshotEdgeOverride;
-      if (override == null || edge < override) {
-        return { pass: false, reason: "moneyline_longshot_blocked" };
       }
     }
   }

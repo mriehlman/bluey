@@ -77,7 +77,7 @@ export const VALIDATION_DEFAULTS = {
   minForwardSamples: 30,
   uncertaintyPenaltyK: 120,
   uncertaintyPenaltyScale: 0.35,
-  fdrAlpha: 0.1,
+  fdrAlpha: 0.15,
   fdrMethod: "bh",
   fdrPermutations: 3000,
   fdrSeed: 1337,

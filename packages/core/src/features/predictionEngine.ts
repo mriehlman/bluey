@@ -84,7 +84,7 @@ export type PlayerPropRow = {
 export type V2PlayerTarget = {
   id: number;
   name: string;
-  stat: "ppg" | "rpg" | "apg";
+  stat: "ppg" | "rpg" | "apg" | "fg3m";
   statValue: number;
   rationale: string;
 };
@@ -580,7 +580,7 @@ export function pickV2PlayerTarget(
       if (prop) {
         const pct = prop.pOver != null ? `${(prop.pOver * 100).toFixed(1)}%` : "n/a";
         const lineStr = prop.line != null ? `line ${prop.line}` : "no line";
-        return { id: prop.id, name: prop.name, stat: "ppg", statValue: Math.max(gamePlayerCtx.homeTopScorer?.stat ?? 0, gamePlayerCtx.awayTopScorer?.stat ?? 0), rationale: `Best prop over implied (${pct}) for 5+ threes (${lineStr})` };
+        return { id: prop.id, name: prop.name, stat: "fg3m", statValue: prop.line ?? 5, rationale: `Best prop over implied (${pct}) for 5+ threes (${lineStr})` };
       }
     }
     const p = pickBest(gamePlayerCtx.homeTopScorer, gamePlayerCtx.awayTopScorer);
@@ -1269,12 +1269,17 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
     ),
   };
 
-  const homeTopPropLine = propsForGame
-    .filter(p => p.market === "player_points" && gamePlayerCtx.homeTopScorer && p.playerId === gamePlayerCtx.homeTopScorer.id)
-    .reduce((best, p) => (p.line != null && (best == null || p.line > best) ? p.line : best), null as number | null);
-  const awayTopPropLine = propsForGame
-    .filter(p => p.market === "player_points" && gamePlayerCtx.awayTopScorer && p.playerId === gamePlayerCtx.awayTopScorer.id)
-    .reduce((best, p) => (p.line != null && (best == null || p.line > best) ? p.line : best), null as number | null);
+  const bestPropLine = (market: string, player: { id: number } | null) =>
+    player == null ? null : propsForGame
+      .filter(p => p.market === market && p.playerId === player.id)
+      .reduce((best, p) => (p.line != null && (best == null || p.line > best) ? p.line : best), null as number | null);
+
+  const homeTopPropLine = bestPropLine("player_points", gamePlayerCtx.homeTopScorer);
+  const awayTopPropLine = bestPropLine("player_points", gamePlayerCtx.awayTopScorer);
+  const homeTopReboundPropLine = bestPropLine("player_rebounds", gamePlayerCtx.homeTopRebounder);
+  const awayTopReboundPropLine = bestPropLine("player_rebounds", gamePlayerCtx.awayTopRebounder);
+  const homeTopAssistPropLine = bestPropLine("player_assists", gamePlayerCtx.homeTopPlaymaker);
+  const awayTopAssistPropLine = bestPropLine("player_assists", gamePlayerCtx.awayTopPlaymaker);
 
   const pregameTokenSet = buildPregameTokenSet({
     season,
@@ -1284,8 +1289,19 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
     playerContext: {
       homeTopScorer: gamePlayerCtx.homeTopScorer,
       awayTopScorer: gamePlayerCtx.awayTopScorer,
+      homeTopRebounder: gamePlayerCtx.homeTopRebounder,
+      awayTopRebounder: gamePlayerCtx.awayTopRebounder,
+      homeTopPlaymaker: gamePlayerCtx.homeTopPlaymaker,
+      awayTopPlaymaker: gamePlayerCtx.awayTopPlaymaker,
     },
-    topPropLines: { home: homeTopPropLine, away: awayTopPropLine },
+    topPropLines: {
+      home: homeTopPropLine,
+      away: awayTopPropLine,
+      homeRebounds: homeTopReboundPropLine,
+      awayRebounds: awayTopReboundPropLine,
+      homeAssists: homeTopAssistPropLine,
+      awayAssists: awayTopAssistPropLine,
+    },
   });
   const featureSnapshotId = createFeatureSnapshotId({
     gameId: gameContext.gameId,
@@ -1382,7 +1398,7 @@ export function generateGamePredictions(input: PredictionInput): PredictionOutpu
   const allRankedPlays = [...allPlayMap.values()]
     .map((r) => {
       const confidence = r.scoreSum / r.count;
-      const agreementBonus = Math.min(0.3, (r.count - 1) * 0.05);
+      const agreementBonus = Math.min(0.12, Math.log2(Math.max(1, r.count)) * 0.04);
       const metaScore = metaModel
         ? scoreMetaModel(metaModel, {
             outcomeType: r.outcomeType,

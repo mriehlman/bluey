@@ -1,9 +1,245 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { getProviders, signIn, useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { getTeamLogoUrl } from "@/lib/teamLogos";
+
+interface WeekDaySummary {
+  date: string;
+  games: number;
+  picks: number;
+  hits: number;
+  settled: number;
+}
+
+interface WeekSummaryData {
+  weekOf: string;
+  sunday: string;
+  saturday: string;
+  days: WeekDaySummary[];
+}
+
+const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+
+function getSundayOfWeek(dateStr: string): string {
+  const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return dateStr;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  d.setDate(d.getDate() - d.getDay());
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function formatMonthDay(dateStr: string): { month: string; day: number } {
+  const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return { month: "", day: 0 };
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return { month: months[Number(m[2]) - 1], day: Number(m[3]) };
+}
+
+function addDaysStr(dateStr: string, delta: number): string {
+  const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return dateStr;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  d.setDate(d.getDate() + delta);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function weekdayShortFromDate(dateStr: string): string {
+  const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return "";
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return DAY_NAMES[d.getDay()];
+}
+
+function useVisibleDayCount(): number {
+  const [n, setN] = useState(7);
+  useEffect(() => {
+    const mq7 = window.matchMedia("(min-width: 920px)");
+    const mq5 = window.matchMedia("(min-width: 560px)");
+    const update = () => {
+      setN(mq7.matches ? 7 : mq5.matches ? 5 : 3);
+    };
+    update();
+    mq7.addEventListener("change", update);
+    mq5.addEventListener("change", update);
+    return () => {
+      mq7.removeEventListener("change", update);
+      mq5.removeEventListener("change", update);
+    };
+  }, []);
+  return n;
+}
+
+const MAX_FUTURE_DAYS = 2;
+
+function getMaxDate(todayStr: string): string {
+  const m = todayStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return todayStr;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  d.setDate(d.getDate() + MAX_FUTURE_DAYS);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function WeekNavigator({
+  selectedDate,
+  onSelectDate,
+  todayStr,
+  gateMode,
+}: {
+  selectedDate: string;
+  onSelectDate: (date: string) => void;
+  todayStr: string;
+  gateMode: string;
+}) {
+  const visibleCount = useVisibleDayCount();
+  const [weekSummaries, setWeekSummaries] = useState<WeekSummaryData[]>([]);
+  const [weekLoading, setWeekLoading] = useState(false);
+
+  const maxDate = useMemo(() => getMaxDate(todayStr), [todayStr]);
+
+  const offsetBefore = Math.floor((visibleCount - 1) / 2);
+  const windowDates = useMemo(
+    () => Array.from({ length: visibleCount }, (_, i) => addDaysStr(todayStr, i - offsetBefore)),
+    [todayStr, visibleCount, offsetBefore],
+  );
+
+  const sundaysToFetch = useMemo(() => {
+    const set = new Set<string>();
+    for (const ds of windowDates) {
+      set.add(getSundayOfWeek(ds));
+    }
+    return [...set].sort();
+  }, [windowDates]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setWeekLoading(true);
+    Promise.all(
+      sundaysToFetch.map((sunday) =>
+        fetch(`/api/predictions/week-summary?weekOf=${sunday}&gateMode=${gateMode}`, { cache: "no-store" }).then((r) =>
+          r.json(),
+        ),
+      ),
+    )
+      .then((results: WeekSummaryData[]) => {
+        if (!cancelled) setWeekSummaries(results);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setWeekLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sundaysToFetch, gateMode]);
+
+  const dayByDate = useMemo(() => {
+    const m = new Map<string, WeekDaySummary>();
+    for (const w of weekSummaries) {
+      for (const d of w.days) {
+        m.set(d.date, d);
+      }
+    }
+    return m;
+  }, [weekSummaries]);
+
+  const visibleDays = useMemo(
+    () =>
+      windowDates.map((dateStr) => {
+        const found = dayByDate.get(dateStr);
+        if (found) return found;
+        return { date: dateStr, games: 0, picks: 0, hits: 0, settled: 0 };
+      }),
+    [windowDates, dayByDate],
+  );
+
+  const rangeLabel = (() => {
+    if (visibleDays.length === 0) return "";
+    const first = formatMonthDay(visibleDays[0].date);
+    const last = formatMonthDay(visibleDays[visibleDays.length - 1].date);
+    if (first.month === last.month) {
+      return `${first.month} ${first.day} – ${last.day}`;
+    }
+    return `${first.month} ${first.day} – ${last.month} ${last.day}`;
+  })();
+
+  const prevDay = addDaysStr(selectedDate, -1);
+  const nextDay = addDaysStr(selectedDate, 1);
+
+  return (
+    <div className="week-navigator">
+      <button
+        type="button"
+        className="week-nav-arrow"
+        onClick={() => onSelectDate(prevDay)}
+        title="Previous day"
+      >
+        ‹
+      </button>
+
+      <div className="week-days">
+        <div className="week-label">{rangeLabel}</div>
+        <div
+          className="week-day-cards"
+          style={{ gridTemplateColumns: `repeat(${visibleCount}, minmax(0, 1fr))` }}
+        >
+          {visibleDays.map((day) => {
+            const isSelected = day.date === selectedDate;
+            const isToday = day.date === todayStr;
+            const isPast = day.date < todayStr;
+            const isDisabled = day.date > maxDate;
+            const { day: dayNum } = formatMonthDay(day.date);
+            const dayName = weekdayShortFromDate(day.date);
+            return (
+              <button
+                key={day.date}
+                type="button"
+                className={[
+                  "week-day-card",
+                  isSelected && "week-day-selected",
+                  isToday && "week-day-today",
+                  isDisabled && "week-day-disabled",
+                ].filter(Boolean).join(" ")}
+                onClick={() => !isDisabled && onSelectDate(day.date)}
+                disabled={isDisabled}
+              >
+                <span className="week-day-name">{dayName}</span>
+                <span className="week-day-num">{dayNum}</span>
+                <span className="week-day-games">
+                  {isDisabled ? "—" : weekLoading ? "\u00A0" : day.games > 0 ? `${day.games} game${day.games !== 1 ? "s" : ""}` : "—"}
+                </span>
+                <span
+                  className="week-day-hits"
+                  style={{
+                    color: !isDisabled && !weekLoading && isPast && day.picks > 0 && day.settled > 0
+                      ? (day.hits / day.settled >= 0.5 ? "var(--success)" : "var(--error)")
+                      : "var(--text-muted)",
+                    visibility: isDisabled || weekLoading || day.games === 0 || (!isPast || day.picks === 0) ? "hidden" : "visible",
+                  }}
+                >
+                  {isPast && day.picks > 0 && day.settled > 0 ? `${day.hits}/${day.settled}` : isPast && day.picks > 0 ? `${day.picks} bets` : "\u00A0"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <button
+        type="button"
+        className="week-nav-arrow"
+        onClick={() => {
+          if (nextDay <= maxDate) onSelectDate(nextDay);
+        }}
+        disabled={nextDay > maxDate}
+        title="Next day"
+      >
+        ›
+      </button>
+    </div>
+  );
+}
 
 interface TeamInfo {
   id: number;
@@ -181,15 +417,6 @@ function getLocalDateString(d: Date = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
-function parseDateInput(value: string): Date {
-  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return new Date();
-  const year = Number(m[1]);
-  const month = Number(m[2]);
-  const day = Number(m[3]);
-  return new Date(year, month - 1, day);
-}
-
 function isPlayerPick(outcomeType: string): boolean {
   const base = outcomeType.replace(/:.*$/, "");
   return base.startsWith("PLAYER_") || base.startsWith("HOME_TOP_") || base.startsWith("AWAY_TOP_");
@@ -262,6 +489,7 @@ export function PredictionsPage() {
   const [evidenceOpenByGame, setEvidenceOpenByGame] = useState<Record<string, boolean>>({});
   const [parlayLegs, setParlayLegs] = useState<{ key: string; gameLabel: string; pickLabel: string; odds: number; american: number }[]>([]);
   const [parlayStake, setParlayStake] = useState("10");
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<{ ok: boolean; message: string; steps?: { step: string; ok: boolean; message?: string }[] } | null>(null);
   const [pickType, setPickType] = useState<"game" | "player" | "all">("game");
@@ -270,11 +498,6 @@ export function PredictionsPage() {
   const [laneFilter, setLaneFilter] = useState<"all" | "moneyline" | "spread" | "total" | "player_points" | "player_rebounds" | "player_assists" | "other_prop" | "other">("all");
   const [gameMinVotes, setGameMinVotes] = useState(1);
   const [playerMinVotes, setPlayerMinVotes] = useState(1);
-  const [calendarMonth, setCalendarMonth] = useState(() => {
-    const d = new Date();
-    return { year: d.getFullYear(), month: d.getMonth() };
-  });
-  const [perfectDates, setPerfectDates] = useState<Set<string>>(new Set());
   const [modelVersions, setModelVersions] = useState<ModelVersionOption[]>([]);
   const [liveCoverage, setLiveCoverage] = useState<{ gradedDates: number; gradedPicks: number }>({
     gradedDates: 0,
@@ -332,6 +555,12 @@ export function PredictionsPage() {
   }, [gateMode]);
 
   useEffect(() => {
+    const max = getMaxDate(getLocalDateString());
+    if (date > max) {
+      setData(null);
+      setLoading(false);
+      return;
+    }
     fetchPredictions(date);
     setParlayLegs([]);
     setSyncResult(null);
@@ -360,28 +589,6 @@ export function PredictionsPage() {
       .catch(() => setModelVersions([]));
   }, []);
 
-  useEffect(() => {
-    const d = parseDateInput(date);
-    setCalendarMonth((m) => {
-      if (m.year === d.getFullYear() && m.month === d.getMonth()) return m;
-      return { year: d.getFullYear(), month: d.getMonth() };
-    });
-  }, [date]);
-
-  useEffect(() => {
-    const monthStr = `${calendarMonth.year}-${String(calendarMonth.month + 1).padStart(2, "0")}`;
-    const modelVersion = data?.modelVersion ?? "live";
-    fetch(
-      `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&lane=${laneFilter}&modelVersion=${encodeURIComponent(modelVersion)}&gateMode=${gateMode}&gameMinVotes=${gameMinVotes}&playerMinVotes=${playerMinVotes}`,
-      { cache: "no-store" },
-    )
-      .then((r) => r.json())
-      .then((json: { dates?: string[] }) => {
-        setPerfectDates(new Set(json.dates ?? []));
-      })
-      .catch(() => setPerfectDates(new Set()));
-  }, [calendarMonth.year, calendarMonth.month, pickType, mlFilter, laneFilter, gateMode, data?.modelVersion, gameMinVotes, playerMinVotes]);
-
   const runSync = useCallback(async () => {
     setSyncing(true);
     setSyncResult(null);
@@ -394,25 +601,14 @@ export function PredictionsPage() {
         steps: json.steps,
       });
       if (json.ok) {
-        // Refresh with ledger update so picks get graded (hit/miss) and simulator stays in sync
         fetchPredictions(date, true);
-        // Refresh perfect dates so calendar shows updated badges
-        const monthStr = `${calendarMonth.year}-${String(calendarMonth.month + 1).padStart(2, "0")}`;
-        const modelVersion = data?.modelVersion ?? "live";
-        fetch(
-          `/api/perfect-dates?month=${monthStr}&filter=${pickType}&mlFilter=${mlFilter}&lane=${laneFilter}&modelVersion=${encodeURIComponent(modelVersion)}&gateMode=${gateMode}&gameMinVotes=${gameMinVotes}&playerMinVotes=${playerMinVotes}`,
-          { cache: "no-store" },
-        )
-          .then((r) => r.json())
-          .then((j: { dates?: string[] }) => setPerfectDates(new Set(j.dates ?? [])))
-          .catch(() => {});
       }
     } catch (err) {
       setSyncResult({ ok: false, message: err instanceof Error ? err.message : "Sync failed" });
     } finally {
       setSyncing(false);
     }
-  }, [date, fetchPredictions, calendarMonth.year, calendarMonth.month, pickType, mlFilter, laneFilter, gateMode, data?.modelVersion, gameMinVotes, playerMinVotes]);
+  }, [date, fetchPredictions]);
 
   const switchModelVersion = useCallback(async (next: string) => {
     setSwitchingModelVersion(true);
@@ -443,14 +639,6 @@ export function PredictionsPage() {
       setSwitchingModelVersion(false);
     }
   }, [date, fetchPredictions]);
-
-  const changeDate = (delta: number) => {
-    setDate((prev) => {
-      const current = parseDateInput(prev);
-      const d = new Date(current.getFullYear(), current.getMonth(), current.getDate() + delta);
-      return getLocalDateString(d);
-    });
-  };
 
   const fmtTime = (iso: string | null) => {
     if (!iso) return "";
@@ -635,60 +823,258 @@ export function PredictionsPage() {
     return { hits, total, hitRate: total > 0 ? hits / total : null };
   })();
 
+  const todayStr = getLocalDateString();
+  const maxDate = getMaxDate(todayStr);
+  const isBeyondLimit = date > maxDate;
+
   return (
     <>
-      <div style={{ marginBottom: "1rem" }}>
-        {!loading && data ? (
-          <h1 style={{ margin: 0, fontSize: "1.4rem", fontWeight: 800 }}>
-            {data.games.length} Games, {totalPicks} Picks
-            <span className="muted" style={{ marginLeft: "0.5rem", fontSize: "0.85rem", fontWeight: 400 }}>
-              model: {data.modelVersion ?? "live"}
-            </span>
-            {pickType !== "all" && <span className="muted" style={{ fontSize: "0.9rem", fontWeight: 400 }}> ({pickType})</span>}
-            {mlFilter !== "all" && (
-              <span className="muted" style={{ fontSize: "0.9rem", fontWeight: 400 }}>
-                {" "}({mlFilter === "ml_only" ? "ml only" : "no ml"})
-              </span>
-            )}
-            {gateMode === "strict" && (
-              <span className="muted" style={{ fontSize: "0.9rem", fontWeight: 400 }}>
-                {" "}(strict gates)
-              </span>
-            )}
-            {laneFilter !== "all" && (
-              <span className="muted" style={{ fontSize: "0.9rem", fontWeight: 400 }}>
-                {" "}(lane: {laneFilter})
-              </span>
-            )}
-            {dayHitSummary.total > 0 && (
-              <span style={{
-                color: dayHitSummary.hits === dayHitSummary.total ? "#a855f7" : (dayHitSummary.hitRate ?? 0) >= 0.5 ? "var(--success)" : "var(--error)",
-                marginLeft: "0.5rem",
-                fontSize: "1.1rem",
-              }}>
-                {dayHitSummary.hits}/{dayHitSummary.total} ({((dayHitSummary.hitRate ?? 0) * 100).toFixed(0)}%)
-                {dayHitSummary.hits === dayHitSummary.total && " PERFECT"}
-              </span>
-            )}
-            {data.seasonToDate && data.seasonToDate.v2.total > 0 && (
-              <span className="muted" style={{ marginLeft: "0.5rem", fontSize: "0.85rem", fontWeight: 400 }}>
-                Season {data.seasonToDate.v2.hits}/{data.seasonToDate.v2.total} ({((data.seasonToDate.v2.hitRate ?? 0) * 100).toFixed(1)}%)
-              </span>
-            )}
-          </h1>
-        ) : (
-          <h1 style={{ margin: 0, fontSize: "1.4rem", fontWeight: 800, opacity: 0.4 }}>&nbsp;</h1>
-        )}
-        {!loading && data && totalPicks === 0 && perfectDates.has(date) && (
-          <div className="muted" style={{ marginTop: "0.35rem", fontSize: "0.78rem" }}>
-            This date is marked perfect for graded ledger picks under current filters, but no picks are currently visible.
+      <WeekNavigator
+        selectedDate={date}
+        onSelectDate={setDate}
+        todayStr={todayStr}
+        gateMode={gateMode}
+      />
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem", position: "relative" }}>
+        <div>
+          {!loading && data ? (
+            <h1 style={{ margin: 0, fontSize: "1.4rem", fontWeight: 800 }}>
+              {data.games.length} Games, {totalPicks} Picks
+              {mlFilter !== "all" && (
+                <span className="muted" style={{ fontSize: "0.9rem", fontWeight: 400 }}>
+                  {" "}({mlFilter === "ml_only" ? "ml only" : "no ml"})
+                </span>
+              )}
+              {gateMode === "strict" && (
+                <span className="muted" style={{ fontSize: "0.9rem", fontWeight: 400 }}>
+                  {" "}(strict gates)
+                </span>
+              )}
+              {laneFilter !== "all" && (
+                <span className="muted" style={{ fontSize: "0.9rem", fontWeight: 400 }}>
+                  {" "}(lane: {laneFilter})
+                </span>
+              )}
+              {dayHitSummary.total > 0 && (
+                <span style={{
+                  color: (dayHitSummary.hitRate ?? 0) >= 0.5 ? "var(--success)" : "var(--error)",
+                  marginLeft: "0.5rem",
+                  fontSize: "1.1rem",
+                }}>
+                  {dayHitSummary.hits}/{dayHitSummary.total} ({((dayHitSummary.hitRate ?? 0) * 100).toFixed(0)}%)
+                </span>
+              )}
+              {data.seasonToDate && data.seasonToDate.v2.total > 0 && (
+                <span className="muted" style={{ marginLeft: "0.5rem", fontSize: "0.85rem", fontWeight: 400 }}>
+                  Season {data.seasonToDate.v2.hits}/{data.seasonToDate.v2.total} ({((data.seasonToDate.v2.hitRate ?? 0) * 100).toFixed(1)}%)
+                </span>
+              )}
+            </h1>
+          ) : (
+            <h1 style={{ margin: 0, fontSize: "1.4rem", fontWeight: 800, opacity: 0.4 }}>&nbsp;</h1>
+          )}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexShrink: 0 }}>
+          <button
+            type="button"
+            onClick={() => setDate(getLocalDateString())}
+            className="btn-today"
+            style={{ fontSize: "0.72rem", padding: "0.3rem 0.6rem" }}
+          >
+            Today
+          </button>
+          <button
+            type="button"
+            onClick={runSync}
+            disabled={syncing}
+            className="btn-today"
+            style={{ fontSize: "0.72rem", padding: "0.3rem 0.6rem" }}
+            title="Sync games, odds, injuries, and lineups for this date"
+          >
+            {syncing ? "…" : "Sync"}
+          </button>
+          <button
+            type="button"
+            className="filters-gear-btn"
+            onClick={() => setFiltersOpen((v) => !v)}
+            title="Filters & settings"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
+          </button>
+        </div>
+        {syncResult && (
+          <div
+            title={syncResult.steps?.map((s) => `${s.step}: ${s.ok ? "ok" : s.message ?? "fail"}`).join("\n")}
+            style={{ position: "absolute", right: 0, top: "100%", fontSize: "0.75rem", color: syncResult.ok ? "var(--success)" : "var(--error)", whiteSpace: "nowrap" }}
+          >
+            {syncResult.message}
+            {syncResult.steps && ` (${syncResult.steps.filter((s) => s.ok).length}/${syncResult.steps.length})`}
           </div>
         )}
       </div>
 
-      <div className="predictions-layout">
-      {/* Games column */}
-      <div className="predictions-main">
+      {/* Filters modal */}
+      {filtersOpen && (
+        <>
+          <div className="filters-backdrop" onClick={() => setFiltersOpen(false)} />
+          <div className="filters-modal">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+              <h3 style={{ margin: 0, fontSize: "1rem" }}>Filters & Settings</h3>
+              <button
+                type="button"
+                onClick={() => setFiltersOpen(false)}
+                style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: "0.2rem", fontSize: "1.2rem", lineHeight: 1 }}
+              >
+                &times;
+              </button>
+            </div>
+            <div style={{ marginBottom: "0.75rem" }}>
+              <div className="muted" style={{ fontSize: "0.8rem", marginBottom: "0.25rem" }}>
+                Model version <span style={{ opacity: 0.75 }}>(season coverage)</span>
+              </div>
+              <select
+                value={data?.modelVersion ?? "live"}
+                onChange={(e) => switchModelVersion(e.target.value)}
+                disabled={switchingModelVersion}
+                style={{ width: "100%", padding: "0.4rem 0.5rem", fontSize: "0.82rem" }}
+              >
+                <option value="live">
+                  live (no snapshot) [season: {liveCoverage.gradedDates}d/{liveCoverage.gradedPicks}p]
+                </option>
+                {modelVersions.map((v) => (
+                  <option key={v.name} value={v.name}>
+                    {v.name}
+                    {v.isActive ? " (active)" : ""}
+                    {` [season: ${v.coverage?.gradedDates ?? 0}d/${v.coverage?.gradedPicks ?? 0}p]`}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.75rem" }}>
+              <span className="muted" style={{ fontSize: "0.8rem", minWidth: "3.5rem" }}>Picks:</span>
+              {(["game", "player", "all"] as const).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setPickType(t)}
+                  style={{
+                    flex: 1,
+                    padding: "0.35rem 0.4rem",
+                    fontSize: "0.78rem",
+                    border: "1px solid var(--border)",
+                    borderRadius: 4,
+                    background: pickType === t ? "var(--accent-muted)" : "transparent",
+                    cursor: "pointer",
+                  }}
+                >
+                  {t === "game" ? "Game" : t === "player" ? "Player" : "All"}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.75rem" }}>
+              <span className="muted" style={{ fontSize: "0.8rem", minWidth: "3.5rem" }}>ML vote:</span>
+              {(["all", "ml_only", "no_ml"] as const).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setMlFilter(t)}
+                  style={{
+                    flex: 1,
+                    padding: "0.35rem 0.4rem",
+                    fontSize: "0.78rem",
+                    border: "1px solid var(--border)",
+                    borderRadius: 4,
+                    background: mlFilter === t ? "var(--accent-muted)" : "transparent",
+                    cursor: "pointer",
+                  }}
+                >
+                  {t === "all" ? "All" : t === "ml_only" ? "ML" : "No ML"}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.75rem" }}>
+              <span className="muted" style={{ fontSize: "0.8rem", minWidth: "3.5rem" }}>Gates:</span>
+              {(["legacy", "strict"] as const).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setGateMode(t)}
+                  style={{
+                    flex: 1,
+                    padding: "0.35rem 0.4rem",
+                    fontSize: "0.78rem",
+                    border: "1px solid var(--border)",
+                    borderRadius: 4,
+                    background: gateMode === t ? "var(--accent-muted)" : "transparent",
+                    cursor: "pointer",
+                  }}
+                >
+                  {t === "legacy" ? "Legacy" : "Strict"}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.75rem" }}>
+              <span className="muted" style={{ fontSize: "0.8rem", minWidth: "3.5rem" }}>Lane:</span>
+              <select
+                value={laneFilter}
+                onChange={(e) => setLaneFilter(e.target.value as typeof laneFilter)}
+                style={{ width: "100%", padding: "0.4rem 0.5rem", fontSize: "0.78rem" }}
+              >
+                <option value="all">All lanes</option>
+                <option value="moneyline">moneyline</option>
+                <option value="spread">spread</option>
+                <option value="total">total</option>
+                <option value="player_points">player_points</option>
+                <option value="player_rebounds">player_rebounds</option>
+                <option value="player_assists">player_assists</option>
+                <option value="other_prop">other_prop</option>
+                <option value="other">other</option>
+              </select>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem", marginBottom: "0.5rem" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                <span className="muted" style={{ fontSize: "0.8rem", whiteSpace: "nowrap" }}>Game votes:</span>
+                <select
+                  value={gameMinVotes}
+                  onChange={(e) => setGameMinVotes(Number(e.target.value))}
+                  style={{ width: "100%", padding: "0.4rem 0.5rem", fontSize: "0.78rem" }}
+                >
+                  <option value={1}>1+</option>
+                  <option value={2}>2+</option>
+                  <option value={3}>3+</option>
+                  <option value={4}>4+</option>
+                  <option value={5}>5+</option>
+                </select>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                <span className="muted" style={{ fontSize: "0.8rem", whiteSpace: "nowrap" }}>Player votes:</span>
+                <select
+                  value={playerMinVotes}
+                  onChange={(e) => setPlayerMinVotes(Number(e.target.value))}
+                  style={{ width: "100%", padding: "0.4rem 0.5rem", fontSize: "0.78rem" }}
+                >
+                  <option value={1}>1+</option>
+                  <option value={2}>2+</option>
+                  <option value={3}>3+</option>
+                  <option value={4}>4+</option>
+                  <option value={5}>5+</option>
+                </select>
+              </div>
+            </div>
+            {mlFilter !== "all" && pickType === "game" && (
+              <div className="muted" style={{ fontSize: "0.72rem" }}>
+                ML vote applies to player-point picks. Switch Picks to Player or All.
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      <div>
       {loading && (
         <div className="card" style={{ opacity: 0.8 }}>
           <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
@@ -703,14 +1089,21 @@ export function PredictionsPage() {
           Data was auto-synced for {date}
         </div>
       )}
-      {!loading && data?.games.length === 0 && (
+      {isBeyondLimit && (
+        <div className="card" style={{ textAlign: "center", padding: "3rem 1.5rem" }}>
+          <p style={{ fontSize: "1.1rem", fontWeight: 600, margin: "0 0 0.5rem" }}>Too far ahead</p>
+          <p className="muted" style={{ margin: 0 }}>Predictions are only available up to {MAX_FUTURE_DAYS} days from today. Select a closer date to view games and picks.</p>
+        </div>
+      )}
+
+      {!isBeyondLimit && !loading && data?.games.length === 0 && (
         <div className="card">
           <p>No games found for {date}{data?.autoSynced ? " (auto-sync was attempted)" : ""}. Try syncing upcoming games or selecting a different date.</p>
         </div>
       )}
 
-      {!loading && data && filteredGames.length > 0 && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "0.75rem", alignItems: "start" }}>
+      {!isBeyondLimit && !loading && data && filteredGames.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(380px, 1fr))", gap: "0.75rem", alignItems: "start" }}>
           {[...filteredGames].sort((a, b) => (b.suggestedBetPicks?.length ?? 0) - (a.suggestedBetPicks?.length ?? 0)).map((game) => {
             const homeLabel = game.homeTeam.code ?? game.homeTeam.name ?? `Team ${game.homeTeam.id}`;
             const awayLabel = game.awayTeam.code ?? game.awayTeam.name ?? `Team ${game.awayTeam.id}`;
@@ -1060,391 +1453,6 @@ export function PredictionsPage() {
           })}
         </div>
       )}
-      </div>
-
-      {/* Sidebar: Date + Parlay */}
-      <div className="predictions-sidebar">
-      {/* Date picker + Sync card */}
-      <div className="card" style={{ padding: "1rem" }}>
-        <h3 style={{ margin: "0 0 0.75rem", fontSize: "0.95rem" }}>Date & Sync</h3>
-        {/* Calendar */}
-        <div style={{ marginBottom: "0.75rem" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
-            <button
-              type="button"
-              onClick={() => setCalendarMonth((m) => {
-                const d = new Date(m.year, m.month - 1);
-                return { year: d.getFullYear(), month: d.getMonth() };
-              })}
-              className="btn-today"
-              style={{ padding: "0.25rem 0.5rem", fontSize: "0.8rem" }}
-            >
-              &larr;
-            </button>
-            <span style={{ fontSize: "0.9rem", fontWeight: 600 }}>
-              {new Date(calendarMonth.year, calendarMonth.month).toLocaleString("default", { month: "long", year: "numeric" })}
-            </span>
-            <button
-              type="button"
-              onClick={() => setCalendarMonth((m) => {
-                const d = new Date(m.year, m.month + 1);
-                return { year: d.getFullYear(), month: d.getMonth() };
-              })}
-              className="btn-today"
-              style={{ padding: "0.25rem 0.5rem", fontSize: "0.8rem" }}
-            >
-              &rarr;
-            </button>
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 2, fontSize: "0.7rem", textAlign: "center" }}>
-            {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => (
-              <div key={i} className="muted" style={{ fontWeight: 600 }}>{d}</div>
-            ))}
-            {(() => {
-              const first = new Date(calendarMonth.year, calendarMonth.month, 1);
-              const last = new Date(calendarMonth.year, calendarMonth.month + 1, 0);
-              const startPad = first.getDay();
-              const days: (number | null)[] = Array(startPad).fill(null);
-              for (let d = 1; d <= last.getDate(); d++) days.push(d);
-              const today = new Date();
-              const todayStr = getLocalDateString(today);
-              return days.map((d, i) => {
-                if (d === null) return <div key={i} />;
-                const dateStr = `${calendarMonth.year}-${String(calendarMonth.month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-                const isSelected = dateStr === date;
-                const isToday = dateStr === todayStr;
-                const isPerfect = perfectDates.has(dateStr);
-                return (
-                  <button
-                    key={i}
-                    type="button"
-                    onClick={() => setDate(dateStr)}
-                    title={isPerfect ? "Perfect – all picks hit" : undefined}
-                    style={{
-                      padding: "0.35rem",
-                      border: "1px solid",
-                      borderColor: isSelected ? "var(--accent)" : isPerfect ? "#a855f7" : "var(--border)",
-                      borderRadius: 4,
-                      background: isSelected
-                        ? "var(--accent-muted)"
-                        : isPerfect
-                          ? "rgba(168, 85, 247, 0.12)"
-                          : isToday
-                            ? "var(--bg-elevated)"
-                            : "transparent",
-                      color: isSelected ? "var(--accent)" : isPerfect ? "#a855f7" : "inherit",
-                      boxShadow: isSelected ? "0 0 0 1px var(--accent)" : "none",
-                      fontWeight: isSelected ? 700 : isToday ? 700 : isPerfect ? 600 : 400,
-                      cursor: "pointer",
-                      fontSize: "0.75rem",
-                    }}
-                  >
-                    {d}
-                  </button>
-                );
-              });
-            })()}
-          </div>
-        </div>
-        <button type="button" onClick={() => setDate(getLocalDateString())} className="btn-today" style={{ width: "100%", marginBottom: "0.5rem", fontSize: "0.8rem" }}>
-          Today
-        </button>
-        <div style={{ marginBottom: "0.5rem" }}>
-          <div className="muted" style={{ fontSize: "0.8rem", marginBottom: "0.25rem" }}>
-            Model version <span style={{ opacity: 0.75 }}>(season coverage)</span>
-          </div>
-          <select
-            value={data?.modelVersion ?? "live"}
-            onChange={(e) => switchModelVersion(e.target.value)}
-            disabled={switchingModelVersion}
-            style={{ width: "100%", padding: "0.35rem 0.4rem", fontSize: "0.78rem" }}
-          >
-            <option value="live">
-              live (no snapshot) [season: {liveCoverage.gradedDates}d/{liveCoverage.gradedPicks}p]
-            </option>
-            {modelVersions.map((v) => (
-              <option key={v.name} value={v.name}>
-                {v.name}
-                {v.isActive ? " (active)" : ""}
-                {` [season: ${v.coverage?.gradedDates ?? 0}d/${v.coverage?.gradedPicks ?? 0}p]`}
-              </option>
-            ))}
-          </select>
-          <div className="muted" style={{ fontSize: "0.72rem", marginTop: "0.25rem" }}>
-            Coverage is graded season totals, not picks for selected date.
-          </div>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.5rem" }}>
-          <span className="muted" style={{ fontSize: "0.8rem" }}>Picks:</span>
-          {(["game", "player", "all"] as const).map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setPickType(t)}
-              style={{
-                flex: 1,
-                padding: "0.3rem 0.4rem",
-                fontSize: "0.75rem",
-                border: "1px solid var(--border)",
-                borderRadius: 4,
-                background: pickType === t ? "var(--accent-muted)" : "transparent",
-                cursor: "pointer",
-              }}
-            >
-              {t === "game" ? "Game" : t === "player" ? "Player" : "All"}
-            </button>
-          ))}
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.5rem" }}>
-          <span className="muted" style={{ fontSize: "0.8rem" }}>ML vote:</span>
-          {(["all", "ml_only", "no_ml"] as const).map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setMlFilter(t)}
-              style={{
-                flex: 1,
-                padding: "0.3rem 0.4rem",
-                fontSize: "0.72rem",
-                border: "1px solid var(--border)",
-                borderRadius: 4,
-                background: mlFilter === t ? "var(--accent-muted)" : "transparent",
-                cursor: "pointer",
-              }}
-            >
-              {t === "all" ? "All" : t === "ml_only" ? "ML" : "No ML"}
-            </button>
-          ))}
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.5rem" }}>
-          <span className="muted" style={{ fontSize: "0.8rem" }}>Gates:</span>
-          {(["legacy", "strict"] as const).map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setGateMode(t)}
-              style={{
-                flex: 1,
-                padding: "0.3rem 0.4rem",
-                fontSize: "0.72rem",
-                border: "1px solid var(--border)",
-                borderRadius: 4,
-                background: gateMode === t ? "var(--accent-muted)" : "transparent",
-                cursor: "pointer",
-              }}
-            >
-              {t === "legacy" ? "Legacy" : "Strict"}
-            </button>
-          ))}
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.5rem" }}>
-          <span className="muted" style={{ fontSize: "0.8rem" }}>Lane:</span>
-          <select
-            value={laneFilter}
-            onChange={(e) => setLaneFilter(e.target.value as typeof laneFilter)}
-            style={{ width: "100%", padding: "0.3rem 0.4rem", fontSize: "0.72rem" }}
-          >
-            <option value="all">All lanes</option>
-            <option value="moneyline">moneyline</option>
-            <option value="spread">spread</option>
-            <option value="total">total</option>
-            <option value="player_points">player_points</option>
-            <option value="player_rebounds">player_rebounds</option>
-            <option value="player_assists">player_assists</option>
-            <option value="other_prop">other_prop</option>
-            <option value="other">other</option>
-          </select>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.5rem" }}>
-          <span className="muted" style={{ fontSize: "0.8rem" }}>Game votes:</span>
-          <select
-            value={gameMinVotes}
-            onChange={(e) => setGameMinVotes(Number(e.target.value))}
-            style={{ width: "100%", padding: "0.3rem 0.4rem", fontSize: "0.72rem" }}
-          >
-            <option value={1}>1 (all)</option>
-            <option value={2}>2+</option>
-            <option value={3}>3+</option>
-            <option value={4}>4+</option>
-            <option value={5}>5+</option>
-          </select>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.5rem" }}>
-          <span className="muted" style={{ fontSize: "0.8rem" }}>Player votes:</span>
-          <select
-            value={playerMinVotes}
-            onChange={(e) => setPlayerMinVotes(Number(e.target.value))}
-            style={{ width: "100%", padding: "0.3rem 0.4rem", fontSize: "0.72rem" }}
-          >
-            <option value={1}>1 (all)</option>
-            <option value={2}>2+</option>
-            <option value={3}>3+</option>
-            <option value={4}>4+</option>
-            <option value={5}>5+</option>
-          </select>
-        </div>
-        {mlFilter !== "all" && pickType === "game" && (
-          <div className="muted" style={{ fontSize: "0.72rem", marginBottom: "0.5rem" }}>
-            ML vote applies to player-point picks. Switch Picks to Player or All.
-          </div>
-        )}
-        <button
-          type="button"
-          onClick={runSync}
-          disabled={syncing}
-          className="btn-today"
-          style={{ width: "100%", minHeight: "2rem" }}
-          title="Sync games, odds, injuries, and lineups for this date"
-        >
-          {syncing ? "…" : "Sync"}
-        </button>
-        {syncResult && (
-          <div title={syncResult.steps?.map((s) => `${s.step}: ${s.ok ? "ok" : s.message ?? "fail"}`).join("\n")} style={{ fontSize: "0.75rem", color: syncResult.ok ? "var(--success)" : "var(--error)", marginTop: "0.5rem" }}>
-            {syncResult.message}
-            {syncResult.steps && ` (${syncResult.steps.filter((s) => s.ok).length}/${syncResult.steps.length})`}
-          </div>
-        )}
-      </div>
-
-      {/* Parlay builder */}
-      <div className="card" style={{ padding: "1rem", flex: 1 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem", gap: "0.4rem" }}>
-          <h3 style={{ margin: 0, fontSize: "1rem" }}>Parlay Builder</h3>
-          <div style={{ display: "flex", gap: "0.3rem" }}>
-            {data && (
-              <button
-                className="btn-today"
-                style={{ fontSize: "0.7rem", padding: "0.2rem 0.5rem" }}
-                onClick={() => {
-                  const legs: typeof parlayLegs = [];
-                  for (const game of filteredGames) {
-                    const hl = game.homeTeam.code ?? game.homeTeam.name ?? `Team ${game.homeTeam.id}`;
-                    const al = game.awayTeam.code ?? game.awayTeam.name ?? `Team ${game.awayTeam.id}`;
-                    const ml = `${al} @ ${hl}`;
-                    for (const [i, play] of (game.suggestedBetPicks ?? []).entries()) {
-                      const key = `${game.id}|${play.outcomeType}|${i}`;
-                      const label = resolveLabel(play.displayLabel, play.outcomeType, hl, al);
-                      const american = play.marketPick?.overPrice ?? -110;
-                      const decimal = american > 0 ? 1 + american / 100 : 1 + 100 / Math.abs(american);
-                      legs.push({ key, gameLabel: ml, pickLabel: label, odds: decimal, american });
-                    }
-                  }
-                  setParlayLegs(legs);
-                }}
-              >
-                Add All
-              </button>
-            )}
-            <button
-              className="btn-today"
-              style={{ fontSize: "0.7rem", padding: "0.2rem 0.5rem" }}
-              onClick={() => setParlayLegs([])}
-              disabled={parlayLegs.length === 0}
-            >
-              Clear All
-            </button>
-          </div>
-        </div>
-        {parlayLegs.length === 0 ? (
-          <p className="muted" style={{ fontSize: "0.82rem", margin: 0 }}>Click picks to add legs</p>
-        ) : (
-          <>
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem", marginBottom: "0.75rem" }}>
-              {parlayLegs.map((leg) => (
-                <div
-                  key={leg.key}
-                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.8rem", padding: "0.3rem 0.4rem", background: "var(--bg-elevated)", borderRadius: 6 }}
-                >
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    <div style={{ fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{leg.pickLabel}</div>
-                    <div className="muted" style={{ fontSize: "0.7rem" }}>{leg.gameLabel}</div>
-                  </div>
-                  <span style={{ fontSize: "0.75rem", fontWeight: 600, color: leg.american > 0 ? "var(--success)" : "var(--text)", whiteSpace: "nowrap", marginRight: "0.3rem" }}>
-                    {leg.american > 0 ? `+${leg.american}` : leg.american}
-                  </span>
-                  <button
-                    onClick={() => setParlayLegs((prev) => prev.filter((l) => l.key !== leg.key))}
-                    style={{ background: "none", border: "none", color: "var(--error)", cursor: "pointer", padding: "0 0.3rem", fontSize: "1rem", lineHeight: 1 }}
-                  >
-                    &times;
-                  </button>
-                </div>
-              ))}
-            </div>
-
-            <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.6rem" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.5rem" }}>
-                <label className="muted" style={{ fontSize: "0.8rem", flexShrink: 0 }}>Stake $</label>
-                <input
-                  type="number"
-                  value={parlayStake}
-                  onChange={(e) => setParlayStake(e.target.value)}
-                  style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.9rem" }}
-                  min="0"
-                  step="5"
-                />
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.82rem" }}>
-                <span className="muted">Legs</span>
-                <span>{parlayLegs.length}</span>
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.82rem" }}>
-                <span className="muted">Combined odds</span>
-                <span style={{ fontWeight: 600 }}>{parlayAmericanOdds}</span>
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.72rem", opacity: 0.7 }}>
-                <span className="muted">Decimal</span>
-                <span>{parlayDecimalOdds.toFixed(2)}x</span>
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "1rem", fontWeight: 800, marginTop: "0.4rem" }}>
-                <span>Win</span>
-                <span style={{ color: "var(--success)" }}>${(parlayPayout - stakeNum).toFixed(2)}</span>
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.82rem", marginTop: "0.15rem" }}>
-                <span className="muted">Total payout</span>
-                <span style={{ color: "var(--success)" }}>${parlayPayout.toFixed(2)}</span>
-              </div>
-            </div>
-
-          </>
-        )}
-      </div>
-      </div>
-      <style jsx>{`
-        .predictions-layout {
-          display: grid;
-          grid-template-columns: minmax(0, 1fr) 300px;
-          gap: 1rem;
-          align-items: start;
-        }
-
-        .predictions-main {
-          min-width: 0;
-        }
-
-        .predictions-sidebar {
-          width: 300px;
-          min-width: 0;
-          display: flex;
-          flex-direction: column;
-          gap: 1rem;
-          align-self: start;
-          position: sticky;
-          top: 1rem;
-        }
-
-        @media (max-width: 1100px) {
-          .predictions-layout {
-            grid-template-columns: minmax(0, 1fr);
-          }
-
-          .predictions-sidebar {
-            width: 100%;
-            position: static;
-            top: auto;
-          }
-        }
-      `}</style>
       </div>
     </>
   );

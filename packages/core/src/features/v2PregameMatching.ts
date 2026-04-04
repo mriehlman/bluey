@@ -1,12 +1,9 @@
 import type { GameContext } from "@prisma/client";
 import { matchesConditions } from "../patterns/metaModelCore";
+import { bucketValue, type FeatureBinDef } from "./featureBinUtils";
 
-export type FeatureBinDef = {
-  kind: "quantile" | "fixed" | "hybrid";
-  labels: string[];
-  edges: number[];
-  hybridLabels?: string[];
-};
+export type { FeatureBinDef } from "./featureBinUtils";
+export { bucketValue, loadLatestFeatureBins } from "./featureBinUtils";
 
 export type DeployedPatternV2 = {
   id: string;
@@ -32,43 +29,11 @@ export type OddsLite = {
 export type PregamePlayerContext = {
   homeTopScorer: { stat: number } | null;
   awayTopScorer: { stat: number } | null;
+  homeTopRebounder?: { stat: number } | null;
+  awayTopRebounder?: { stat: number } | null;
+  homeTopPlaymaker?: { stat: number } | null;
+  awayTopPlaymaker?: { stat: number } | null;
 };
-
-function bucketValue(value: number | string, def: FeatureBinDef): string {
-  if (typeof value === "string") {
-    if (def.kind === "hybrid") {
-      if ((def.hybridLabels ?? []).includes(value)) return value;
-      if (def.labels.includes(value)) return value;
-    }
-    if (def.kind === "fixed" && def.labels.includes(value)) return value;
-    return value;
-  }
-  if (!Number.isFinite(value)) return def.labels[0] ?? "UNKNOWN";
-  if (def.edges.length === 0) return def.labels[0] ?? "UNKNOWN";
-  for (let i = 0; i < def.edges.length; i++) {
-    if (value <= def.edges[i]) return def.labels[i] ?? `B${i + 1}`;
-  }
-  return def.labels[def.labels.length - 1] ?? `B${def.edges.length + 1}`;
-}
-
-export async function loadLatestFeatureBins(
-  prisma: {
-    $queryRawUnsafe: <T>(query: string) => Promise<T>;
-  },
-): Promise<Map<string, FeatureBinDef>> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ featureName: string; binEdges: unknown }>>(
-    `SELECT DISTINCT ON ("featureName") "featureName", "binEdges"
-     FROM "FeatureBin"
-     ORDER BY "featureName", "createdAt" DESC`,
-  );
-  const out = new Map<string, FeatureBinDef>();
-  for (const row of rows) {
-    const parsed = row.binEdges as FeatureBinDef;
-    if (!parsed || !Array.isArray(parsed.labels) || !Array.isArray(parsed.edges)) continue;
-    out.set(row.featureName, parsed);
-  }
-  return out;
-}
 
 export function buildPregameTokenSet(input: {
   season: number;
@@ -76,7 +41,14 @@ export function buildPregameTokenSet(input: {
   odds: OddsLite | null;
   bins: Map<string, FeatureBinDef>;
   playerContext?: PregamePlayerContext;
-  topPropLines?: { home: number | null; away: number | null };
+  topPropLines?: {
+    home: number | null;
+    away: number | null;
+    homeRebounds?: number | null;
+    awayRebounds?: number | null;
+    homeAssists?: number | null;
+    awayAssists?: number | null;
+  };
 }): Set<string> {
   const { season, context, odds, bins, playerContext, topPropLines } = input;
   const tokens = new Set<string>();
@@ -208,7 +180,7 @@ export function buildPregameTokenSet(input: {
   addToken("away_injury_out", context.awayInjuryOutCount);
   addToken(
     "injury_out_delta",
-    Number.isFinite(context.homeInjuryOutCount ?? null) && Number.isFinite(context.awayInjuryOutCount ?? null)
+    Number.isFinite(context.homeInjuryOutCount) && Number.isFinite(context.awayInjuryOutCount)
       ? (context.homeInjuryOutCount ?? 0) - (context.awayInjuryOutCount ?? 0)
       : null,
   );
@@ -216,7 +188,7 @@ export function buildPregameTokenSet(input: {
   addToken("away_injury_questionable", context.awayInjuryQuestionableCount);
   addToken(
     "injury_questionable_delta",
-    Number.isFinite(context.homeInjuryQuestionableCount ?? null) && Number.isFinite(context.awayInjuryQuestionableCount ?? null)
+    Number.isFinite(context.homeInjuryQuestionableCount) && Number.isFinite(context.awayInjuryQuestionableCount)
       ? (context.homeInjuryQuestionableCount ?? 0) - (context.awayInjuryQuestionableCount ?? 0)
       : null,
   );
@@ -224,7 +196,7 @@ export function buildPregameTokenSet(input: {
   addToken("away_lineup_certainty", context.awayLineupCertainty);
   addToken(
     "lineup_certainty_delta",
-    Number.isFinite(context.homeLineupCertainty ?? null) && Number.isFinite(context.awayLineupCertainty ?? null)
+    Number.isFinite(context.homeLineupCertainty) && Number.isFinite(context.awayLineupCertainty)
       ? (context.homeLineupCertainty ?? 0) - (context.awayLineupCertainty ?? 0)
       : null,
   );
@@ -274,7 +246,7 @@ export function buildPregameTokenSet(input: {
   }
   addToken(
     "late_scratch_risk_delta",
-    Number.isFinite(context.homeLateScratchRisk ?? null) && Number.isFinite(context.awayLateScratchRisk ?? null)
+    Number.isFinite(context.homeLateScratchRisk) && Number.isFinite(context.awayLateScratchRisk)
       ? (context.homeLateScratchRisk ?? 0) - (context.awayLateScratchRisk ?? 0)
       : null,
   );
@@ -304,6 +276,32 @@ export function buildPregameTokenSet(input: {
   addToken("away_fg3_rate", context.awayFg3Pct);
   if (context.homeFg3Pct != null && context.awayFg3Pct != null) {
     addToken("fg3_rate_delta", context.homeFg3Pct - context.awayFg3Pct);
+  }
+
+  const homeTopPointsLine = topPropLines?.home ?? null;
+  const awayTopPointsLine = topPropLines?.away ?? null;
+  const homeTopReboundsLine = topPropLines?.homeRebounds ?? null;
+  const awayTopReboundsLine = topPropLines?.awayRebounds ?? null;
+  const homeTopAssistsLine = topPropLines?.homeAssists ?? null;
+  const awayTopAssistsLine = topPropLines?.awayAssists ?? null;
+
+  if (homeTopPointsLine != null && playerContext?.homeTopScorer?.stat != null) {
+    addToken("home_top_points_line_delta", homeTopPointsLine - playerContext.homeTopScorer.stat);
+  }
+  if (awayTopPointsLine != null && playerContext?.awayTopScorer?.stat != null) {
+    addToken("away_top_points_line_delta", awayTopPointsLine - playerContext.awayTopScorer.stat);
+  }
+  if (homeTopReboundsLine != null && playerContext?.homeTopRebounder?.stat != null) {
+    addToken("home_top_rebounds_line_delta", homeTopReboundsLine - playerContext.homeTopRebounder.stat);
+  }
+  if (awayTopReboundsLine != null && playerContext?.awayTopRebounder?.stat != null) {
+    addToken("away_top_rebounds_line_delta", awayTopReboundsLine - playerContext.awayTopRebounder.stat);
+  }
+  if (homeTopAssistsLine != null && playerContext?.homeTopPlaymaker?.stat != null) {
+    addToken("home_top_assists_line_delta", homeTopAssistsLine - playerContext.homeTopPlaymaker.stat);
+  }
+  if (awayTopAssistsLine != null && playerContext?.awayTopPlaymaker?.stat != null) {
+    addToken("away_top_assists_line_delta", awayTopAssistsLine - playerContext.awayTopPlaymaker.stat);
   }
 
   const offenseVsOppDef = (() => {

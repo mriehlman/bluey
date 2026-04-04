@@ -13,5 +13,18 @@ services:
     volumes:
       - bluey_pgdata:/var/lib/postgresql/data
 
+  db-prod:
+    image: postgres:16
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: bluey
+      POSTGRES_PASSWORD: bluey
+      POSTGRES_DB: bluey_prod
+    volumes:
+      - bluey_prod_pgdata:/var/lib/postgresql/data
+
 volumes:
   bluey_pgdata:
+  bluey_prod_pgdata:

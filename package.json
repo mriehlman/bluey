@@ -14,7 +14,10 @@
     "db:down": "docker compose down",
     "prisma:migrate": "bunx prisma migrate dev --schema packages/db/prisma/schema.prisma",
     "prisma:generate": "bunx prisma generate --schema packages/db/prisma/schema.prisma",
-    "prisma:push": "bunx prisma db push --schema packages/db/prisma/schema.prisma"
+    "prisma:push": "bunx prisma db push --schema packages/db/prisma/schema.prisma",
+    "prisma:push:prod": "bun run scripts/prismaPushProd.ts",
+    "promote": "bun run scripts/promoteToProd.ts",
+    "prune:prod": "bun run scripts/pruneProd.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

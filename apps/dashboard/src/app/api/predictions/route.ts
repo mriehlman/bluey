@@ -679,13 +679,15 @@ async function queryGamesForDate(targetDate: Date, dateStr: string) {
     orderBy: { tipoffTimeUtc: "asc" },
   });
 
-  const oddsPriceRows = await prisma.$queryRawUnsafe<Array<{
-    id: string; spreadHomePrice: number | null; spreadAwayPrice: number | null;
-    totalOverPrice: number | null; totalUnderPrice: number | null;
-  }>>(
-    `SELECT "id", "spreadHomePrice", "spreadAwayPrice", "totalOverPrice", "totalUnderPrice"
-     FROM "GameOdds" WHERE "gameId" IN (${gamesRaw.map(g => `'${g.id}'`).join(",") || "''"})`,
-  );
+  const oddsPriceRows = gamesRaw.length > 0
+    ? await prisma.$queryRawUnsafe<Array<{
+        id: string; spreadHomePrice: number | null; spreadAwayPrice: number | null;
+        totalOverPrice: number | null; totalUnderPrice: number | null;
+      }>>(
+        `SELECT "id", "spreadHomePrice", "spreadAwayPrice", "totalOverPrice", "totalUnderPrice"
+         FROM "GameOdds" WHERE "gameId" IN (${gamesRaw.map(g => `'${g.id}'`).join(",")})`,
+      )
+    : [];
   const oddsPriceMap = new Map(oddsPriceRows.map(r => [r.id, r]));
   for (const game of gamesRaw) {
     for (const o of game.odds) {

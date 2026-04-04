@@ -664,6 +664,7 @@ model CanonicalPrediction {
   featureSnapshotPayload     Json
   supportingPatterns         String[]
   modelVotes                 Json
+  settledHit                 Boolean?
   generatedAt                DateTime
   createdAt                  DateTime @default(now())
   updatedAt                  DateTime @updatedAt

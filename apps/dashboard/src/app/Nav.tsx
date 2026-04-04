@@ -19,7 +19,7 @@ export default function Nav() {
     probe.onerror = () => {
       if (mounted) setHasLogo(false);
     };
-    probe.src = "/logo.png";
+    probe.src = "/logo.svg";
 
     return () => {
       mounted = false;
@@ -36,7 +36,7 @@ export default function Nav() {
   const brandContent = (
     <>
       {hasLogo ? (
-        <img src="/logo.png" alt="Bluey" className="brand-logo" />
+        <img src="/logo.svg" alt="Bluey" className="brand-logo" />
       ) : (
         <span className="brand-fallback">Bluey</span>
       )}

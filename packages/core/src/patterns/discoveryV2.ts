@@ -2,13 +2,7 @@ import { prisma } from "@bluey/db";
 import { DISCOVERY_DEFAULTS, VALIDATION_DEFAULTS } from "../config/tuning";
 import { outcomeFamily, matchesConditions, isLowSpecificityConditionToken } from "./metaModelCore";
 import { autoSnapshotBeforeDiscovery } from "./modelVersion";
-
-type FeatureBinDef = {
-  kind: "quantile" | "fixed" | "hybrid";
-  labels: string[];
-  edges: number[];
-  hybridLabels?: string[];
-};
+import { bucketValue as sharedBucketValue, type FeatureBinDef } from "../features/featureBinUtils";
 
 type FeatureTier = "state" | "context" | "market";
 type FeatureBucketType = "quantile" | "fixed" | "hybrid";
@@ -62,6 +56,104 @@ type ScoredPattern = CandidatePattern & {
 
 type FamilyBucket = "PLAYER" | "TOTAL" | "SPREAD" | "MONEYLINE" | "OTHER";
 const FAMILY_BUCKETS: FamilyBucket[] = ["PLAYER", "TOTAL", "SPREAD", "MONEYLINE", "OTHER"];
+
+class TokenIndex {
+  readonly rows: TokenizedGame[];
+  private bitmaps: Map<string, Uint8Array>;
+  readonly length: number;
+  private _anchor: number | null = null;
+
+  constructor(rows: TokenizedGame[]) {
+    this.rows = rows;
+    this.length = rows.length;
+    const bm = new Map<string, Uint8Array>();
+    for (let i = 0; i < rows.length; i++) {
+      for (const token of rows[i].tokens) {
+        let arr = bm.get(token);
+        if (!arr) {
+          arr = new Uint8Array(rows.length);
+          bm.set(token, arr);
+        }
+        arr[i] = 1;
+      }
+    }
+    this.bitmaps = bm;
+  }
+
+  get anchor(): number {
+    if (this._anchor == null) {
+      let mx = 0;
+      for (const r of this.rows) {
+        const t = r.date.getTime();
+        if (t > mx) mx = t;
+      }
+      this._anchor = mx;
+    }
+    return this._anchor;
+  }
+
+  getBitmap(token: string): Uint8Array | undefined {
+    return this.bitmaps.get(token);
+  }
+
+  tokenCount(token: string): number {
+    const bm = this.bitmaps.get(token);
+    if (!bm) return 0;
+    let c = 0;
+    for (let i = 0; i < bm.length; i++) c += bm[i];
+    return c;
+  }
+
+  tokenEntries(): Array<[string, number]> {
+    const out: Array<[string, number]> = [];
+    for (const [token, bm] of this.bitmaps) {
+      let c = 0;
+      for (let i = 0; i < bm.length; i++) c += bm[i];
+      out.push([token, c]);
+    }
+    return out;
+  }
+
+  matchBitmap(conditions: string[]): Uint8Array {
+    const result = new Uint8Array(this.length).fill(1);
+    for (const c of conditions) {
+      if (!c) continue;
+      if (c.startsWith("!")) {
+        const bm = this.bitmaps.get(c.slice(1));
+        if (bm) {
+          for (let i = 0; i < this.length; i++) {
+            if (bm[i]) result[i] = 0;
+          }
+        }
+      } else {
+        const bm = this.bitmaps.get(c);
+        if (!bm) { result.fill(0); return result; }
+        for (let i = 0; i < this.length; i++) {
+          if (!bm[i]) result[i] = 0;
+        }
+      }
+    }
+    return result;
+  }
+
+  supportCount(tokens: string[]): number {
+    let count = 0;
+    const bms: Uint8Array[] = [];
+    for (const t of tokens) {
+      const bm = this.bitmaps.get(t);
+      if (!bm) return 0;
+      bms.push(bm);
+    }
+    outer:
+    for (let i = 0; i < this.length; i++) {
+      for (const bm of bms) {
+        if (!bm[i]) continue outer;
+      }
+      count++;
+    }
+    return count;
+  }
+}
 
 const LEGACY_FEATURES_UNDER_EVALUATION = [
   "home_ppg",
@@ -132,26 +224,7 @@ function hybridBinDef(numericDef: FeatureBinDef, semanticLabels: string[]): Feat
   };
 }
 
-function bucketValue(value: number | string, def: FeatureBinDef): string {
-  if (typeof value === "string") {
-    if (def.kind === "hybrid") {
-      if ((def.hybridLabels ?? []).includes(value)) return value;
-      if (def.labels.includes(value)) return value;
-    }
-    if (def.kind === "fixed" && def.labels.includes(value)) return value;
-    return value;
-  }
-  if (!Number.isFinite(value)) return def.labels[0] ?? "UNKNOWN";
-  if (def.edges.length === 0) {
-    return def.labels[0] ?? "UNKNOWN";
-  }
-  for (let i = 0; i < def.edges.length; i++) {
-    if (value <= def.edges[i]) {
-      return def.labels[i] ?? `B${i + 1}`;
-    }
-  }
-  return def.labels[def.labels.length - 1] ?? `B${def.labels.length}`;
-}
+const bucketValue = sharedBucketValue;
 
 function sqlEsc(input: string): string {
   return input.replaceAll("'", "''");
@@ -804,14 +877,16 @@ export async function buildFeatureBins(args: string[] = []): Promise<void> {
     }
   }
 
-  await prisma.$executeRawUnsafe(`DELETE FROM "FeatureBin"`);
-  for (const row of bins) {
-    const binJson = sqlEsc(JSON.stringify(row.def));
-    await prisma.$executeRawUnsafe(
-      `INSERT INTO "FeatureBin" ("id","featureName","binEdges","method","seasonRange","createdAt")
-       VALUES ('${crypto.randomUUID()}','${sqlEsc(row.featureName)}','${binJson}'::jsonb,'${row.method}','${seasonRange}',NOW())`,
-    );
-  }
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`DELETE FROM "FeatureBin"`);
+    for (const row of bins) {
+      const binJson = sqlEsc(JSON.stringify(row.def));
+      await tx.$executeRawUnsafe(
+        `INSERT INTO "FeatureBin" ("id","featureName","binEdges","method","seasonRange","createdAt")
+         VALUES ('${crypto.randomUUID()}','${sqlEsc(row.featureName)}','${binJson}'::jsonb,'${row.method}','${seasonRange}',NOW())`,
+      );
+    }
+  }, { timeout: 60_000 });
 
   console.log(`Stored ${bins.length} feature bin definitions.`);
 }
@@ -822,18 +897,8 @@ type FeatureBinRow = {
 };
 
 async function loadLatestFeatureBins(): Promise<Map<string, FeatureBinDef>> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ featureName: string; binEdges: unknown }>>(
-    `SELECT DISTINCT ON ("featureName") "featureName", "binEdges"
-     FROM "FeatureBin"
-     ORDER BY "featureName", "createdAt" DESC`,
-  );
-  const out = new Map<string, FeatureBinDef>();
-  for (const row of rows) {
-    const parsed = row.binEdges as FeatureBinDef;
-    if (!parsed || !Array.isArray(parsed.labels) || !Array.isArray(parsed.edges)) continue;
-    out.set(row.featureName, parsed);
-  }
-  return out;
+  const { loadLatestFeatureBins: load } = await import("../features/featureBinUtils");
+  return load(prisma);
 }
 
 export async function buildQuantizedGameFeatures(args: string[] = []): Promise<void> {
@@ -1237,6 +1302,71 @@ function computeWeightedStats(
   return { n, wins, rawHitRate, posteriorHitRate, edge, lift };
 }
 
+function computeStatsFromBitmap(
+  index: TokenIndex,
+  bitmap: Uint8Array,
+  outcomeType: string,
+  baselineRate: number,
+  priorStrength: number,
+  seasonWeight?: (season: number) => number,
+): SplitStats {
+  let n = 0;
+  let wins = 0;
+  const rows = index.rows;
+  for (let i = 0; i < bitmap.length; i++) {
+    if (!bitmap[i]) continue;
+    const r = rows[i];
+    const w = seasonWeight ? seasonWeight(r.season) : 1;
+    n += w;
+    if (r.outcomes.has(outcomeType)) wins += w;
+  }
+  const rawHitRate = n > 0 ? wins / n : 0;
+  const priorBase = clampProb(baselineRate);
+  const effectivePrior = adaptivePriorStrength(priorStrength, baselineRate);
+  const alpha = priorBase * effectivePrior;
+  const beta = (1 - priorBase) * effectivePrior;
+  const posteriorHitRate = (wins + alpha) / (n + alpha + beta);
+  const edge = posteriorHitRate - priorBase;
+  const lift = baselineRate > 0 ? rawHitRate / baselineRate : 0;
+  return { n, wins, rawHitRate, posteriorHitRate, edge, lift };
+}
+
+function computeWeightedStatsFromBitmap(
+  index: TokenIndex,
+  bitmap: Uint8Array,
+  outcomeType: string,
+  baselineRate: number,
+  priorStrength: number,
+  halfLifeDays: number,
+  seasonWeight?: (season: number) => number,
+): SplitStats {
+  const rows = index.rows;
+  if (rows.length === 0) {
+    return computeStatsFromBitmap(index, bitmap, outcomeType, baselineRate, priorStrength, seasonWeight);
+  }
+  const anchor = index.anchor;
+  const lambda = Math.log(2) / Math.max(1, halfLifeDays);
+  let n = 0;
+  let wins = 0;
+  for (let i = 0; i < bitmap.length; i++) {
+    if (!bitmap[i]) continue;
+    const r = rows[i];
+    const ageDays = Math.max(0, (anchor - r.date.getTime()) / 86_400_000);
+    const w = Math.exp(-lambda * ageDays);
+    n += w;
+    if (r.outcomes.has(outcomeType)) wins += w;
+  }
+  const rawHitRate = n > 0 ? wins / n : 0;
+  const priorBase = clampProb(baselineRate);
+  const effectivePrior = adaptivePriorStrength(priorStrength, baselineRate);
+  const alpha = priorBase * effectivePrior;
+  const beta = (1 - priorBase) * effectivePrior;
+  const posteriorHitRate = (wins + alpha) / (n + alpha + beta);
+  const edge = posteriorHitRate - priorBase;
+  const lift = baselineRate > 0 ? rawHitRate / baselineRate : 0;
+  return { n, wins, rawHitRate, posteriorHitRate, edge, lift };
+}
+
 type SeasonSplit =
   | { mode: "default"; train: TokenizedGame[]; val: TokenizedGame[]; forward: TokenizedGame[] }
   | {
@@ -1389,91 +1519,101 @@ function treeCandidatesForOutcome(
   maxDepth: number,
   minLeaf: number,
   minTokenSupport: number,
+  index?: TokenIndex,
 ): CandidatePattern[] {
-  const tokenFreq = new Map<string, number>();
-  for (const row of trainRows) {
-    for (const t of row.tokens) {
-      tokenFreq.set(t, (tokenFreq.get(t) ?? 0) + 1);
+  const idx = index ?? new TokenIndex(trainRows);
+  const rowCount = trainRows.length;
+
+  const hasOutcome = new Uint8Array(rowCount);
+  for (let i = 0; i < rowCount; i++) {
+    if (trainRows[i].outcomes.has(outcomeType)) hasOutcome[i] = 1;
+  }
+
+  const viableTokenData: Array<{ token: string; bitmap: Uint8Array }> = [];
+  for (const [token, count] of idx.tokenEntries()) {
+    if (count >= minTokenSupport && count <= Math.floor(rowCount * 0.95)) {
+      viableTokenData.push({ token, bitmap: idx.getBitmap(token)! });
     }
   }
-  const viableTokens = [...tokenFreq.entries()]
-    .filter(([, n]) => n >= minTokenSupport && n <= Math.floor(trainRows.length * 0.95))
-    .map(([t]) => t);
 
   const used = new Set<string>();
   const candidates: CandidatePattern[] = [];
 
-  function recurse(rows: TokenizedGame[], depth: number, path: string[]): void {
-    if (rows.length < minLeaf) return;
+  function recurse(nodeBitmap: Uint8Array, nodeSize: number, depth: number, path: string[]): void {
+    if (nodeSize < minLeaf) return;
     if (depth >= maxDepth) {
       if (path.length > 0) {
-        candidates.push({
-          outcomeType,
-          conditions: [...path],
-          discoverySource: "tree",
-        });
+        candidates.push({ outcomeType, conditions: [...path], discoverySource: "tree" });
       }
       return;
     }
 
     let bestToken: string | null = null;
     let bestScore = -Infinity;
-    let bestPresent: TokenizedGame[] = [];
-    let bestAbsent: TokenizedGame[] = [];
+    let bestPresentSize = 0;
+    let bestAbsentSize = 0;
 
-    for (const token of viableTokens) {
+    for (const { token, bitmap } of viableTokenData) {
       if (used.has(token)) continue;
-      const present: TokenizedGame[] = [];
-      const absent: TokenizedGame[] = [];
-      for (const r of rows) {
-        if (r.tokens.has(token)) present.push(r);
-        else absent.push(r);
+      let presentN = 0, absentN = 0, presentHits = 0, absentHits = 0;
+      for (let i = 0; i < rowCount; i++) {
+        if (!nodeBitmap[i]) continue;
+        if (bitmap[i]) { presentN++; if (hasOutcome[i]) presentHits++; }
+        else { absentN++; if (hasOutcome[i]) absentHits++; }
       }
-      if (present.length < minLeaf || absent.length < minLeaf) continue;
+      if (presentN < minLeaf || absentN < minLeaf) continue;
 
-      const pHits = present.filter((r) => r.outcomes.has(outcomeType)).length;
-      const aHits = absent.filter((r) => r.outcomes.has(outcomeType)).length;
       const score = informationGain(
-        rows.length, pHits + aHits,
-        present.length, pHits,
-        absent.length, aHits,
+        nodeSize, presentHits + absentHits,
+        presentN, presentHits,
+        absentN, absentHits,
       );
       if (score > bestScore) {
         bestScore = score;
         bestToken = token;
-        bestPresent = present;
-        bestAbsent = absent;
+        bestPresentSize = presentN;
+        bestAbsentSize = absentN;
       }
     }
 
     if (!bestToken) {
       if (path.length > 0) {
-        candidates.push({
-          outcomeType,
-          conditions: [...path],
-          discoverySource: "tree",
-        });
+        candidates.push({ outcomeType, conditions: [...path], discoverySource: "tree" });
       }
       return;
     }
 
+    const winnerBm = idx.getBitmap(bestToken)!;
+    const presentBm = new Uint8Array(rowCount);
+    const absentBm = new Uint8Array(rowCount);
+    for (let i = 0; i < rowCount; i++) {
+      if (!nodeBitmap[i]) continue;
+      if (winnerBm[i]) presentBm[i] = 1;
+      else absentBm[i] = 1;
+    }
+
     used.add(bestToken);
-    recurse(bestPresent, depth + 1, [...path, bestToken]);
-    recurse(bestAbsent, depth + 1, [...path, `!${bestToken}`]);
+    recurse(presentBm, bestPresentSize, depth + 1, [...path, bestToken]);
+    recurse(absentBm, bestAbsentSize, depth + 1, [...path, `!${bestToken}`]);
     used.delete(bestToken);
   }
 
-  recurse(trainRows, 0, []);
+  const rootBitmap = new Uint8Array(rowCount).fill(1);
+  recurse(rootBitmap, rowCount, 0, []);
   return candidates;
 }
 
-function aprioriFrequentItemsets(trainRows: TokenizedGame[], maxSize: number, minSupport: number, maxSingletons: number = 80): string[][] {
-  const tokenCounts = new Map<string, number>();
-  for (const row of trainRows) {
-    for (const t of row.tokens) tokenCounts.set(t, (tokenCounts.get(t) ?? 0) + 1);
-  }
+function aprioriFrequentItemsets(
+  trainRows: TokenizedGame[],
+  maxSize: number,
+  minSupport: number,
+  maxSingletons: number = 80,
+  index?: TokenIndex,
+): string[][] {
+  const idx = index ?? new TokenIndex(trainRows);
+  const entries = idx.tokenEntries();
 
-  let frequent: string[][] = [...tokenCounts.entries()]
+  let frequent: string[][] = entries
     .filter(([, c]) => c >= minSupport)
     .sort((a, b) => b[1] - a[1])
     .slice(0, maxSingletons)
@@ -1493,18 +1633,7 @@ function aprioriFrequentItemsets(trainRows: TokenizedGame[], maxSize: number, mi
     const candidates = [...candidateSet].map((s) => s.split("|"));
     const next: string[][] = [];
     for (const combo of candidates) {
-      let support = 0;
-      for (const row of trainRows) {
-        let ok = true;
-        for (const token of combo) {
-          if (!row.tokens.has(token)) {
-            ok = false;
-            break;
-          }
-        }
-        if (ok) support++;
-      }
-      if (support >= minSupport) next.push(combo);
+      if (idx.supportCount(combo) >= minSupport) next.push(combo);
     }
 
     if (next.length === 0) break;
@@ -1515,7 +1644,15 @@ function aprioriFrequentItemsets(trainRows: TokenizedGame[], maxSize: number, mi
   return all;
 }
 
+let _tokenizedGamesCache: TokenizedGame[] | null = null;
+let _tokenizedGamesCacheTs = 0;
+const TOKENIZED_GAMES_CACHE_TTL_MS = 120_000;
+
 async function loadTokenizedGames(): Promise<TokenizedGame[]> {
+  const now = Date.now();
+  if (_tokenizedGamesCache && (now - _tokenizedGamesCacheTs) < TOKENIZED_GAMES_CACHE_TTL_MS) {
+    return _tokenizedGamesCache;
+  }
   const tokenRows = await prisma.$queryRawUnsafe<Array<{ gameId: string; season: number; date: Date; tokens: string[] }>>(
     `SELECT "gameId", "season", "date", "tokens" FROM "GameFeatureToken"`,
   );
@@ -1544,6 +1681,8 @@ async function loadTokenizedGames(): Promise<TokenizedGame[]> {
       outcomes,
     });
   }
+  _tokenizedGamesCache = games;
+  _tokenizedGamesCacheTs = now;
   return games;
 }
 
@@ -1972,14 +2111,38 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
     }
   }
 
+  const trainIndex = new TokenIndex(splits.train);
+  const forwardIndex = new TokenIndex(splits.forward);
+  const valIndex = splits.mode === "default" ? new TokenIndex(splits.val) : null;
+  const losoFoldIndexes = splits.mode === "loso"
+    ? splits.losoFolds.map((fold) => new TokenIndex(fold.valRows))
+    : [];
+
+  const outcomeBaseCache = new Map<string, { trainBase: number; forwardBase: number; valBase?: number }>();
+  for (const outcomeType of outcomeTypes) {
+    let trainHits = 0;
+    for (const r of splits.train) { if (r.outcomes.has(outcomeType)) trainHits++; }
+    const trainBase = trainHits / Math.max(1, splits.train.length);
+    let forwardHits = 0;
+    for (const r of splits.forward) { if (r.outcomes.has(outcomeType)) forwardHits++; }
+    const forwardBase = forwardHits / Math.max(1, splits.forward.length);
+    let valBase: number | undefined;
+    if (splits.mode === "default") {
+      let valHits = 0;
+      for (const r of splits.val) { if (r.outcomes.has(outcomeType)) valHits++; }
+      valBase = valHits / Math.max(1, splits.val.length);
+    }
+    outcomeBaseCache.set(outcomeType, { trainBase, forwardBase, valBase });
+  }
+
   const rawCandidates: CandidatePattern[] = [];
   for (const outcomeType of outcomeTypes) {
     rawCandidates.push(
-      ...treeCandidatesForOutcome(splits.train, outcomeType, maxDepth, minLeaf, minTokenSupport),
+      ...treeCandidatesForOutcome(splits.train, outcomeType, maxDepth, minLeaf, minTokenSupport, trainIndex),
     );
   }
 
-  const itemsets = aprioriFrequentItemsets(splits.train, maxItemset, minSupport, maxSingletons);
+  const itemsets = aprioriFrequentItemsets(splits.train, maxItemset, minSupport, maxSingletons, trainIndex);
   for (const outcomeType of outcomeTypes) {
     for (const itemset of itemsets) {
       rawCandidates.push({
@@ -2070,13 +2233,14 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
     }
     acceptanceFunnel.beforeValidation += 1;
 
-    const trainBase =
-      splits.train.filter((r) => r.outcomes.has(c.outcomeType)).length / Math.max(1, splits.train.length);
+    const bases = outcomeBaseCache.get(c.outcomeType)!;
+    const trainBase = bases.trainBase;
 
-    const train = computeStats(
-      splits.train,
+    const trainBitmap = trainIndex.matchBitmap(c.conditions);
+    const train = computeStatsFromBitmap(
+      trainIndex,
+      trainBitmap,
       c.outcomeType,
-      c.conditions,
       trainBase,
       priorStrength,
       seasonWeight,
@@ -2086,10 +2250,10 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
       continue;
     }
     acceptanceFunnel.afterMinSampleGate += 1;
-    const trainRecency = computeWeightedStats(
-      splits.train,
+    const trainRecency = computeWeightedStatsFromBitmap(
+      trainIndex,
+      trainBitmap,
       c.outcomeType,
-      c.conditions,
       trainBase,
       priorStrength,
       recencyHalfLifeDays,
@@ -2099,14 +2263,13 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
     let val: SplitStats;
     let valOk: boolean;
     let valFailReason: string | null = null;
-    if (splits.mode === "default") {
-      const valRows = splits.val;
-      const valBase =
-        valRows.filter((r) => r.outcomes.has(c.outcomeType)).length / Math.max(1, valRows.length);
-      val = computeStats(
-        valRows,
+    if (splits.mode === "default" && valIndex) {
+      const valBase = bases.valBase ?? 0;
+      const valBitmap = valIndex.matchBitmap(c.conditions);
+      val = computeStatsFromBitmap(
+        valIndex,
+        valBitmap,
         c.outcomeType,
-        c.conditions,
         valBase,
         priorStrength,
         seasonWeight,
@@ -2123,17 +2286,20 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
       } else {
         valOk = true;
       }
-    } else {
+    } else if (splits.mode === "loso") {
       const losoFoldStats: SplitStats[] = [];
-      for (const fold of splits.losoFolds) {
+      for (let fi = 0; fi < splits.losoFolds.length; fi++) {
+        const fold = splits.losoFolds[fi];
+        const foldIndex = losoFoldIndexes[fi];
         const foldBase =
           fold.valRows.filter((r) => r.outcomes.has(c.outcomeType)).length /
           Math.max(1, fold.valRows.length);
+        const foldBitmap = foldIndex.matchBitmap(c.conditions);
         losoFoldStats.push(
-          computeStats(
-            fold.valRows,
+          computeStatsFromBitmap(
+            foldIndex,
+            foldBitmap,
             c.outcomeType,
-            c.conditions,
             foldBase,
             priorStrength,
             seasonWeight,
@@ -2177,13 +2343,17 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
           valFailReason = "instability";
         }
       }
+    } else {
+      val = { n: 0, wins: 0, rawHitRate: 0, posteriorHitRate: 0.5, edge: 0, lift: 0 };
+      valOk = false;
+      valFailReason = "no_validation_split";
     }
-    const forwardBase =
-      splits.forward.filter((r) => r.outcomes.has(c.outcomeType)).length / Math.max(1, splits.forward.length);
-    const forward = computeStats(
-      splits.forward,
+    const forwardBase = bases.forwardBase;
+    const forwardBitmap = forwardIndex.matchBitmap(c.conditions);
+    const forward = computeStatsFromBitmap(
+      forwardIndex,
+      forwardBitmap,
       c.outcomeType,
-      c.conditions,
       forwardBase,
       priorStrength,
       undefined,
@@ -2349,34 +2519,41 @@ export async function discoverPatternsV2(args: string[] = []): Promise<void> {
   }
   acceptanceFunnel.afterDeploymentAcceptance = top.length;
 
-  await prisma.$executeRawUnsafe(`DELETE FROM "PatternV2Hit"`);
-  await prisma.$executeRawUnsafe(`DELETE FROM "PatternV2"`);
-  for (const p of top) {
-    const id = crypto.randomUUID();
-    const conditions = toPgTextArrayLiteral(p.conditions);
-    await prisma.$executeRawUnsafe(
-      `INSERT INTO "PatternV2"
-      ("id","outcomeType","conditions","discoverySource","trainStats","valStats","forwardStats","rawHitRate","posteriorHitRate","lift","edge","score","n","status","createdAt","updatedAt")
-      VALUES (
-        '${id}',
-        '${sqlEsc(p.outcomeType)}',
-        '${conditions}',
-        '${p.discoverySource}',
-        '${sqlEsc(JSON.stringify(p.train))}'::jsonb,
-        '${sqlEsc(JSON.stringify(p.val))}'::jsonb,
-        '${sqlEsc(JSON.stringify(p.forward))}'::jsonb,
-        ${p.rawHitRate},
-        ${p.posteriorHitRate},
-        ${p.lift},
-        ${p.edge},
-        ${p.score},
-        ${p.n},
-        'candidate',
-        NOW(),
-        NOW()
-      )`,
-    );
-  }
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`DELETE FROM "PatternV2Hit"`);
+    await tx.$executeRawUnsafe(`DELETE FROM "PatternV2"`);
+    const INSERT_BATCH = 200;
+    for (let i = 0; i < top.length; i += INSERT_BATCH) {
+      const batch = top.slice(i, i + INSERT_BATCH);
+      const values = batch.map((p) => {
+        const id = crypto.randomUUID();
+        const conditions = toPgTextArrayLiteral(p.conditions);
+        return `(
+          '${id}',
+          '${sqlEsc(p.outcomeType)}',
+          '${conditions}',
+          '${p.discoverySource}',
+          '${sqlEsc(JSON.stringify(p.train))}'::jsonb,
+          '${sqlEsc(JSON.stringify(p.val))}'::jsonb,
+          '${sqlEsc(JSON.stringify(p.forward))}'::jsonb,
+          ${p.rawHitRate},
+          ${p.posteriorHitRate},
+          ${p.lift},
+          ${p.edge},
+          ${p.score},
+          ${p.n},
+          'candidate',
+          NOW(),
+          NOW()
+        )`;
+      }).join(",");
+      await tx.$executeRawUnsafe(
+        `INSERT INTO "PatternV2"
+        ("id","outcomeType","conditions","discoverySource","trainStats","valStats","forwardStats","rawHitRate","posteriorHitRate","lift","edge","score","n","status","createdAt","updatedAt")
+        VALUES ${values}`,
+      );
+    }
+  }, { timeout: 120_000 });
 
   console.log(`Generated ${rawCandidates.length} raw candidates.`);
   const cvNote = effectiveCvMode === "loso" ? `CV=loso min-folds-pass=${effectiveMinLosoFolds}; ` : "";
@@ -2610,18 +2787,20 @@ async function rebuildPatternV2HitsForDeployed(options?: {
     return;
   }
   const games = await loadTokenizedGames();
-  await prisma.$executeRawUnsafe(`DELETE FROM "PatternV2Hit"`);
   console.log(
     `Rebuilding PatternV2Hit for ${patterns.length} deployed patterns across ${games.length} tokenized games...`,
   );
 
+  const gamesIndex = new TokenIndex(games);
   const BATCH_SIZE = 2000;
   const rows: Array<{ patternId: string; gameId: string; hitBool: boolean; date: string }> = [];
   for (let i = 0; i < patterns.length; i++) {
     const p = patterns[i];
+    const bitmap = gamesIndex.matchBitmap(p.conditions ?? []);
     let matchedForPattern = 0;
-    for (const g of games) {
-      if (!matchesConditions(g.tokens, p.conditions ?? [])) continue;
+    for (let gi = 0; gi < games.length; gi++) {
+      if (!bitmap[gi]) continue;
+      const g = games[gi];
       const hit = g.outcomes.has(p.outcomeType);
       matchedForPattern++;
       rows.push({
@@ -2639,27 +2818,30 @@ async function rebuildPatternV2HitsForDeployed(options?: {
     }
   }
 
-  let inserted = 0;
-  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-    const batch = rows.slice(i, i + BATCH_SIZE);
-    const values = batch
-      .map(
-        (r) =>
-          `('${crypto.randomUUID()}','${sqlEsc(r.patternId)}','${sqlEsc(r.gameId)}',${r.hitBool ? "TRUE" : "FALSE"},'${r.date}')`,
-      )
-      .join(",");
-    await prisma.$executeRawUnsafe(
-      `INSERT INTO "PatternV2Hit" ("id","patternId","gameId","hitBool","date") VALUES ${values}
-       ON CONFLICT ("patternId","gameId") DO NOTHING`,
-    );
-    inserted += batch.length;
-    if (inserted % progressEveryInsert === 0 || i + BATCH_SIZE >= rows.length) {
-      const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
-      console.log(`  Hit rebuild inserts: ${inserted} (${elapsedSec}s elapsed)`);
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`DELETE FROM "PatternV2Hit"`);
+    let inserted = 0;
+    for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+      const batch = rows.slice(i, i + BATCH_SIZE);
+      const values = batch
+        .map(
+          (r) =>
+            `('${crypto.randomUUID()}','${sqlEsc(r.patternId)}','${sqlEsc(r.gameId)}',${r.hitBool ? "TRUE" : "FALSE"},'${r.date}')`,
+        )
+        .join(",");
+      await tx.$executeRawUnsafe(
+        `INSERT INTO "PatternV2Hit" ("id","patternId","gameId","hitBool","date") VALUES ${values}
+         ON CONFLICT ("patternId","gameId") DO NOTHING`,
+      );
+      inserted += batch.length;
+      if (inserted % progressEveryInsert === 0 || i + BATCH_SIZE >= rows.length) {
+        const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
+        console.log(`  Hit rebuild inserts: ${inserted} (${elapsedSec}s elapsed)`);
+      }
     }
-  }
+  }, { timeout: 300_000 });
   const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
-  console.log(`Rebuilt ${inserted} PatternV2Hit rows in ${elapsedSec}s.`);
+  console.log(`Rebuilt ${rows.length} PatternV2Hit rows in ${elapsedSec}s.`);
 }
 
 export async function validatePatternsV2(args: string[] = []): Promise<void> {
@@ -2746,10 +2928,6 @@ export async function validatePatternsV2(args: string[] = []): Promise<void> {
       fdrMethod === "perm-bh"
         ? permutationPValueFromStats(p.valStats, fdrPermutations, rng)
         : oneSidedPValueFromStats(p.valStats);
-    const pForward =
-      fdrMethod === "perm-bh"
-        ? permutationPValueFromStats(p.forwardStats, fdrPermutations, rng)
-        : oneSidedPValueFromStats(p.forwardStats);
     evalRows.push({
       id: p.id,
       status: p.status,
@@ -2757,7 +2935,7 @@ export async function validatePatternsV2(args: string[] = []): Promise<void> {
       trainOk,
       valOk,
       forwardOk,
-      pValue: fisherCombinedPValue(pVal, pForward),
+      pValue: pVal,
     });
   }
 
@@ -2777,6 +2955,7 @@ export async function validatePatternsV2(args: string[] = []): Promise<void> {
   const familyEligible = new Map<string, number>();
   const familyPassed = new Map<string, number>();
 
+  const statusGroups = new Map<string, string[]>();
   for (let i = 0; i < evalRows.length; i++) {
     const row = evalRows[i];
     let nextStatus = "candidate";
@@ -2798,19 +2977,29 @@ export async function validatePatternsV2(args: string[] = []): Promise<void> {
       const family = outcomeFamily(patterns[i]?.outcomeType ?? "");
       familyEligible.set(family, (familyEligible.get(family) ?? 0) + 1);
     }
+    const group = statusGroups.get(nextStatus) ?? [];
+    group.push(row.id);
+    statusGroups.set(nextStatus, group);
+  }
 
-    const retiredAt = nextStatus === "retired" ? "NOW()" : "NULL";
-    await prisma.$executeRawUnsafe(
-      `UPDATE "PatternV2"
-       SET "status" = '${nextStatus}', "retiredAt" = ${retiredAt}, "updatedAt" = NOW()
-       WHERE "id" = '${sqlEsc(row.id)}'`,
-    );
-    if ((i + 1) % progressEvery === 0 || i + 1 === evalRows.length) {
-      const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
-      console.log(
-        `Validate progress: ${i + 1}/${evalRows.length} (deployed=${deployed}, validated=${validated}, retired=${retired}, candidate=${candidates}, ${elapsedSec}s elapsed)`,
+  const UPDATE_BATCH = 500;
+  for (const [status, ids] of statusGroups) {
+    const retiredAt = status === "retired" ? "NOW()" : "NULL";
+    for (let i = 0; i < ids.length; i += UPDATE_BATCH) {
+      const batch = ids.slice(i, i + UPDATE_BATCH);
+      const inList = batch.map((id) => `'${sqlEsc(id)}'`).join(",");
+      await prisma.$executeRawUnsafe(
+        `UPDATE "PatternV2"
+         SET "status" = '${status}', "retiredAt" = ${retiredAt}, "updatedAt" = NOW()
+         WHERE "id" IN (${inList})`,
       );
     }
+  }
+  {
+    const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
+    console.log(
+      `Validate progress: ${evalRows.length}/${evalRows.length} (deployed=${deployed}, validated=${validated}, retired=${retired}, candidate=${candidates}, ${elapsedSec}s elapsed)`,
+    );
   }
 
   await rebuildPatternV2HitsForDeployed({
@@ -2831,7 +3020,7 @@ export async function validatePatternsV2(args: string[] = []): Promise<void> {
     );
   }
   console.log(
-    `FDR gate: method=${fdrMethod} (stratified by family, Fisher combined p-values), alpha=${fdrAlpha.toFixed(3)} | eligible=${fdrEligible.length} | passed=${fdrPass.size}` +
+    `FDR gate: method=${fdrMethod} (stratified by family, val-only p-values), alpha=${fdrAlpha.toFixed(3)} | eligible=${fdrEligible.length} | passed=${fdrPass.size}` +
       (fdrMethod === "perm-bh" ? ` | permutations=${fdrPermutations}, seed=${fdrSeed}` : ""),
   );
   const familyRows = [...new Set([...familyEligible.keys(), ...familyPassed.keys()])].sort();
@@ -2947,6 +3136,7 @@ export async function monitorPatternDecay(args: string[] = []): Promise<void> {
     }
   }
   const totalPatterns = deployedPatterns.length;
+  const retireIds: string[] = [];
   for (const { id: patternId, outcomeType } of deployedPatterns) {
     processed++;
     const hits = byPattern.get(patternId) ?? [];
@@ -2966,17 +3156,22 @@ export async function monitorPatternDecay(args: string[] = []): Promise<void> {
 
     const collapseByDecay = windows.some((w) => w.n >= minSamples && w.edge <= collapseEdge);
     const collapseByClv = clvBadOutcomes.has(outcomeType);
-    const collapse = collapseByDecay || collapseByClv;
-    if (collapse) {
-      await prisma.$executeRawUnsafe(
-        `UPDATE "PatternV2" SET "status" = 'retired', "retiredAt" = NOW(), "updatedAt" = NOW() WHERE "id" = '${sqlEsc(patternId)}'`,
-      );
+    if (collapseByDecay || collapseByClv) {
+      retireIds.push(patternId);
       retired++;
     }
     if (processed % 25 === 0 || processed === totalPatterns) {
       const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
       console.log(`Decay progress: ${processed}/${totalPatterns} patterns checked (${retired} retired, ${elapsedSec}s elapsed)`);
     }
+  }
+  const RETIRE_BATCH = 500;
+  for (let i = 0; i < retireIds.length; i += RETIRE_BATCH) {
+    const batch = retireIds.slice(i, i + RETIRE_BATCH);
+    const inList = batch.map((id) => `'${sqlEsc(id)}'`).join(",");
+    await prisma.$executeRawUnsafe(
+      `UPDATE "PatternV2" SET "status" = 'retired', "retiredAt" = NOW(), "updatedAt" = NOW() WHERE "id" IN (${inList})`,
+    );
   }
 
   if (retired > 0) {

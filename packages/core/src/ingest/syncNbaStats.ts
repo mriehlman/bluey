@@ -124,9 +124,9 @@ export async function syncNbaStatsForDate(date: string): Promise<number> {
         console.log(`  Created game ${box.gameId} (${game.id})`);
       }
     } else {
-      // Update existing game with final scores/status from box score
-      const hasScores = (box.homeScore ?? 0) > 0 || (box.awayScore ?? 0) > 0;
-      if (hasScores && (!game.homeScore || !game.awayScore || !game.status?.includes("Final"))) {
+      const statusIsNotFinal = !game.status?.trim().includes("Final");
+      const newHasScores = (box.homeScore ?? 0) > 0 || (box.awayScore ?? 0) > 0;
+      if (statusIsNotFinal && newHasScores) {
         await prisma.game.update({
           where: { id: game.id },
           data: {
@@ -135,6 +135,7 @@ export async function syncNbaStatsForDate(date: string): Promise<number> {
             status: (box as any).status ?? "Final",
           },
         });
+        console.log(`  Updated game ${game.id} to final: ${box.homeScore}-${box.awayScore}`);
       }
     }
 
@@ -244,11 +245,14 @@ export async function syncNbaStatsForDateRange(startDate: string, endDate: strin
 
 /** Sync upcoming/scheduled games for a date using nba_api (no BallDontLie). */
 export async function syncUpcomingFromNba(date: string): Promise<number> {
+  await catchUpUnfinishedGames();
+
   console.log(`Fetching games for ${date} from nba_api...`);
   const games = await fetchGamesForDate(date);
   console.log(`  Found ${games.length} games`);
 
   let upserted = 0;
+  let updated = 0;
   for (const g of games) {
     const homeTeamBdl = NBA_TO_BDL_TEAM[g.homeTeamId] ?? g.homeTeamId;
     const awayTeamBdl = NBA_TO_BDL_TEAM[g.awayTeamId] ?? g.awayTeamId;
@@ -265,14 +269,9 @@ export async function syncUpcomingFromNba(date: string): Promise<number> {
       },
     });
     if (existing) {
-      // Update existing game with final scores when we have them
-      const hasScores = (g.homeScore ?? 0) > 0 || (g.awayScore ?? 0) > 0;
-      const needsUpdate =
-        hasScores &&
-        (!existing.homeScore ||
-          !existing.awayScore ||
-          !existing.status?.includes("Final"));
-      if (needsUpdate) {
+      const statusIsNotFinal = !existing.status?.trim().includes("Final");
+      const newHasScores = (g.homeScore ?? 0) > 0 || (g.awayScore ?? 0) > 0;
+      if (statusIsNotFinal && newHasScores) {
         await prisma.game.update({
           where: { id: existing.id },
           data: {
@@ -281,6 +280,7 @@ export async function syncUpcomingFromNba(date: string): Promise<number> {
             status: g.status ?? "Final",
           },
         });
+        updated++;
       }
       continue;
     }
@@ -306,6 +306,54 @@ export async function syncUpcomingFromNba(date: string): Promise<number> {
     });
     upserted++;
   }
-  console.log(`  Upserted ${upserted} games`);
-  return upserted;
+  console.log(`  Upserted ${upserted} new games, updated ${updated} existing games`);
+  return upserted + updated;
+}
+
+async function catchUpUnfinishedGames(): Promise<void> {
+  const threeDaysAgo = new Date(Date.now() - 3 * 86_400_000);
+  const unfinished = await prisma.game.findMany({
+    where: {
+      date: { gte: threeDaysAgo },
+      NOT: { status: { contains: "Final" } },
+    },
+    include: { homeTeam: true, awayTeam: true },
+  });
+  if (unfinished.length === 0) return;
+
+  console.log(`Catching up ${unfinished.length} unfinished games from recent days...`);
+  const dateSet = new Set(unfinished.map((g) => g.date.toISOString().slice(0, 10)));
+  let caught = 0;
+
+  for (const dateStr of dateSet) {
+    const apiGames = await fetchGamesForDate(dateStr);
+    for (const ag of apiGames) {
+      if ((ag.homeScore ?? 0) === 0 && (ag.awayScore ?? 0) === 0) continue;
+      const homeTeamBdl = NBA_TO_BDL_TEAM[ag.homeTeamId] ?? ag.homeTeamId;
+      const awayTeamBdl = NBA_TO_BDL_TEAM[ag.awayTeamId] ?? ag.awayTeamId;
+      const gameDate = dateStringToUtcMidday(ag.date);
+      const match = await prisma.game.findFirst({
+        where: {
+          date: gameDate,
+          NOT: { status: { contains: "Final" } },
+          OR: [
+            { homeTeamId: homeTeamBdl, awayTeamId: awayTeamBdl },
+            { homeTeamId: awayTeamBdl, awayTeamId: homeTeamBdl },
+          ],
+        },
+      });
+      if (match) {
+        await prisma.game.update({
+          where: { id: match.id },
+          data: {
+            homeScore: ag.homeScore ?? 0,
+            awayScore: ag.awayScore ?? 0,
+            status: ag.status ?? "Final",
+          },
+        });
+        caught++;
+      }
+    }
+  }
+  if (caught > 0) console.log(`  Updated ${caught} previously-unfinished games to final`);
 }
