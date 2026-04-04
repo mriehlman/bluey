@@ -1,0 +1,46 @@
+name: Daily Sync & Predict
+
+on:
+  schedule:
+    # 7:30 AM Eastern (11:30 UTC during EDT, 12:30 UTC during EST)
+    - cron: "30 11 * * *"
+    # 5:00 PM Eastern (21:00 UTC during EDT, 22:00 UTC during EST)
+    - cron: "0 21 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Override date (YYYY-MM-DD)"
+        required: false
+
+env:
+  DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+  ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: bunx prisma generate --schema packages/db/prisma/schema.prisma
+
+      - name: Sync yesterday's completed games
+        run: bun run cli sync:daily
+
+      - name: Sync upcoming games & generate predictions
+        run: |
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            bun run cli predict:today -- --date ${{ github.event.inputs.date }}
+          else
+            bun run cli predict:today
+          fi
